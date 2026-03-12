@@ -5,12 +5,17 @@ class UserGroupService {
         const pool = await poolPromise;
         const result = await pool.request()
             .execute('mp_UserGroupGet');
-        return result.recordset.map((row: any) => ({
-            userGroupNo: row.UserGroupNo,
-            userGroupName: row.UserGroupName,
-            levelFlag: row.LevelFlag,
-            chkuser: row.ChkUser
-        }));
+            
+        return result.recordset
+            .filter((row: any) => row.Display) 
+            .map((row: any) => ({
+                userGroupNo: row.UserGroupNo,
+                userGroupName: row.UserGroupName,
+                userGroupRole: row.UserGroupRole,
+                levelFlag: row.LevelFlag,
+                chkuser: row.ChkUser,
+                display: row.Display
+            }));
     }
 
     async getLevelsInGroup(userGroupNo: string, levelFlag: number) {
@@ -139,12 +144,16 @@ class UserGroupService {
 
     async getGroupsForUser(employeeID: string) {
         const pool = await poolPromise;
+        console.log(`Fetching groups for user: ${employeeID}`);
         const result = await pool.request()
-            .input('EmployeeID', sql.NVarChar, employeeID)
+            .input('EmployeeID', sql.VarChar(8), employeeID)
             .execute('mp_UserInGroupByEmployeeID');
+
+        console.log(`Found ${result.recordset.length} groups for user ${employeeID}`);
         return result.recordset.map((row: any) => ({
             userGroupNo: row.UserGroupNo,
-            userGroupName: row.UserGroupName
+            userGroupName: row.UserGroupName,
+            userGroupRole: row.UserGroupRole
         }));
 
     }

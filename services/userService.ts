@@ -3,32 +3,62 @@ import configService from './configService.js';
 import { nanoid } from 'nanoid';
 
 class UserService {
-    async syncUserFromPIS(employeeID: string) {
-        if (!employeeID) return null;
+    async getUserWithPassword(employeeID: string) {
+        try {
+            const pool = await poolPromise;
+            const result = await pool.request()
+                .input('EmployeeID', sql.VarChar(20), employeeID)
+                .query(`
+                    SELECT UserID, EmployeeID, Password, FullName Name, Email
+                    FROM mp_User 
+                    WHERE EmployeeID = @EmployeeID
+                `);
+
+            if (result.recordset && result.recordset.length > 0) {
+                return result.recordset[0];
+            }
+            return null;
+        } catch (error) {
+            console.error('Error fetching user with password:', error);
+            throw error;
+        }
+    }
+
+    async syncUserFromAD(rawEmployeeID: string) {
+        if (!rawEmployeeID) return null;
+        
+        // Sanitize Test Accounts where Email Prefix is longer than 20 chars (e.g. Test-01-CL6900001-SWP)
+        let employeeID = rawEmployeeID;
+        if (employeeID.length > 20) {
+            if (employeeID.includes('-CL')) {
+                employeeID = employeeID.split('-CL')[0];
+            } else {
+                employeeID = employeeID.substring(0, 20);
+            }
+        }
 
         try {
             const pool = await poolPromise;
 
-            // 1. Fetch from PIS first
-            const pisData = await configService.getPosCode(employeeID);
+            // 1. Fetch from AD (CA&A)
+            const adData = await configService.getUserAD(employeeID);
 
-            if (!pisData) {
-                console.warn(`User ${employeeID} not found in PIS.`);
+            if (!adData) {
+                console.warn(`User ${employeeID} not found in AD.`);
                 return null;
             }
 
-            // 2. Map PIS Data
+            // 2. Map AD Data
             const newUserId = nanoid();
-            const fullName = pisData.FULLNAMETH || '';
-            const orgUnit = pisData.UNITCODE || '';
-            const position = pisData.POSCODE || '';
-            const email = pisData.EMAIL || '';
+            const fullName = adData.FULLNAMETH || '';
+            const email = adData.EMAIL || '';
+            
 
             let beginDate = new Date();
             const potentialDateFields = ['STARTDATE', 'ENTRYDATE', 'BEGINDATE', 'BeginDate', 'StartDate'];
             for (const field of potentialDateFields) {
-                if (pisData[field]) {
-                    const parsedDate = new Date(pisData[field]);
+                if (adData[field]) {
+                    const parsedDate = new Date(adData[field]);
                     if (!isNaN(parsedDate.getTime())) {
                         beginDate = parsedDate;
                         break;
@@ -36,33 +66,29 @@ class UserService {
                 }
             }
 
-            // 3. Execute mp_AddUser (Stored Procedure handles Check & Insert & Select)
+            // 3. Execute SP mp_AddUser
             const result = await pool.request()
                 .input('UserID', sql.VarChar(21), newUserId)
                 .input('EmployeeID', sql.VarChar(20), employeeID)
                 .input('BeginDate', sql.DateTime, beginDate)
                 .input('FullName', sql.NVarChar(200), fullName)
-                .input('OrgUnit', sql.VarChar(8), orgUnit)
-                .input('Position', sql.VarChar(8), position)
                 .input('Email', sql.NVarChar(200), email)
                 .execute('mp_AddUser');
 
-            // 4. Return User Data from SP Result
+            // 4. Return User Data
             if (result.recordset && result.recordset.length > 0) {
                 const row = result.recordset[0];
                 return {
                     UserID: row.UserID,
                     EmployeeID: row.EmployeeID,
                     Name: row.FullName || row.Name,
-                    OrgUnit: row.OrgUnit,
-                    Position: row.Position,
                     Email: row.Email
                 };
             }
             return null;
 
         } catch (error) {
-            console.error("Error in syncUserFromPIS:", error);
+            console.error("Error in syncUserFromAD:", error);
             throw error;
         }
     }
@@ -93,6 +119,29 @@ class UserService {
             return null;
         } catch (error) {
             console.error("Error in checkUserOther:", error);
+            return null;
+        }
+    }
+
+    async getUserByEmployeeID(employeeID: string) {
+        try {
+            const pool = await poolPromise;
+            const result = await pool.request()
+                .input('EmployeeID', sql.VarChar(20), employeeID)
+                .execute('mp_UserGetByEmployeeID'); 
+
+            if (result.recordset && result.recordset.length > 0) {
+                const row = result.recordset[0];
+                return {
+                    UserID: row.UserID,
+                    EmployeeID: row.EmployeeID,
+                    Name: row.FullName || row.Name,
+                    Email: row.Email
+                };
+            }
+            return null;
+        } catch (error) {
+            console.error("Error in getUserByEmployeeID:", error);
             return null;
         }
     }
