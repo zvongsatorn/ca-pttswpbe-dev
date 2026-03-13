@@ -15,7 +15,7 @@ const port = Number(process.env.PORT || 5000);
 app.use('/*', secureHeaders());
 app.use('/*', cors({
     origin: (origin) => {
-        if (!origin || origin.startsWith('http://localhost')) {
+        if (!origin || origin.startsWith('http://localhost') || origin.includes('pttplc.com')) {
             return origin;
         }
         return undefined;
@@ -25,7 +25,13 @@ app.use('/*', cors({
     credentials: true,
 }));
 app.use('/*', csrf({
-    origin: ['http://localhost:3000', 'http://127.0.0.1:3000', 'http://localhost:5000']
+    origin: (origin) => {
+        if (!origin) return true;
+        if (origin.startsWith('http://localhost') || origin.startsWith('http://127.0.0.1') || origin.includes('pttplc.com')) {
+            return true;
+        }
+        return false;
+    }
 }));
 // Serve uploaded files statically
 app.use('/uploads/*', serveStatic({ root: './' }));
