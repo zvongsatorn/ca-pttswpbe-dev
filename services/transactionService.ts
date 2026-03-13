@@ -81,10 +81,10 @@ export const saveDraftTransactionService = async (
                 const mm = monthIndex.toString().padStart(2, '0');
                 const prefix = `TR${adYY}${mm}`;
 
-                // Use sp mp_TransactionsLastNoGet to find the latest TransactionNo with this prefix
-                const lastTrReq = new sql.Request(transaction);
-                lastTrReq.input('Prefix', sql.VarChar(10), prefix);
-                const lastTrRes = await lastTrReq.execute('mp_TransactionsLastNoGet');
+                // Use raw query instead of missing sp mp_TransactionsLastNoGet
+                const lastTrRes = await transaction.request()
+                    .input('Prefix', sql.VarChar(10), prefix)
+                    .query(`SELECT TOP 1 TransactionNo FROM MP_Transactions WHERE TransactionNo LIKE @Prefix + '%' ORDER BY TransactionNo DESC`);
 
                 let runningNumber = 1;
                 if (lastTrRes.recordset && lastTrRes.recordset.length > 0 && lastTrRes.recordset[0].TransactionNo) {
@@ -103,15 +103,18 @@ export const saveDraftTransactionService = async (
 
             if (!existingTransactionNo) {
                 if (payload.transactionType === 5) {
-                    // mp_RemarkInsert
-                    const req = new sql.Request(transaction);
-                    req.input('TransactionNo', sql.VarChar(10), transactionNo);
-                    req.input('OrgUnitNo', sql.VarChar(8), payload.unitReceive);
-                    req.input('Note', sql.NVarChar(500), payload.remark);
-                    req.input('Status', sql.Int, status);
-                    req.input('CreateBy', sql.VarChar(20), createBy);
-                    req.input('CreateDate', sql.DateTime, createDate);
-                    await req.execute('mp_RemarkInsert');
+                    // Use raw query instead of missing mp_RemarkInsert
+                    await transaction.request()
+                        .input('TransactionNo', sql.VarChar(10), transactionNo)
+                        .input('OrgUnitNo', sql.VarChar(8), payload.unitReceive)
+                        .input('Note', sql.NVarChar(500), payload.remark)
+                        .input('Status', sql.Int, status)
+                        .input('CreateBy', sql.VarChar(20), createBy)
+                        .input('CreateDate', sql.DateTime, createDate)
+                        .query(`
+                            INSERT INTO MP_Remark (TransactionNo, OrgUnitNo, Note, Status, CreateBy, CreateDate)
+                            VALUES (@TransactionNo, @OrgUnitNo, @Note, @Status, @CreateBy, @CreateDate)
+                        `);
                 } else {
                     // mp_TransactionsInsert
                     const req = new sql.Request(transaction);
@@ -169,19 +172,19 @@ export const saveDraftTransactionService = async (
         } // End of if (!existingTransactionNo)
 
         // mp_TransactionFileInsert (if file provided)
-        if ((payload.transactionType !== 5) && payload.fileName && payload.fileUrl) {
-                const fileReq = new sql.Request(transaction);
-                fileReq.input('EffectiveDate', sql.DateTime, effectiveDate);
-                fileReq.input('TransactionNo', sql.VarChar(10), transactionNo);
-                fileReq.input('FileName', sql.NVarChar(100), payload.fileName);
-                fileReq.input('FileUpload', sql.NVarChar(50), payload.fileUrl);
-                fileReq.input('CreateBy', sql.VarChar(20), createBy);
-                fileReq.input('CreateDate', sql.DateTime, createDate);
-                // For existing files, pass the existing TransactionFileID. For new files, pass 0 as before.
-                fileReq.input('RefID', sql.Decimal(18,0), payload.refId ? payload.refId : 0); 
-
-                await fileReq.execute('mp_TransactionFileInsert');
-            }
+                // Use raw query instead of missing mp_TransactionFileInsert
+                await transaction.request()
+                    .input('EffectiveDate', sql.DateTime, effectiveDate)
+                    .input('TransactionNo', sql.VarChar(10), transactionNo)
+                    .input('FileName', sql.NVarChar(100), payload.fileName)
+                    .input('FileUpload', sql.NVarChar(50), payload.fileUrl)
+                    .input('CreateBy', sql.VarChar(20), createBy)
+                    .input('CreateDate', sql.DateTime, createDate)
+                    .input('RefID', sql.Decimal(18,0), payload.refId ? payload.refId : 0)
+                    .query(`
+                        INSERT INTO MP_TransactionFile (EffectiveDate, TransactionNo, FileName, FileUpload, CreateBy, CreateDate, RefID)
+                        VALUES (@EffectiveDate, @TransactionNo, @FileName, @FileUpload, @CreateBy, @CreateDate, @RefID)
+                    `);
 
             await transaction.commit();
             return { success: true, transactionNo, message: 'Draft saved successfully' };
@@ -206,7 +209,16 @@ export const getDraftTransactionsService = async (employeeId: string, effectiveD
         req.input('Status', sql.Int, 1); // 1 = Draft
         req.input('EmployeeID', sql.VarChar(10), employeeId);
 
-        const result = await req.execute('mp_TransactionsByEmployeeIDAndStatus');
+        // Use raw query as fallback for missing stored procedure
+        const query = `
+            SELECT * 
+            FROM MP_Transactions 
+            WHERE EffectiveDate = @EffectiveDate 
+              AND Status = @Status 
+              AND CreateBy = @EmployeeID
+            ORDER BY CreateDate DESC
+        `;
+        const result = await req.query(query);
         
         if (!result || !result.recordset || result.recordset.length === 0) {
             return [];
@@ -214,51 +226,44 @@ export const getDraftTransactionsService = async (employeeId: string, effectiveD
 
         const records = result.recordset;
 
-        // Collect unique LevelGroupNo values from all returned records
+        // Collect unique IDs to fetch names in parallel
         const levelGroupNos = new Set<string>();
-        records.forEach((r: { LevelGroupTo?: string; LevelGroupFrom?: string }) => {
+        const unitNos = new Set<string>();
+        records.forEach((r: any) => {
             if (r.LevelGroupTo) levelGroupNos.add(r.LevelGroupTo);
             if (r.LevelGroupFrom) levelGroupNos.add(r.LevelGroupFrom);
-        });
-
-        // Fetch LevelGroupName for each unique LevelGroupNo
-        const levelGroupNameMap: Record<string, string> = {};
-        for (const lgNo of levelGroupNos) {
-            try {
-                const lgReq = new sql.Request(pool);
-                lgReq.input('LevelGroupNo', sql.VarChar(4), lgNo);
-                const lgRes = await lgReq.execute('mp_LevelGroupGetByNo');
-                if (lgRes.recordset && lgRes.recordset.length > 0) {
-                    levelGroupNameMap[lgNo] = lgRes.recordset[0].LevelGroupName || lgNo;
-                }
-            } catch {
-                levelGroupNameMap[lgNo] = lgNo; // fallback to the code
-            }
-        }
-
-        // Collect unique unit codes from all returned records
-        const unitNos = new Set<string>();
-        records.forEach((r: { UnitTransfer?: string; UnitReceive?: string }) => {
             if (r.UnitTransfer) unitNos.add(r.UnitTransfer);
             if (r.UnitReceive) unitNos.add(r.UnitReceive);
         });
 
-        // Fetch UnitName for each unique unit code
+        const levelGroupNameMap: Record<string, string> = {};
         const unitNameMap: Record<string, string> = {};
-        for (const unitNo of unitNos) {
-            unitNameMap[unitNo] = await getUnitName(pool, effectiveDate, unitNo);
-        }
 
-        // Attach names to each record
-        const enriched = records.map((r: { LevelGroupTo?: string; LevelGroupFrom?: string; UnitTransfer?: string; UnitReceive?: string; [key: string]: unknown }) => ({
+        // Fetch all names in parallel to avoid N+1 sequential DB calls
+        await Promise.all([
+            ...Array.from(levelGroupNos).map(async (lgNo) => {
+                try {
+                    const lgReq = new sql.Request(pool);
+                    lgReq.input('LevelGroupNo', sql.VarChar(4), lgNo);
+                    const lgRes = await lgReq.execute('mp_LevelGroupGetByNo');
+                    levelGroupNameMap[lgNo] = lgRes.recordset?.[0]?.LevelGroupName || lgNo;
+                } catch {
+                    levelGroupNameMap[lgNo] = lgNo;
+                }
+            }),
+            ...Array.from(unitNos).map(async (unitNo) => {
+                unitNameMap[unitNo] = await getUnitName(pool, effectiveDate, unitNo);
+            })
+        ]);
+
+        // Attach resolved names to records
+        return records.map((r: any) => ({
             ...r,
             LevelGroupToName: r.LevelGroupTo ? (levelGroupNameMap[r.LevelGroupTo] || r.LevelGroupTo) : '',
             LevelGroupFromName: r.LevelGroupFrom ? (levelGroupNameMap[r.LevelGroupFrom] || r.LevelGroupFrom) : '',
             UnitTransferName: r.UnitTransfer ? (unitNameMap[r.UnitTransfer] || r.UnitTransfer) : '',
             UnitReceiveName: r.UnitReceive ? (unitNameMap[r.UnitReceive] || r.UnitReceive) : '',
         }));
-
-        return enriched;
     } catch (error) {
         console.error('Error in getDraftTransactionsService:', error);
         throw error;
@@ -316,14 +321,17 @@ export const getExistingFilesService = async (
 export const deleteDraftTransactionService = async (transactionNo: string, updateBy: string) => {
     try {
         const pool = await poolPromise;
-        const req = new sql.Request(pool);
-        
-        req.input('TransactionNo', sql.VarChar(10), transactionNo);
-        req.input('Status', sql.VarChar(20), '0'); // 0 = Deleted
-        req.input('UpdateBy', sql.VarChar(20), updateBy);
-        req.input('UpdateDate', sql.DateTime, new Date());
-
-        await req.execute('mp_TransactionsUpdateStatus');
+        // Use raw query instead of missing mp_TransactionsUpdateStatus
+        await pool.request()
+            .input('TransactionNo', sql.VarChar(10), transactionNo)
+            .input('Status', sql.Int, 0) // 0 = Deleted
+            .input('UpdateBy', sql.VarChar(20), updateBy)
+            .input('UpdateDate', sql.DateTime, new Date())
+            .query(`
+                UPDATE MP_Transactions 
+                SET Status = @Status, UpdateBy = @UpdateBy, UpdateDate = @UpdateDate 
+                WHERE TransactionNo = @TransactionNo
+            `);
         return { success: true };
     } catch (error) {
         console.error('Error in deleteDraftTransactionService:', error);
