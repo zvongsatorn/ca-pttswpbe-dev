@@ -141,7 +141,8 @@ class AuthController {
                 }, b2cPayload);
             } else {
                 const caaClientId = await configService.getConfig('CAA_CLIENT_ID');
-                const targetUrl = `${caaUrl}/auth/ad/${caaClientId}`;
+                // Updated endpoint path to resolve 404 Not Found errors during AD validation
+                const targetUrl = `${caaUrl}/auth/login/ad/${caaClientId}`;
                 
                 const adPayload = {
                     v: JSON.stringify({
