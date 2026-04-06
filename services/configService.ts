@@ -1,11 +1,5 @@
 import { sql, poolPromise } from '../config/db.js';
 import https from 'https';
-import { URL } from 'url';
-import { spawnSync, execSync } from 'child_process';
-import fs from 'fs';
-import path from 'path';
-import os from 'os';
-import { nanoid } from 'nanoid';
 
 class ConfigService {
     configCache: Record<string, string> = {};
@@ -61,77 +55,79 @@ class ConfigService {
     }
 
     /**
-     * Direct curl-based request helper to bypass Node.js networking hangs on corporate VPN.
+     * HTTP request helper using native Node.js https module.
+     * Replaces the previous curl-based approach to avoid external binary dependencies.
      */
     public async curlRequest(url: string, method: string, headers: Record<string, string>, payload?: any): Promise<any> {
-        let payloadFile = "";
-        try {
-            const effectivePayload = payload;
+        return new Promise((resolve, reject) => {
+            console.log(`[configService] Fetching (NATIVE): ${method} ${url}`);
 
-            if (effectivePayload) {
-                payloadFile = path.join(os.tmpdir(), `caa-payload-${nanoid()}.json`);
-                fs.writeFileSync(payloadFile, JSON.stringify(effectivePayload));
+            const bodyStr = payload ? JSON.stringify(payload) : undefined;
+
+            const requestHeaders: Record<string, string> = { ...headers };
+            if (bodyStr && !requestHeaders['Content-Type']) {
+                requestHeaders['Content-Type'] = 'application/json';
+            }
+            if (bodyStr) {
+                requestHeaders['Content-Length'] = Buffer.byteLength(bodyStr).toString();
             }
 
-            const headerArgs: string[] = [];
-            for (const [key, val] of Object.entries(headers)) {
-                headerArgs.push("-H", `${key}: ${val}`);
-            }
+            const parsedUrl = new URL(url);
+            const isHttps = parsedUrl.protocol === 'https:';
+            const httpModule = isHttps ? https : require('node:http');
 
-            const curlArgs = [
-                "-4", "-s", "-k", "-L", 
-                "--connect-timeout", "30",
-                "--max-time", "120",
-                "-X", method, 
-                ...headerArgs,
-                url
-            ];
+            const options = {
+                hostname: parsedUrl.hostname,
+                port: parsedUrl.port || (isHttps ? 443 : 80),
+                path: parsedUrl.pathname + parsedUrl.search,
+                method,
+                headers: requestHeaders,
+                rejectUnauthorized: false, // equivalent to curl -k
+                timeout: 120000, // --max-time 120
+            };
 
-            if (payloadFile) {
-                curlArgs.push("--data-binary", `@${payloadFile}`);
-            }
+            const req = httpModule.request(options, (res: any) => {
+                let data = '';
+                res.on('data', (chunk: string) => { data += chunk; });
+                res.on('end', () => {
+                    console.log(`[configService] Native Response status: ${res.statusCode}`);
 
-            console.log(`[configService] Executing direct curl: curl ${curlArgs.join(' ')}`);
+                    if (res.statusCode && res.statusCode >= 400) {
+                        console.error(`[configService] Request failed with status ${res.statusCode}: ${data}`);
+                        reject(new Error(`HTTP ${res.statusCode}: ${data || 'Request failed'}`));
+                        return;
+                    }
 
-            const result = spawnSync('curl', curlArgs, { 
-                encoding: 'utf-8', 
-                timeout: 130000,
-                maxBuffer: 20 * 1024 * 1024 
+                    if (!data) {
+                        console.warn("[configService] Response returned empty body");
+                        resolve({});
+                        return;
+                    }
+
+                    try {
+                        resolve(JSON.parse(data));
+                    } catch (e) {
+                        console.warn("[configService] Failed to parse response as JSON, returning raw string");
+                        resolve(data);
+                    }
+                });
             });
-            
-            if (result.error) {
-                console.error('[configService] Curl spawn error:', result.error);
-                throw result.error;
-            }
 
-            console.log(`[configService] Curl finished. Status: ${result.status}, Signal: ${result.signal}`);
+            req.on('error', (err: any) => {
+                console.error('[configService] Native API request failed:', err.message);
+                reject(err);
+            });
 
-            if (result.status !== 0) {
-                console.error(`[configService] Curl failed with status ${result.status}`);
-                if (result.stderr) console.error('Stderr:', result.stderr.toString());
-                throw new Error(`Curl failed: ${result.stderr?.toString() || 'Unknown error'}`);
-            }
+            req.on('timeout', () => {
+                req.destroy();
+                reject(new Error('Native request timed out after 120 seconds'));
+            });
 
-            const output = result.stdout.trim();
-            if (!output) {
-                console.warn("[configService] Curl returned empty output");
-                return {};
+            if (bodyStr) {
+                req.write(bodyStr);
             }
-            
-            try {
-                return JSON.parse(output);
-            } catch (e) {
-                console.warn("[configService] Failed to parse curl output as JSON, returning raw string");
-                return output;
-            }
-        } catch (err: any) {
-            console.error('[configService] API request failed:', err.message);
-            throw err;
-        } finally {
-            if (payloadFile && fs.existsSync(payloadFile)) {
-                try { fs.unlinkSync(payloadFile); } catch (e) {}
-            }
-        }
+            req.end();
+        });
     }
 
     async getToken(): Promise<string> {

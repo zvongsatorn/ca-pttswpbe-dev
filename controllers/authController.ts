@@ -112,7 +112,7 @@ class AuthController {
             if (!systemToken) {
                 console.error("[SSO] Failed to retrieve system token from CA&A");
                 return c.json({ 
-                    message: 'Failed to retrieve system token from CA&A. Check backend logs for curl errors.', 
+                    message: 'Failed to retrieve system token from CA&A. Check backend logs for native request errors.', 
                     error: 'CAA_TOKEN_FAILURE' 
                 }, 500);
             }
