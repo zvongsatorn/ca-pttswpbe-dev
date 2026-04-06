@@ -1,0 +1,38 @@
+{
+    "name": "pttswp-backend",
+    "version": "1.0.0",
+    "description": "Node.js backend for PTTSWP",
+    "main": "index.js",
+    "scripts": {
+        "start": "tsx index.ts",
+        "dev": "tsx watch index.ts",
+        "build": "tsc",
+        "start:prod": "cross-env NODE_ENV=production node dist/index.js",
+        "start:local": "cross-env NODE_ENV=local tsx index.ts",
+        "start:test": "cross-env NODE_ENV=test tsx index.ts",
+        "start:dev": "cross-env NODE_ENV=dev tsx index.ts"
+    },
+    "dependencies": {
+        "@hono/node-server": "^1.19.9",
+        "bcrypt": "^6.0.0",
+        "bcryptjs": "^3.0.3",
+        "dotenv": "^17.3.1",
+        "exceljs": "^4.4.0",
+        "hono": "^4.11.5",
+        "jsonwebtoken": "^9.0.3",
+        "jwt-decode": "^4.0.0",
+        "mssql": "^10.0.2",
+        "nanoid": "^5.1.6"
+    },
+    "devDependencies": {
+        "@types/bcrypt": "^6.0.0",
+        "@types/bcryptjs": "^2.4.6",
+        "@types/jsonwebtoken": "^9.0.10",
+        "@types/mssql": "^9.1.9",
+        "@types/node": "^25.0.10",
+        "cross-env": "^10.1.0",
+        "nodemon": "^3.1.0",
+        "tsx": "^4.21.0",
+        "typescript": "^5.9.3"
+    }
+}

@@ -1,0 +1,42 @@
+# Dependency directories
+node_modules/
+/jspm_packages
+
+# Debug logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+bun-debug.log*
+
+# Environment variables
+.env*
+
+# SQL database files
+*.sql
+
+# TypeScript
+*.tsbuildinfo
+
+# Build output
+dist/
+build/
+
+# IDE & OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Docker
+*.dockerignore
+
+# Test and Utility Scripts (Not used in production)
+check*.*
+test*.*
+get_*.*
+update*.*
+apply*.*
+read_*.*
+decodeToken.ts
+backend.log
+*env.txt
