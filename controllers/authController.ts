@@ -141,13 +141,14 @@ class AuthController {
                 }, b2cPayload);
             } else {
                 const caaClientId = await configService.getConfig('CAA_CLIENT_ID');
-                // Reverting back to original endpoint path
-                const targetUrl = `${caaUrl}/auth/ad/${caaClientId}`;
+                // The Postman collection confirms the AD endpoint is just /auth/ad (no ID in path)
+                const targetUrl = caaUrl.endsWith('/') ? `${caaUrl}auth/ad` : `${caaUrl}/auth/ad`;
                 
                 const adPayload = {
                     v: JSON.stringify({
                         tenant_id: process.env.NEXT_PUBLIC_AZURE_TENANT_ID || '',
                         client_id: caaClientId,
+                        access_token: accessToken, // Added from Postman docs
                         validated_claims: "",
                         object_id: ""
                     })
