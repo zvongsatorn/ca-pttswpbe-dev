@@ -9,6 +9,13 @@ const config: sql.config = {
     server: process.env.DB_SERVER!,
     database: process.env.DB_DATABASE!,
     port: parseInt(process.env.DB_PORT || '1433', 10),
+    pool: {
+        max: 20,
+        min: 0,
+        idleTimeoutMillis: 30000 // Prevent silent TCP connection drops
+    },
+    connectionTimeout: 30000, // 30s instead of default 15s
+    requestTimeout: 30000,
     options: {
         encrypt: true,
         trustServerCertificate: true
