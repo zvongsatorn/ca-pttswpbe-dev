@@ -37,6 +37,8 @@ class ConfigService {
             return results;
         }
 
+        console.log(`[configService] ${missingKeys.length} configs missing from cache, fetching from DB...`);
+
         try {
             const pool = await poolPromise;
             const request = pool.request();

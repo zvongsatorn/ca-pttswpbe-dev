@@ -8,6 +8,7 @@ import {
     getMKDDetailsService,
     createMainKeyService,
     updateMainKeyService,
+    createDetailKeyService,
     updateDetailKeyService,
     deleteKeyService,
     uploadFileService,
@@ -259,22 +260,37 @@ export const updateDetailKey = async (c: Context) => {
             coefficient,
             remark,
             user,
-            yearlyData // Expected format: [{ id: ManDriverKeyYearID, year: '2565', amount: 10 }, ...]
+            yearlyData, // Expected format: [{ id: ManDriverKeyYearID, year: '2565', amount: 10 }, ...]
+            insertType,
+            effectiveYear
         } = body;
 
         if (!manDriverKeyId) {
              return c.json({ message: 'Missing Key ID' }, 400);
         }
 
-        await updateDetailKeyService(
-            id,
-            manDriverKeyId,
-            definition,
-            coefficient,
-            remark,
-            user || 'SYSTEM',
-            yearlyData
-        );
+        if (insertType === 2 || insertType === '2') {
+            await createDetailKeyService(
+                id,
+                manDriverKeyId, // This is parentId in insert case
+                definition,
+                coefficient,
+                remark,
+                user || 'SYSTEM',
+                effectiveYear,
+                yearlyData
+            );
+        } else {
+            await updateDetailKeyService(
+                id,
+                manDriverKeyId,
+                definition,
+                coefficient,
+                remark,
+                user || 'SYSTEM',
+                yearlyData
+            );
+        }
 
         return c.json({ success: true, message: 'Detail key saved' }, 200);
 
@@ -653,6 +669,46 @@ export const getFile = async (c: Context) => {
         });
     } catch (error: any) {
         console.error('Error getting file:', error);
+        return c.json({ success: false, message: 'Internal server error' }, 500);
+    }
+};
+
+export const filesProxy = async (c: Context) => {
+    try {
+        const filePathParam = c.req.query('path');
+        if (!filePathParam) {
+            return c.json({ message: 'Missing path parameter' }, 400);
+        }
+
+        // Basic safety check: Prevent directory traversal
+        if (filePathParam.includes('..')) {
+            return c.json({ message: 'Invalid path' }, 403);
+        }
+
+        const fullPath = path.join(process.cwd(), 'uploads', 'mkd', filePathParam);
+        
+        if (!fs.existsSync(fullPath)) {
+            console.log('[Proxy Logic] File not found:', fullPath);
+            return c.json({ message: 'File not found' }, 404);
+        }
+
+        const fileBuffer = fs.readFileSync(fullPath);
+        const fileName = path.basename(fullPath);
+        const extension = path.extname(fileName).toLowerCase();
+
+        // Map extension to content type
+        let contentType = 'application/octet-stream';
+        if (extension === '.pdf') contentType = 'application/pdf';
+        else if (extension === '.jpg' || extension === '.jpeg') contentType = 'image/jpeg';
+        else if (extension === '.png') contentType = 'image/png';
+        else if (extension === '.xlsx') contentType = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+
+        return c.body(fileBuffer, 200, {
+            'Content-Type': contentType,
+            'Content-Disposition': `inline; filename="${fileName}"`
+        });
+    } catch (error: any) {
+        console.error('Error in filesProxy:', error);
         return c.json({ success: false, message: 'Internal server error' }, 500);
     }
 };

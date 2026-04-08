@@ -51,16 +51,6 @@ export const getHistoryManDriverService = async (
             formattedDate = `${effectiveYear}-${effMonthStr}-01`;
         }
 
-        console.log('MKD History Fetch Params:', {
-            formattedDate,
-            effectiveYear,
-            requestType,
-            employeeId,
-            orgUnitNo,
-            userGroupNo,
-            division
-        });
-
         request.input('EffectiveDate', sql.DateTime, formattedDate ? new Date(formattedDate) : null);
         request.input('EffectiveYear', sql.VarChar(50), effectiveYear);
         request.input('RequestType', sql.Int, requestType);
@@ -200,7 +190,14 @@ export const getMKDDetailsService = async (manDriverId: string | number) => {
             return res.recordset || [];
         };
 
-        const [header, keys, years, files] = await Promise.all([getHeader(), getKeys(), getYears(), getFiles()]);
+        const getSummary = async () => {
+            const req = new sql.Request(pool);
+            req.input('ManDriverID', sql.Decimal, manDriverId);
+            const res = await req.execute('mp_ManDriverKeySummaryGet');
+            return res.recordset || [];
+        };
+
+        const [header, keys, years, files, summary] = await Promise.all([getHeader(), getKeys(), getYears(), getFiles(), getSummary()]);
 
         console.log(`MKD Details for ID ${manDriverId}:`, {
             hasHeader: !!header,
@@ -209,8 +206,7 @@ export const getMKDDetailsService = async (manDriverId: string | number) => {
             fileCount: files.length
         });
 
-        console.log(`[DEBUG] MKD Details for ID ${manDriverId}:`, { hasHeader: !!header, keyCount: keys?.length || 0, yearCount: years?.length || 0, keys: keys?.map(k => ({ id: k.ManDriverKeyID, parent: k.ParentID, name: k.Name || k.KeyManName })) });
-        return { header, keys, years, files };
+        return { header, keys, years, files, summary };
     } catch (error) {
         console.error('Error executing getting MKD Details:', error);
         throw error;
@@ -274,6 +270,105 @@ export const updateMainKeyService = async (
         return result.rowsAffected;
     } catch (error) {
         console.error('Error executing mp_ManDriverKeyMainUpdate:', error);
+        throw error;
+    }
+};
+
+export const createDetailKeyService = async (
+    manDriverId: string | number,
+    parentId: string | number,
+    definition: string,
+    coefficient: number,
+    remark: string,
+    createBy: string,
+    effectiveYear: string | number,
+    yearlyData: { id: number, year: string, amount: number }[]
+) => {
+    try {
+        const pool = await poolPromise;
+        const transaction = new sql.Transaction(pool);
+        await transaction.begin();
+
+        try {
+            // 0. Fetch Parent Data (Required for sub-items context)
+            const parentReq = new sql.Request(transaction);
+            parentReq.input('ParentID', sql.Decimal, parentId);
+            const parentRes = await parentReq.query('SELECT ManDriverID, KeyManID, Unit, KeyType, Weight FROM MP_ManDriverKey WHERE ManDriverKeyID = @ParentID');
+            const parentData = parentRes.recordset?.[0] || {};
+
+            // 1. Insert new Key row (inheriting parent metadata)
+            const request1 = new sql.Request(transaction);
+            request1.input('ManDriverID', sql.Decimal, manDriverId);
+            request1.input('KeyManID', sql.Decimal, parentData.KeyManID || null);
+            request1.input('Unit', sql.VarChar(50), parentData.Unit || '');
+            request1.input('KeyType', sql.Int, parentData.KeyType || 1);
+            request1.input('Weight', sql.Decimal(18, 2), parentData.Weight || 0);
+            request1.input('CreateBy', sql.VarChar(50), createBy);
+            request1.input('CreateDate', sql.DateTime, new Date());
+            request1.input('InsertType', sql.Int, 2); // Sub-item insertion
+            request1.input('EffectiveYear', sql.Int, Number(effectiveYear) || 0);
+            request1.input('ParentID', sql.Decimal, Number(parentId));
+
+            await request1.execute('mp_ManDriverKeyInsert');
+
+            // SP returns { result: 0 } on success, not the new ID.
+            // Query for the newly inserted row using known composite keys.
+            const findReq = new sql.Request(transaction);
+            findReq.input('ManDriverID', sql.Decimal, Number(manDriverId));
+            findReq.input('ParentID', sql.Decimal, Number(parentId));
+            const findRes = await findReq.query(
+                'SELECT TOP 1 ManDriverKeyID FROM MP_ManDriverKey WHERE ManDriverID = @ManDriverID AND ParentID = @ParentID AND ManDriverKeyStatus > 0 ORDER BY ManDriverKeyID DESC'
+            );
+            const newKeyId = findRes.recordset?.[0]?.ManDriverKeyID;
+
+            if (!newKeyId) {
+                throw new Error('Insertion failed: Could not find newly created key');
+            }
+
+            // 2. Update metadata (Definition, Coeff, Remark)
+            const request2 = new sql.Request(transaction);
+            request2.input('ManDriverKeyID', sql.Decimal, newKeyId);
+            request2.input('Definition', sql.VarChar(255), definition || '');
+            request2.input('Coefficient', sql.Decimal(18, 2), coefficient || 0);
+            request2.input('Remark', sql.VarChar(255), remark || '');
+            request2.input('UpdateBy', sql.VarChar(50), createBy);
+            request2.input('UpdateDate', sql.DateTime, new Date());
+            await request2.execute('mp_ManDriverKeyUpdate');
+
+            // 3. Initialize Yearly Data
+            if (yearlyData && yearlyData.length > 0) {
+                const tvp = new sql.Table('mp_ParaList');
+                tvp.columns.add('id', sql.Decimal(18, 0));
+                tvp.columns.add('year', sql.VarChar(50));
+                tvp.columns.add('amount', sql.Decimal(18, 2));
+
+                for (const item of yearlyData) {
+                    tvp.rows.add(0, item.year, item.amount || 0); // id 0 for new records
+                }
+
+                const request3 = new sql.Request(transaction);
+                request3.input('DataTable', tvp);
+                request3.input('ManDriverKeyID', sql.Decimal, newKeyId);
+                request3.input('ManDriverID', sql.Decimal, manDriverId);
+                await request3.execute('mp_ManDriverKeyYearDTUpdate');
+            }
+
+            await transaction.commit();
+            return { success: true, newKeyId };
+        } catch (error) {
+            console.error('[CRITICAL ERROR] createDetailKeyService logic failed:', error);
+            try {
+                // Check if transaction is still capable of rolling back
+                await transaction.rollback();
+            } catch (rollbackError: any) {
+                if (rollbackError && rollbackError.name !== 'TransactionError') {
+                    console.error('Error during rollback:', rollbackError);
+                }
+            }
+            throw error;
+        }
+    } catch (error) {
+        console.error('Error executing createDetailKeyService:', error);
         throw error;
     }
 };

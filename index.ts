@@ -61,6 +61,7 @@ import pirRoutes from './routes/pirRoutes.js';
 import userRoutes from './routes/userRoutes.js';
 import trackingRoutes from './routes/trackingRoutes.js';
 import retirementRoutes from './routes/retirementRoutes.js';
+import { filesProxy } from './controllers/mkdController.js';
 
 
 // Mount routes
@@ -78,6 +79,7 @@ app.route('/api/pir', pirRoutes);
 app.route('/api/users', userRoutes);
 app.route('/api/tracking', trackingRoutes);
 app.route('/api/retirement', retirementRoutes);
+app.get('/api/files-proxy', filesProxy);
 
 
 
