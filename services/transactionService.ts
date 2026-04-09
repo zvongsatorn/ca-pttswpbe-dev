@@ -81,10 +81,10 @@ export const saveDraftTransactionService = async (
                 const mm = monthIndex.toString().padStart(2, '0');
                 const prefix = `TR${adYY}${mm}`;
 
-                // Use raw query instead of missing sp mp_TransactionsLastNoGet
+                // Get last TransactionNo with matching prefix
                 const lastTrRes = await transaction.request()
                     .input('Prefix', sql.VarChar(10), prefix)
-                    .query(`SELECT TOP 1 TransactionNo FROM MP_Transactions WHERE TransactionNo LIKE @Prefix + '%' ORDER BY TransactionNo DESC`);
+                    .execute('mp_TransactionsLastNoGet');
 
                 let runningNumber = 1;
                 if (lastTrRes.recordset && lastTrRes.recordset.length > 0 && lastTrRes.recordset[0].TransactionNo) {
@@ -103,7 +103,6 @@ export const saveDraftTransactionService = async (
 
             if (!existingTransactionNo) {
                 if (payload.transactionType === 5) {
-                    // Use raw query instead of missing mp_RemarkInsert
                     await transaction.request()
                         .input('TransactionNo', sql.VarChar(10), transactionNo)
                         .input('OrgUnitNo', sql.VarChar(8), payload.unitReceive)
@@ -111,10 +110,7 @@ export const saveDraftTransactionService = async (
                         .input('Status', sql.Int, status)
                         .input('CreateBy', sql.VarChar(20), createBy)
                         .input('CreateDate', sql.DateTime, createDate)
-                        .query(`
-                            INSERT INTO MP_Remark (TransactionNo, OrgUnitNo, Note, Status, CreateBy, CreateDate)
-                            VALUES (@TransactionNo, @OrgUnitNo, @Note, @Status, @CreateBy, @CreateDate)
-                        `);
+                        .execute('mp_RemarkInsert');
                 } else {
                     // mp_TransactionsInsert
                     const req = new sql.Request(transaction);
@@ -172,7 +168,6 @@ export const saveDraftTransactionService = async (
         } // End of if (!existingTransactionNo)
 
         // mp_TransactionFileInsert (if file provided)
-                // Use raw query instead of missing mp_TransactionFileInsert
                 await transaction.request()
                     .input('EffectiveDate', sql.DateTime, effectiveDate)
                     .input('TransactionNo', sql.VarChar(10), transactionNo)
@@ -181,10 +176,7 @@ export const saveDraftTransactionService = async (
                     .input('CreateBy', sql.VarChar(20), createBy)
                     .input('CreateDate', sql.DateTime, createDate)
                     .input('RefID', sql.Decimal(18,0), payload.refId ? payload.refId : 0)
-                    .query(`
-                        INSERT INTO MP_TransactionFile (EffectiveDate, TransactionNo, FileName, FileUpload, CreateBy, CreateDate, RefID)
-                        VALUES (@EffectiveDate, @TransactionNo, @FileName, @FileUpload, @CreateBy, @CreateDate, @RefID)
-                    `);
+                    .execute('mp_TransactionFileInsert');
 
             await transaction.commit();
             return { success: true, transactionNo, message: 'Draft saved successfully' };
@@ -209,16 +201,7 @@ export const getDraftTransactionsService = async (employeeId: string, effectiveD
         req.input('Status', sql.Int, 1); // 1 = Draft
         req.input('EmployeeID', sql.VarChar(10), employeeId);
 
-        // Use raw query as fallback for missing stored procedure
-        const query = `
-            SELECT * 
-            FROM MP_Transactions 
-            WHERE EffectiveDate = @EffectiveDate 
-              AND Status = @Status 
-              AND CreateBy = @EmployeeID
-            ORDER BY CreateDate DESC
-        `;
-        const result = await req.query(query);
+        const result = await req.execute('mp_DraftTransactionsGet');
         
         if (!result || !result.recordset || result.recordset.length === 0) {
             return [];
@@ -288,17 +271,7 @@ export const getExistingFilesService = async (
         req.input('EffectiveDate', sql.DateTime, effectiveDate);
         req.input('EmployeeID', sql.VarChar(20), employeeId);
 
-        const query = `
-            SELECT tf.*, t.ConclusionNo 
-            FROM MP_TransactionFile tf
-            INNER JOIN MP_Transactions t ON t.TransactionNo = tf.TransactionNo
-            WHERE tf.EffectiveDate = @EffectiveDate
-              AND tf.FileStatus > 0 
-              AND tf.RefID IS NULL
-              AND tf.CreateBy = @EmployeeID
-            ORDER BY tf.CreateDate DESC
-        `;
-        const result = await req.query(query);
+        const result = await req.execute('mp_TransactionFilesByDateGet');
         
         if (result && result.recordset) {
             // Map the result to a usable format for the frontend
@@ -321,17 +294,12 @@ export const getExistingFilesService = async (
 export const deleteDraftTransactionService = async (transactionNo: string, updateBy: string) => {
     try {
         const pool = await poolPromise;
-        // Use raw query instead of missing mp_TransactionsUpdateStatus
         await pool.request()
             .input('TransactionNo', sql.VarChar(10), transactionNo)
             .input('Status', sql.Int, 0) // 0 = Deleted
             .input('UpdateBy', sql.VarChar(20), updateBy)
             .input('UpdateDate', sql.DateTime, new Date())
-            .query(`
-                UPDATE MP_Transactions 
-                SET Status = @Status, UpdateBy = @UpdateBy, UpdateDate = @UpdateDate 
-                WHERE TransactionNo = @TransactionNo
-            `);
+            .execute('mp_TransactionsUpdateStatus');
         return { success: true };
     } catch (error) {
         console.error('Error in deleteDraftTransactionService:', error);
@@ -390,11 +358,7 @@ export const directApproveTransactionsService = async (transactionNos: string[],
                 req.input('TransactionNo', sql.VarChar(10), txNo);
                 req.input('UpdateBy', sql.VarChar(20), updateBy);
                 req.input('UpdateDate', sql.DateTime, today);
-                await req.query(`
-                    UPDATE MP_Transactions 
-                    SET Status = 3, UpdateBy = @UpdateBy, UpdateDate = @UpdateDate
-                    WHERE TransactionNo = @TransactionNo
-                `);
+                await req.execute('mp_TransactionsDirectApprove');
             }
             await transaction.commit();
             return { success: true, message: 'Transactions approved successfully.' };
@@ -425,60 +389,7 @@ export const getBorrowTransactionsService = async (employeeId?: string) => {
             // Don't filter by employee, show all approved borrows so any HR can return
         }
 
-        const query = `
-            SELECT DISTINCT
-                t.TransactionNo,
-                t.EffectiveDate,
-                t.ConclusionNo,
-                t.ConclusionDate,
-                t.TransactionDesc,
-                t.TransactionType,
-                t.Amount,
-                t.UnitReceive,
-                t.UnitTransfer,
-                t.LevelGroupFrom,
-                t.LevelGroupTo,
-                t.TransferInd,
-                t.Status,
-                t.PoolRsFlag,
-                t.StrgFlag,
-                t.BSType,
-                t.SpecFlag,
-                t.LineStaffFlag,
-                t.Policyflag,
-                t.CreateBy,
-                t.CreateDate,
-                d.DocumentNo,
-                d.CreateDate as DocumentCreateDate,
-                ISNULL((
-                    SELECT SUM(t2.Amount) 
-                    FROM MP_Transactions t2 
-                    WHERE t2.TransactionType = 7 
-                      AND t2.Status IN (2, 3) 
-                      AND t2.UnitReceive = t.UnitTransfer
-                      AND t2.UnitTransfer = t.UnitReceive
-                      AND t2.LevelGroupTo = t.LevelGroupTo
-                      AND EXISTS (
-                          SELECT 1 FROM MP_DocumentItems di2 
-                          INNER JOIN MP_Document d2 ON di2.DocumentNo = d2.DocumentNo
-                          WHERE di2.ItemID = t2.TransactionNo 
-                            AND d2.ParentDocumentNo = d.DocumentNo
-                      )
-                ), 0) as TotalReturned
-            FROM MP_Transactions t
-            INNER JOIN MP_DocumentItems di ON di.ItemID = t.TransactionNo
-            INNER JOIN MP_Document d ON di.DocumentNo = d.DocumentNo AND d.DocumentStatus IN (1, 2, 3)
-            ${whereClause}
-            GROUP BY 
-                t.TransactionNo, t.EffectiveDate, t.ConclusionNo, t.ConclusionDate,
-                t.TransactionDesc, t.TransactionType, t.Amount, t.UnitReceive, t.UnitTransfer,
-                t.LevelGroupFrom, t.LevelGroupTo, t.TransferInd, t.Status,
-                t.PoolRsFlag, t.StrgFlag, t.BSType, t.SpecFlag, t.LineStaffFlag, t.Policyflag,
-                t.CreateBy, t.CreateDate, d.DocumentNo, d.CreateDate
-            ORDER BY t.CreateDate DESC
-        `;
-
-        const result = await req.query(query);
+        const result = await req.execute('mp_BorrowTransactionsGet');
         if (!result.recordset?.length) return [];
 
         // Enrich with unit names and level names
@@ -540,29 +451,7 @@ export const getReturnsByBorrowService = async (borrowDocumentNo: string) => {
         const req = new sql.Request(pool);
         req.input('ParentDocumentNo', sql.VarChar(13), borrowDocumentNo);
 
-        const query = `
-            SELECT 
-                t.TransactionNo,
-                t.TransactionDesc,
-                t.Amount as ReturnCount,
-                t.Status,
-                t.CreateBy,
-                t.CreateDate,
-                d.DocumentNo,
-                d.DocumentStatus,
-                d.CreateDate as DocumentCreateDate
-            FROM MP_Transactions t
-            INNER JOIN MP_DocumentItems di ON di.ItemID = t.TransactionNo
-            INNER JOIN MP_Document d ON di.DocumentNo = d.DocumentNo
-            WHERE t.TransactionType = 7
-              AND d.ParentDocumentNo = @ParentDocumentNo
-            GROUP BY 
-                t.TransactionNo, t.TransactionDesc, t.Amount, t.Status,
-                t.CreateBy, t.CreateDate, d.DocumentNo, d.DocumentStatus, d.CreateDate
-            ORDER BY t.CreateDate ASC
-        `;
-
-        const result = await req.query(query);
+        const result = await req.execute('mp_ReturnsByBorrowGet');
         return result.recordset || [];
     } catch (error) {
         console.error('Error in getReturnsByBorrowService:', error);

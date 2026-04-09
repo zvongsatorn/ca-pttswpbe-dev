@@ -1,5 +1,6 @@
 import { sql, poolPromise } from '../config/db.js';
 import pisService from './pisService.js';
+import { sendMail, resolveMailRecipient } from './mailService.js';
 
 export const getStartYearService = async () => {
     try {
@@ -181,12 +182,7 @@ export const getMKDDetailsService = async (manDriverId: string | number) => {
         const getFiles = async () => {
             const req = new sql.Request(pool);
             req.input('ManDriverID', sql.Decimal, manDriverId);
-            // Bypassing mp_ManDriverFileGet due to LEFT/SUBSTRING errors with non-standard filenames
-            const res = await req.query(`
-                SELECT *, 'pdf' as extension 
-                FROM MP_ManDriverFile 
-                WHERE ManDriverID = @ManDriverID AND FileStatus > 0
-            `);
+            const res = await req.execute('mp_ManDriverFileListGet');
             return res.recordset || [];
         };
 
@@ -293,7 +289,7 @@ export const createDetailKeyService = async (
             // 0. Fetch Parent Data (Required for sub-items context)
             const parentReq = new sql.Request(transaction);
             parentReq.input('ParentID', sql.Decimal, parentId);
-            const parentRes = await parentReq.query('SELECT ManDriverID, KeyManID, Unit, KeyType, Weight FROM MP_ManDriverKey WHERE ManDriverKeyID = @ParentID');
+            const parentRes = await parentReq.execute('mp_ManDriverKeyParentGet');
             const parentData = parentRes.recordset?.[0] || {};
 
             // 1. Insert new Key row (inheriting parent metadata)
@@ -316,9 +312,7 @@ export const createDetailKeyService = async (
             const findReq = new sql.Request(transaction);
             findReq.input('ManDriverID', sql.Decimal, Number(manDriverId));
             findReq.input('ParentID', sql.Decimal, Number(parentId));
-            const findRes = await findReq.query(
-                'SELECT TOP 1 ManDriverKeyID FROM MP_ManDriverKey WHERE ManDriverID = @ManDriverID AND ParentID = @ParentID AND ManDriverKeyStatus > 0 ORDER BY ManDriverKeyID DESC'
-            );
+            const findRes = await findReq.execute('mp_ManDriverKeyFindNew');
             const newKeyId = findRes.recordset?.[0]?.ManDriverKeyID;
 
             if (!newKeyId) {
@@ -581,8 +575,7 @@ export const updateNoteService = async (manDriverId: string | number, note: stri
         const pool = await poolPromise;
         const request = new sql.Request(pool);
         request.input('ManDriverID', sql.Decimal, manDriverId);
-        request.input('Note', sql.VarChar(sql.MAX), note || '');
-        request.input('UpdateDate', sql.DateTime, new Date());
+        request.input('Note', sql.NVarChar(sql.MAX), note || '');
         
         await request.execute('mp_ManDriverNoteUpdate');
         return { success: true };
@@ -698,7 +691,27 @@ export const getFlowHistoryService = async (manDriverId: string | number, approv
         request.input('ManDriverID', sql.Decimal, manDriverId);
         request.input('ApproveID', sql.Decimal, approveId);
         const result = await request.execute('mp_ManDriverFlowHistGet');
-        return result.recordset || [];
+        
+        const historyData = result.recordset || [];
+        
+        if (historyData.length > 0) {
+            // Fetch remarks to join with history
+            const remarkReq = new sql.Request(pool);
+            remarkReq.input('ApproveID', sql.Decimal, approveId);
+            const remarkResult = await remarkReq.execute('mp_ApproveHistRemarkGet');
+            
+            const remarkMap = new Map();
+            remarkResult.recordset.forEach((r: any) => {
+                remarkMap.set(r.ApproveHistID.toString(), r.Remark);
+            });
+            
+            return historyData.map((h: any) => ({
+                ...h,
+                Remark: remarkMap.get(h.ApproveHistID?.toString()) || h.Remark || ''
+            }));
+        }
+
+        return historyData;
     } catch (error) {
         console.error('Error executing mp_ManDriverFlowHistGet:', error);
         throw error;
@@ -737,7 +750,9 @@ export const approveManDriverService = async (
     }
 };
 
-export const requestApproveMKDService = async (manDriverId: string, employeeId: string) => {
+export const requestApproveMKDService = async (manDriverId: string, employeeId: string, approveIdStr?: string) => {
+    console.log(`[requestApproveMKDService] Start. ManDriverID: ${manDriverId}, EmployeeID: ${employeeId}, ApproveIDStr: ${approveIdStr}`);
+    const approveId = approveIdStr ? Number(approveIdStr) : null;
     try {
         const pool = await poolPromise;
         const transaction = new sql.Transaction(pool);
@@ -745,100 +760,180 @@ export const requestApproveMKDService = async (manDriverId: string, employeeId: 
 
         try {
             // 1. Get Employee Info from PIS (POSCODE)
+            console.log(`[requestApproveMKDService] Fetching info for employee: ${employeeId}`);
             const empInfo = await pisService.getEmployeeInfo(employeeId);
             if (!empInfo) {
-                throw new Error(`Employee info not found in PIS for ${employeeId}`);
+                console.error(`[requestApproveMKDService] Employee info not found for ${employeeId}`);
+                throw new Error(`ไม่พบข้อมูลพนักงาน (${employeeId}) ในระบบ PIS`);
             }
             const posCode = empInfo.POSCODE || empInfo.poscode;
+            console.log(`[requestApproveMKDService] Employee: ${empInfo.FNAME} ${empInfo.LNAME}, PosCode: ${posCode}`);
 
-            // 2. Initialize MP_Approve
-            const approveReq = new sql.Request(transaction);
-            approveReq.input('RefID', sql.Decimal(18, 0), manDriverId);
-            approveReq.input('ApproveStatus', sql.Int, 1); // 1 = Pending
-            approveReq.input('CreateBy', sql.VarChar(20), employeeId);
-            approveReq.input('CreateDate', sql.DateTime, new Date());
-            
-            const approveResult = await approveReq.query(`
-                INSERT INTO MP_Approve (RefID, ApproveStatus, CreateBy, CreateDate)
-                OUTPUT INSERTED.ApproveID
-                VALUES (@RefID, @ApproveStatus, @CreateBy, @CreateDate)
-            `);
-            const approveId = approveResult.recordset[0].ApproveID;
+            let activeApproveId = approveId;
+
+            if (!activeApproveId) {
+                // 2. Initialize MP_Approve (Only if new flow)
+                const approveReq = new sql.Request(transaction);
+                approveReq.input('RefID', sql.Decimal(18, 0), manDriverId);
+                approveReq.input('ApproveStatus', sql.Int, 1); // 1 = Pending
+                approveReq.input('CreateBy', sql.VarChar(20), employeeId);
+                approveReq.input('CreateDate', sql.DateTime, new Date());
+                
+                const approveResult = await approveReq.execute('mp_ManDriverApproveInsert');
+                activeApproveId = approveResult.recordset[0].ApproveID;
+                console.log(`[requestApproveMKDService] Created new ApproveID: ${activeApproveId}`);
+            } else {
+                console.log(`[requestApproveMKDService] Reusing existing ApproveID: ${activeApproveId}`);
+            }
 
             // 3. Get Flow from PIS
-            const flow = await pisService.getApprovalFlow(employeeId, posCode);
-            if (!flow || flow.length === 0) {
-                throw new Error("Approval flow not found in PIS");
+            console.log(`[requestApproveMKDService] Fetching flow for ${employeeId} / ${posCode}`);
+            const rawFlow = await pisService.getApprovalFlow(employeeId, posCode);
+            if (!rawFlow || rawFlow.length === 0) {
+                console.error(`[requestApproveMKDService] No flow steps returned for ${employeeId}`);
+                throw new Error("ไม่พบสายการอนุมัติ (Approval Flow) ในระบบ PIS สำหรับตำแหน่งนี้");
+            }
+            console.log(`[requestApproveMKDService] Raw flow steps: ${rawFlow.length}`);
+
+            // --- BAND FILTERING LOGIC ---
+            const hasAE = rawFlow.some((step: any) => step.REP_BAND?.trim() === 'AE');
+            const flow = rawFlow.filter((step: any) => {
+                const band = step.REP_BAND?.trim();
+                if (band === 'AF' || band === 'AG' || band === 'AH') {
+                    if (hasAE) {
+                        return false; // If AE exists, exclude AF, AG, AH
+                    } else {
+                        if (band === 'AF') {
+                            return true; // If no AE, keep AF
+                        }
+                        return false; // If no AE, exclude AG, AH
+                    }
+                }
+                return true; // Keep all other bands
+            });
+            console.log(`[requestApproveMKDService] Filtered flow steps: ${flow.length}`);
+
+            if (flow.length === 0) {
+                throw new Error("สายการอนุมัติว่างเปล่าหลังจากทำการคัดกรอง Band (AE/AF/AG/AH)");
             }
 
-            // 4. Insert Flow into MP_ApproveHist
-            // First, Insert the Requester (Seqno = -1)
-            const requesterReq = new sql.Request(transaction);
-            requesterReq.input('ApproveID', sql.Decimal(18, 0), approveId);
-            requesterReq.input('RefID', sql.Decimal(18, 0), manDriverId);
-            requesterReq.input('Seqno', sql.Int, -1);
-            requesterReq.input('INAME', sql.NVarChar(50), empInfo.INAME || '');
-            requesterReq.input('FNAME', sql.NVarChar(100), empInfo.FNAME || '');
-            requesterReq.input('LNAME', sql.NVarChar(100), empInfo.LNAME || '');
-            requesterReq.input('POSCODE', sql.NVarChar(10), posCode);
-            requesterReq.input('posname', sql.NVarChar(200), empInfo.posname || '');
-            requesterReq.input('EmailAddr', sql.NVarChar(200), empInfo.EmailAddr || '');
-            requesterReq.input('ApproveHistStatus', sql.Int, 1); // 1 = Requested/Approved
-            requesterReq.input('ApproveHistDate', sql.DateTime, new Date());
-            requesterReq.input('ApproveHistBy', sql.NVarChar(20), employeeId);
+            if (approveId) {
+                console.log(`[requestApproveMKDService] Executing RESEND logic for ApproveID: ${activeApproveId}`);
+                // RESEND Case: Update existing history records for this ApproveID
+                // Find ApproveHistID for Seqno 0
+                const seq0Req = new sql.Request(transaction);
+                seq0Req.input('ApproveID', sql.Decimal(18, 0), activeApproveId);
+                seq0Req.input('RefID', sql.Decimal(18, 0), manDriverId);
+                const seq0Res = await seq0Req.execute('mp_ManDriverApproveHistSeq0Get');
+                const approveHistId = seq0Res.recordset[0]?.ApproveHistID;
 
-            await requesterReq.query(`
-                INSERT INTO MP_ApproveHist 
-                (ApproveID, RefID, Seqno, INAME, FNAME, LNAME, POSCODE, posname, EmailAddr, ApproveHistStatus, ApproveHistDate, ApproveHistBy)
-                VALUES 
-                (@ApproveID, @RefID, @Seqno, @INAME, @FNAME, @LNAME, @POSCODE, @posname, @EmailAddr, @ApproveHistStatus, @ApproveHistDate, @ApproveHistBy)
-            `);
+                if (approveHistId) {
+                    const spReq = new sql.Request(transaction);
+                    spReq.input('ManDriverID', sql.Decimal(18, 0), manDriverId);
+                    spReq.input('ApproveHistID', sql.Decimal(18, 0), approveHistId);
+                    spReq.input('ApproveID', sql.Decimal(18, 0), activeApproveId);
+                    spReq.input('ApproveBy', sql.VarChar(20), employeeId);
+                    spReq.input('ApproveDate', sql.DateTime, new Date());
+                    spReq.input('ApproveStatus', sql.Int, 1); // 1 = Submitted/Approved
+                    
+                    await spReq.execute('mp_ManDriverApproveHistUpdateRe');
+                    console.log(`[requestApproveMKDService] Executed SP mp_ManDriverApproveHistUpdateRe for ApproveHistID: ${approveHistId}`);
+                } else {
+                    console.error(`[requestApproveMKDService] Seqno 0 not found! Cannot execute SP for resend.`);
+                    // Fallback to error or ignore if data bounds are unexpected
+                }
 
-            // Insert Approvers (Seqno > 0)
-            let seq = 1;
-            for (const step of flow) {
-                const stepReq = new sql.Request(transaction);
-                stepReq.input('ApproveID', sql.Decimal(18, 0), approveId);
-                stepReq.input('RefID', sql.Decimal(18, 0), manDriverId);
-                stepReq.input('Seqno', sql.Int, seq++);
-                stepReq.input('INAME', sql.NVarChar(50), step.INAME || '');
-                stepReq.input('FNAME', sql.NVarChar(100), step.FNAME || '');
-                stepReq.input('LNAME', sql.NVarChar(100), step.LNAME || '');
-                stepReq.input('POSCODE', sql.NVarChar(10), step.POSCODE || '');
-                stepReq.input('posname', sql.NVarChar(200), step.posname || '');
-                stepReq.input('EmailAddr', sql.NVarChar(200), step.EmailAddr || '');
-                stepReq.input('ApproveHistStatus', sql.Int, 0); // 0 = Pending
+            } else {
+                // NEW Case: Insert Flow into MP_ApproveHist
+                // First, Insert the Requester (Seqno = 0)
+                const requesterReq = new sql.Request(transaction);
+                requesterReq.input('ApproveID', sql.Decimal(18, 0), activeApproveId);
+                requesterReq.input('RefID', sql.Decimal(18, 0), manDriverId);
+                requesterReq.input('Seqno', sql.Int, 0);
+                requesterReq.input('INAME', sql.NVarChar(50), empInfo.INAME || '');
+                requesterReq.input('FNAME', sql.NVarChar(100), empInfo.FNAME || '');
+                requesterReq.input('LNAME', sql.NVarChar(100), empInfo.LNAME || '');
+                requesterReq.input('POSCODE', sql.NVarChar(10), posCode);
+                requesterReq.input('posname', sql.NVarChar(200), empInfo.posname || '');
+                requesterReq.input('EmailAddr', sql.NVarChar(200), empInfo.EmailAddr || '');
+                requesterReq.input('REP_NO', sql.Int, -1);
+                requesterReq.input('REP_CODE', sql.NVarChar(10), employeeId.padStart(8, '0'));
+                requesterReq.input('ApproveHistStatus', sql.Int, 1); // 1 = Requested/Approved
+                requesterReq.input('ApproveHistDate', sql.DateTime, new Date());
+                requesterReq.input('ApproveHistBy', sql.NVarChar(20), employeeId);
 
-                await stepReq.query(`
-                    INSERT INTO MP_ApproveHist 
-                    (ApproveID, RefID, Seqno, INAME, FNAME, LNAME, POSCODE, posname, EmailAddr, ApproveHistStatus)
-                    VALUES 
-                    (@ApproveID, @RefID, @Seqno, @INAME, @FNAME, @LNAME, @POSCODE, @posname, @EmailAddr, @ApproveHistStatus)
-                `);
+                await requesterReq.execute('mp_ManDriverApproveHistInsert');
+
+                // Insert Approvers (Seqno > 0)
+                let seq = 1;
+                for (const step of flow) {
+                    const repCode = (step.CODE || step.REP_CODE || '').toString().padStart(8, '0');
+                    const repNo = step.REP_NO !== undefined ? Number(step.REP_NO) : seq;
+
+                    const stepReq = new sql.Request(transaction);
+                    stepReq.input('ApproveID', sql.Decimal(18, 0), activeApproveId);
+                    stepReq.input('RefID', sql.Decimal(18, 0), manDriverId);
+                    stepReq.input('Seqno', sql.Int, seq++);
+                    stepReq.input('INAME', sql.NVarChar(50), step.INAME || '');
+                    stepReq.input('FNAME', sql.NVarChar(100), step.FNAME || '');
+                    stepReq.input('LNAME', sql.NVarChar(100), step.LNAME || '');
+                    stepReq.input('POSCODE', sql.NVarChar(10), step.POSCODE || '');
+                    stepReq.input('posname', sql.NVarChar(200), step.posname || step.POSNAME || '');
+                    stepReq.input('EmailAddr', sql.NVarChar(200), step.EmailAddr || '');
+                    stepReq.input('REP_NO', sql.Int, repNo);
+                    stepReq.input('REP_CODE', sql.NVarChar(10), repCode);
+                    stepReq.input('ApproveHistStatus', sql.Int, 0); // 0 = Pending
+
+                    await stepReq.execute('mp_ManDriverApproveHistInsert');
+                }
             }
 
-            // 5. Update MP_ManDriver Status to 2 (Waiting for Approve)
+            // 5. Update MP_ManDriver Status to 1 (Maintain Draft/Pending) and Link activeApproveId
             const updateReq = new sql.Request(transaction);
             updateReq.input('ManDriverID', sql.Decimal(18, 0), manDriverId);
-            updateReq.input('Status', sql.Int, 2);
+            updateReq.input('Status', sql.Int, 1);
+            updateReq.input('ApproveID', sql.Decimal(18, 0), activeApproveId);
             updateReq.input('UpdateBy', sql.VarChar(20), employeeId);
             updateReq.input('UpdateDate', sql.DateTime, new Date());
-            await updateReq.query(`
-                UPDATE MP_ManDriver 
-                SET ManDriverStatus = @Status, UpdateBy = @UpdateBy, UpdateDate = @UpdateDate
-                WHERE ManDriverID = @ManDriverID
-            `);
+            await updateReq.execute('mp_ManDriverStatusLinkApprove');
 
             // 6. Send Mail to first approver
-            const mailReq = new sql.Request(transaction);
-            mailReq.input('ManDriverID', sql.Decimal(18, 0), manDriverId);
-            mailReq.input('ApproveID', sql.Decimal(18, 0), approveId);
-            mailReq.input('Seqno', sql.Int, 1);
-            await mailReq.execute('mp_ManDriverSendMailNext');
+            console.log(`[requestApproveMKDService] Sending mail to first approver (Seqno 1) using ApproveID ${activeApproveId}`);
+            try {
+                // Fetch first approver info
+                const nextApproverReq = new sql.Request(transaction);
+                nextApproverReq.input('ApproveID', sql.Decimal(18, 0), activeApproveId);
+                nextApproverReq.input('Seqno', sql.Int, 1);
+                const nextRes = await nextApproverReq.query('SELECT FNAME, LNAME, EmailAddr FROM MP_ApproveHist WHERE ApproveID = @ApproveID AND Seqno = @Seqno');
+                
+                if (nextRes.recordset && nextRes.recordset.length > 0) {
+                    const next = nextRes.recordset[0];
+                    if (next.EmailAddr) {
+                        const subject = `[PTTSWP] โปรดอนุมัติ Manpower Key Drivers (${manDriverId})`;
+                        const body = `
+                            <h2>แจ้งเตือนการเสนออนุมัติ MKD</h2>
+                            <p>เรียน คุณ ${next.FNAME} ${next.LNAME},</p>
+                            <p>มีคำขอจัดทำ Manpower Key Drivers หมายเลข <b>${manDriverId}</b> รอการพิจารณาจากท่าน</p>
+                            <p>ผู้เสนอ: ${empInfo.FNAME} ${empInfo.LNAME}</p>
+                            <p>โปรดตรวจสอบรายละเอียดที่: <a href="http://localhost:3000/mkd/inbox">MKD Inbox</a></p>
+                            <hr/>
+                            <p style="color: gray; font-size: 12px;">นี่คือระบบเมลอัตโนมัติ</p>
+                        `;
+                        const recipient = await resolveMailRecipient('SendMailManDriver', next.EmailAddr);
+                        if (recipient) {
+                            await sendMail(recipient, subject, body);
+                        }
+                    }
+                }
+            } catch (mailError) {
+                console.error('Email notification failed in requestApproveMKDService:', mailError);
+            }
 
             await transaction.commit();
-            return { success: true, message: 'Approval request submitted successfully', approveId };
+            console.log(`[requestApproveMKDService] Success!`);
+            return { success: true, message: 'Approval request submitted successfully', approveId: activeApproveId };
         } catch (error) {
+            console.error('[requestApproveMKDService] Error occurred, rolling back:', error);
             await transaction.rollback();
             throw error;
         }
@@ -942,6 +1037,264 @@ export const exportPositionService = async (
         return result.recordset || [];
     } catch (error) {
         console.error('Error executing mp_PositionExportExcel:', error);
+        throw error;
+    }
+};
+
+export const getInboxManDriverService = async (employeeId: string) => {
+    try {
+        const pool = await poolPromise;
+        const request = new sql.Request(pool);
+        request.input('EmployeeID', sql.VarChar(50), employeeId);
+        const result = await request.execute('mp_ManDriverInboxGet');
+        
+        let records: any[] = result.recordset ? Array.from(result.recordset) : [];
+        // Self-Exclusion: Exclude any record where the user themselves created it
+        records = records.filter(item => item.CreateBy !== employeeId && item.EmpName !== employeeId);
+        
+        return records;
+    } catch (error) {
+        console.error('Error executing mp_ManDriverInboxGet:', error);
+        throw error;
+    }
+};
+
+export const getMyRequestsMKDService = async (employeeId: string) => {
+    try {
+        const pool = await poolPromise;
+        const req = new sql.Request(pool);
+        req.input('EmployeeID', sql.VarChar(50), employeeId);
+        
+        const result = await req.execute('mp_ManDriverMyRequestsGet');
+        return result.recordset || [];
+    } catch (error) {
+        console.error('Error in getMyRequestsMKDService:', error);
+        throw error;
+    }
+};
+
+export const submitMKDApproveActionService = async (
+    manDriverId: number,
+    approveId: number,
+    employeeId: string,
+    action: 'APPROVE' | 'REJECT',
+    remark: string
+) => {
+    const pool = await poolPromise;
+    const transaction = new sql.Transaction(pool);
+
+    try {
+        await transaction.begin();
+
+        // 1. Find the current active ApproveHistID for this user (using REP_CODE for identification)
+        const findReq = new sql.Request(transaction);
+        findReq.input('ApproveID', sql.Decimal(18, 0), approveId);
+        
+        // Ensure employeeId is padded to 8 digits for REP_CODE comparison
+        const paddedId = employeeId.trim().replace(/^0+/, '').padStart(8, '0');
+        findReq.input('REP_CODE', sql.VarChar(50), paddedId);
+        
+        const histResult = await findReq.execute('mp_ManDriverApproveHistFindPending');
+
+        if (!histResult.recordset || histResult.recordset.length === 0) {
+            console.error('[submitMKDApproveActionService] Step not found:', { approveId, employeeId, paddedId });
+            throw new Error('ไม่พบขั้นตอนการอนุมัติที่รอดำเนินการสำหรับผู้ใช้นี้ (No pending approval step for this Employee ID)');
+        }
+
+        const { ApproveHistID, Seqno } = histResult.recordset[0];
+
+        // 2. Update ApproveHist
+        const updateHistReq = new sql.Request(transaction);
+        updateHistReq.input('ApproveHistID', sql.Decimal(18, 0), ApproveHistID);
+        updateHistReq.input('ApproveStatus', sql.Int, action === 'APPROVE' ? 1 : -1); // 1 = Approved (เห็นชอบ), -1 = Rejected (ไม่เห็นชอบ)
+        updateHistReq.input('ApproveBy', sql.VarChar(50), employeeId);
+
+        await updateHistReq.execute('mp_ManDriverApproveHistUpdateStatus');
+
+        // 3. Handle Flow Transition and Main Table Update
+        if (action === 'APPROVE') {
+            // Check if there are any remaining pending steps with a higher sequence number
+            const nextReq = new sql.Request(transaction);
+            nextReq.input('ApproveID', sql.Decimal(18, 0), approveId);
+            nextReq.input('CurrentSeqno', sql.Int, Seqno);
+            const nextResult = await nextReq.execute('mp_ManDriverApproveHistNextGet');
+
+            if (nextResult.recordset.length > 0) {
+                // Not the last person: Update Remark in main table but keep Status = 1
+                const midReq = new sql.Request(transaction);
+                midReq.input('ManDriverID', sql.Decimal(18, 0), manDriverId);
+                midReq.input('Remark', sql.NVarChar(sql.MAX), remark || '');
+                midReq.input('UpdateBy', sql.VarChar(50), employeeId);
+                await midReq.execute('mp_ManDriverMidApproveUpdate');
+
+                // Send mail to next person
+                try {
+                    const next = nextResult.recordset[0];
+                    if (next.EmailAddr) {
+                        const subject = `[PTTSWP] โปรดอนุมัติ Manpower Key Drivers (${manDriverId})`;
+                        const body = `
+                            <h2>แจ้งเตือนการพิจารณา MKD</h2>
+                            <p>เรียน คุณ ${next.FNAME} ${next.LNAME},</p>
+                            <p>มีคำขอจัดทำ Manpower Key Drivers หมายเลข <b>${manDriverId}</b> รอการพิจารณาจากท่าน</p>
+                            <p>โปรดตรวจสอบรายละเอียดที่: <a href="http://localhost:3000/mkd/inbox">MKD Inbox</a></p>
+                            <hr/>
+                            <p style="color: gray; font-size: 12px;">นี่คือระบบเมลอัตโนมัติ</p>
+                        `;
+                        const recipient = await resolveMailRecipient('SendMailManDriver', next.EmailAddr);
+                        if (recipient) {
+                            await sendMail(recipient, subject, body);
+                        }
+                    }
+                } catch (mailError) {
+                    console.error('Email notification failed for next approver in MKD:', mailError);
+                }
+            } else {
+                // Final approval: Update ManDriverStatus to 2 and set Remark
+                const finalReq = new sql.Request(transaction);
+                finalReq.input('ManDriverID', sql.Decimal(18, 0), manDriverId);
+                finalReq.input('Status', sql.Int, 2);
+                finalReq.input('Remark', sql.NVarChar(sql.MAX), remark || '');
+                finalReq.input('UpdateBy', sql.VarChar(50), employeeId);
+                await finalReq.execute('mp_ManDriverStatusRemarkUpdate');
+
+                // Notify Requester (Seqno 0)
+                try {
+                    const reqUserReq = new sql.Request(transaction);
+                    reqUserReq.input('ApproveID', sql.Decimal(18, 0), approveId);
+                    const reqRes = await reqUserReq.query('SELECT FNAME, LNAME, EmailAddr FROM MP_ApproveHist WHERE ApproveID = @ApproveID AND Seqno = 0');
+                    if (reqRes.recordset && reqRes.recordset.length > 0) {
+                        const reqUser = reqRes.recordset[0];
+                        if (reqUser.EmailAddr) {
+                            const subject = `[PTTSWP] MKD (${manDriverId}) ได้รับการอนุมัติครบถ้วนแล้ว`;
+                            const body = `
+                                <h2>แจ้งเตือนสถานะคำขอ MKD</h2>
+                                <p>เรียน คุณ ${reqUser.FNAME} ${reqUser.LNAME},</p>
+                                <p>คำขอจัดทำ Manpower Key Drivers หมายเลข <b>${manDriverId}</b> ของท่านได้รับการอนุมัติเรียบร้อยแล้ว</p>
+                                <p>โปรดตรวจสอบรายละเอียดที่: <a href="http://localhost:3000/mkd/history">MKD History</a></p>
+                                <hr/>
+                                <p style="color: gray; font-size: 12px;">นี่คือระบบเมลอัตโนมัติ</p>
+                            `;
+                            const recipient = await resolveMailRecipient('SendMailManDriver', reqUser.EmailAddr);
+                            if (recipient) {
+                                await sendMail(recipient, subject, body);
+                            }
+                        }
+                    }
+                } catch (mailError) {
+                    console.error('Email notification failed for requester in MKD:', mailError);
+                }
+            }
+        } else {
+            // REJECT: Update ManDriverStatus remains 1 (In approval) and set Remark
+            const rejectReq = new sql.Request(transaction);
+            rejectReq.input('ManDriverID', sql.Decimal(18, 0), manDriverId);
+            rejectReq.input('Status', sql.Int, 1); // Keep as 1 instead of 0
+            rejectReq.input('Remark', sql.NVarChar(sql.MAX), remark || '');
+            rejectReq.input('UpdateBy', sql.VarChar(50), employeeId);
+            await rejectReq.execute('mp_ManDriverStatusRemarkUpdate');
+
+            // Reset creator (Seqno 0) to Pending (0) so they can edit from inbox
+            const resetCreatorReq = new sql.Request(transaction);
+            resetCreatorReq.input('ApproveID', sql.Decimal(18, 0), approveId);
+            await resetCreatorReq.execute('mp_ManDriverApproveHistResetCreator');
+
+            // Insert rejection remark into MP_ApproveHistRemark to show in history UI
+            if (remark) {
+                const remarkReq = new sql.Request(transaction);
+                remarkReq.input('ApproveHistID', sql.Decimal(18, 0), ApproveHistID);
+                remarkReq.input('ApproveID', sql.Decimal(18, 0), approveId);
+                remarkReq.input('Remark', sql.NVarChar(200), remark);
+                await remarkReq.execute('mp_ApproveHistRemarkInsert');
+            }
+
+
+            // Send Mail Reject
+            try {
+                const reqUserReq = new sql.Request(transaction);
+                reqUserReq.input('ApproveID', sql.Decimal(18, 0), approveId);
+                const reqRes = await reqUserReq.query('SELECT FNAME, LNAME, EmailAddr FROM MP_ApproveHist WHERE ApproveID = @ApproveID AND Seqno = 0');
+                if (reqRes.recordset && reqRes.recordset.length > 0) {
+                    const reqUser = reqRes.recordset[0];
+                    if (reqUser.EmailAddr) {
+                        const subject = `[PTTSWP] MKD (${manDriverId}) ถูกส่งคืน (Rejected)`;
+                        const body = `
+                            <h2>แจ้งเตือนการส่งคืน MKD</h2>
+                            <p>เรียน คุณ ${reqUser.FNAME} ${reqUser.LNAME},</p>
+                            <p>คำขอจัดทำ Manpower Key Drivers หมายเลข <b>${manDriverId}</b> ของท่านถูกส่งคืน/ไม่ได้รับการอนุมัติ</p>
+                            <p><b>เหตุผล:</b> ${remark}</p>
+                            <p>โปรดตรวจสอบและแก้ไขได้ที่: <a href="http://localhost:3000/mkd/history">MKD History</a></p>
+                            <hr/>
+                            <p style="color: gray; font-size: 12px;">นี่คือระบบเมลอัตโนมัติ</p>
+                        `;
+                        const recipient = await resolveMailRecipient('SendMailManDriver', reqUser.EmailAddr);
+                        if (recipient) {
+                            await sendMail(recipient, subject, body);
+                        }
+                    }
+                }
+            } catch (err) {
+                console.warn('Failed to send rejection mail:', err);
+            }
+        }
+        await transaction.commit();
+        return { success: true, message: action === 'APPROVE' ? 'Approved successfully' : 'Rejected successfully' };
+    } catch (error) {
+        if (transaction) await transaction.rollback();
+        console.error(`Error in submitMKDApproveActionService (${action}):`, error);
+        throw error;
+    }
+};
+
+export const copyMKDService = async (
+    copyFromId: number,
+    targetId: number,
+    employeeId: string,
+    effectiveYear: string
+) => {
+    try {
+        const pool = await poolPromise;
+        const request = new sql.Request(pool);
+
+        request.input('CopyManDriverID', sql.Decimal(18, 0), copyFromId);
+        request.input('ManDriverID', sql.Decimal(18, 0), targetId);
+        request.input('CreateBy', sql.VarChar(50), employeeId);
+        request.input('EffectiveYear', sql.Int, parseInt(effectiveYear));
+
+        await request.execute('mp_ManDriverCopy');
+        return { success: true, message: 'Data copied successfully' };
+    } catch (error) {
+        console.error('Error in copyMKDService:', error);
+        throw error;
+    }
+};
+
+export const getMKDHistoryService = async (employeeId: string) => {
+    try {
+        const pool = await poolPromise;
+        const request = new sql.Request(pool);
+        request.input('EmployeeID', sql.VarChar(50), employeeId);
+        
+        const result = await request.execute('mp_ManDriverHistoryGet');
+        return result.recordset || [];
+    } catch (error) {
+        console.error('Error in getMKDHistoryService:', error);
+        throw error;
+    }
+};
+
+export const cancelMKDService = async (manDriverId: number) => {
+    try {
+        const pool = await poolPromise;
+        const request = new sql.Request(pool);
+        
+        request.input('ManDriverID', sql.Decimal(18, 0), manDriverId);
+        request.input('ManDriverStatus', sql.Int, 0); // 0 = Cancelled / Draft
+        
+        await request.execute('mp_ManDriverCancelUpdate');
+        
+        return { success: true, message: 'Document cancelled successfully' };
+    } catch (error) {
+        console.error('Error executing cancelMKDService:', error);
         throw error;
     }
 };

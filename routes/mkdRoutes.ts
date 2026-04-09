@@ -27,7 +27,13 @@ import {
     createMasterKeyMaster,
     updateMasterKeyMaster,
     downloadMasterKeyTemplate,
-    exportPosition
+    exportPosition,
+    getInboxManDriver,
+    getMyRequestsMKD,
+    submitMKDApproveAction,
+    copyMKD,
+    getMKDHistory,
+    cancelMKD
 } from '../controllers/mkdController.js';
 
 const app = new Hono();
@@ -40,6 +46,12 @@ app.get('/history', getHistoryManDriver);
 
 // GET /api/mkd/history-approve
 app.get('/history-approve', getHistoryApprove);
+
+// GET /api/mkd/inbox
+app.get('/inbox', getInboxManDriver);
+
+// GET /api/mkd/my-requests
+app.get('/my-requests', getMyRequestsMKD);
 
 // GET /api/mkd/master-keys
 app.get('/master-keys', getMasterKeys);
@@ -115,6 +127,18 @@ app.get('/template/master-keys', downloadMasterKeyTemplate);
 
 // GET /api/mkd/export-position
 app.get('/export-position', exportPosition);
+
+// POST /api/mkd/:id/submit-approve-action
+app.post('/:id/submit-approve-action', submitMKDApproveAction);
+
+// PUT /api/mkd/:id/cancel
+app.put('/:id/cancel', cancelMKD);
+
+// POST /api/mkd/:id/copy
+app.post('/:id/copy', copyMKD);
+
+// GET /api/mkd/history-copy
+app.get('/history-copy', getMKDHistory);
 
 export default app;
 

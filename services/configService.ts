@@ -10,22 +10,37 @@ class ConfigService {
           }
 
     async getConfig(key: string): Promise<string> {
-        if (this.configCache[key]) return this.configCache[key];
+        const details = await this.getConfigDetails(key);
+        return details.Value1;
+    }
+
+    async getConfigDetails(key: string): Promise<{ Value1: string; Value2: string }> {
+        if (this.configCache[key]) {
+            // Check if we already have Value2 cached (using a simple delimiter or separate cache)
+            const cachedValue = this.configCache[key];
+            if (cachedValue.includes('|')) {
+                const parts = cachedValue.split('|');
+                return { Value1: parts[0], Value2: parts[1] };
+            }
+            return { Value1: cachedValue, Value2: "" };
+        }
 
         try {
             const pool = await poolPromise;
-            console.log(`[configService] Fetching config ${key} from database: ${(pool as any).config.database}`);
             const result = await pool.request()
                 .input('KeyName', sql.NVarChar, key)
-                .query("SELECT Value1 FROM MP_Config WHERE KeyName = @KeyName");
+                .execute('MP_ConfigGetByKeyName');
 
-            const val = result.recordset[0]?.Value1 || "";
-            this.configCache[key] = val;
-            return val;
+            const row = result.recordset[0];
+            const val1 = row?.Value1 || "";
+            const val2 = row?.Value2 || "";
+            
+            this.configCache[key] = `${val1}|${val2}`;
+            return { Value1: val1, Value2: val2 };
         } catch (err) {
-            console.error(`Error fetching config ${key}:`, err);
+            console.error(`Error fetching config details ${key}:`, err);
         }
-        return "";
+        return { Value1: "", Value2: "" };
     }
 
     async getConfigs(keys: string[]): Promise<Record<string, string>> {
@@ -42,7 +57,9 @@ class ConfigService {
         try {
             const pool = await poolPromise;
             const request = pool.request();
-            const result = await request.query(`SELECT KeyName, Value1 FROM MP_Config WHERE KeyName IN (${missingKeys.map(k => `'${k}'`).join(',')})`);
+            // Pass comma-separated keys to SP (no string interpolation risk)
+            request.input('KeyNames', sql.NVarChar(sql.MAX), missingKeys.join(','));
+            const result = await request.execute('mp_ConfigMultiGet');
             
             result.recordset.forEach((row: any) => {
                 this.configCache[row.KeyName] = row.Value1;

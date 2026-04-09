@@ -28,7 +28,13 @@ import {
     exportListKeymanService,
     createMasterKeyMasterService,
     updateMasterKeyMasterService,
-    exportPositionService
+    exportPositionService,
+    getInboxManDriverService,
+    getMyRequestsMKDService,
+    submitMKDApproveActionService,
+    copyMKDService,
+    getMKDHistoryService,
+    cancelMKDService
 } from '../services/mkdService.js';
 
 export const getStartYear = async (c: Context) => {
@@ -573,6 +579,32 @@ export const getHistoryApprove = async (c: Context) => {
     }
 };
 
+export const getInboxManDriver = async (c: Context) => {
+    try {
+        const employeeId = c.req.query('employeeId') || '';
+        if (!employeeId) return c.json({ message: 'Missing employeeId' }, 400);
+        
+        const result = await getInboxManDriverService(employeeId);
+        return c.json({ success: true, data: result }, 200);
+    } catch (error: any) {
+        console.error('Error fetching inbox man driver:', error);
+        return c.json({ success: false, message: 'Internal server error', error: error.message }, 500);
+    }
+};
+
+export const getMyRequestsMKD = async (c: Context) => {
+    try {
+        const employeeId = c.req.query('employeeId') || '';
+        if (!employeeId) return c.json({ message: 'Missing employeeId' }, 400);
+        
+        const result = await getMyRequestsMKDService(employeeId);
+        return c.json({ success: true, data: result }, 200);
+    } catch (error: any) {
+        console.error('Error fetching my requests mkd:', error);
+        return c.json({ success: false, message: 'Internal server error', error: error.message }, 500);
+    }
+};
+
 export const getFlowHistory = async (c: Context) => {
     try {
         const id = c.req.param('id');
@@ -717,21 +749,20 @@ export const requestApproveMKD = async (c: Context) => {
     const id = c.req.param('id');
     try {
         const body = await c.req.json();
-        const { user } = body;
+        const { user, approveId } = body;
 
         if (!id || !user) {
             return c.json({ success: false, message: 'Missing required parameters' }, 400);
         }
 
-        const result = await requestApproveMKDService(id, user);
+        const result = await requestApproveMKDService(id, user, approveId);
         return c.json(result, 200);
     } catch (error: any) {
         console.error('Error in requestApproveMKD controller:', error);
         return c.json({ 
             success: false, 
-            message: 'Internal server error during request approve', 
-            error: error.message 
-        }, 500);
+            message: error.message || 'เกิดข้อผิดพลาดในการส่งคำขออนุมัติ'
+        }, 400); // 400 since it is likely a data or flow issue, not server crash
     }
 };
 
@@ -881,5 +912,51 @@ export const downloadMasterKeyTemplate = async (c: Context) => {
     } catch (error: any) {
         console.error('Error downloading template:', error);
         return c.json({ success: false, message: 'Internal server error' }, 500);
+    }
+};
+
+export const submitMKDApproveAction = async (c: Context) => {
+    try {
+        const id = parseInt(c.req.param('id'));
+        const { approveId, employeeId, action, remark } = await c.req.json();
+        const result = await submitMKDApproveActionService(id, approveId, employeeId, action, remark);
+        return c.json(result, 200);
+    } catch (error: any) {
+        console.error('Error in submitMKDApproveAction:', error);
+        return c.json({ success: false, message: error.message }, 500);
+    }
+};
+
+export const copyMKD = async (c: Context) => {
+    try {
+        const id = parseInt(c.req.param('id'));
+        const { copyFromId, employeeId, effectiveYear } = await c.req.json();
+        const result = await copyMKDService(copyFromId, id, employeeId, effectiveYear);
+        return c.json(result, 200);
+    } catch (error: any) {
+        console.error('Error in copyMKD:', error);
+        return c.json({ success: false, message: error.message }, 500);
+    }
+};
+
+export const getMKDHistory = async (c: Context) => {
+    try {
+        const employeeId = c.req.query('employeeId') || '';
+        const result = await getMKDHistoryService(employeeId);
+        return c.json({ success: true, data: result }, 200);
+    } catch (error: any) {
+        console.error('Error in getMKDHistory:', error);
+        return c.json({ success: false, message: error.message }, 500);
+    }
+};
+
+export const cancelMKD = async (c: Context) => {
+    try {
+        const id = parseInt(c.req.param('id'));
+        const result = await cancelMKDService(id);
+        return c.json(result, 200);
+    } catch (error: any) {
+        console.error('Error in cancelMKD:', error);
+        return c.json({ success: false, message: error.message }, 500);
     }
 };

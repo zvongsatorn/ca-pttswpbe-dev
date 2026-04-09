@@ -90,17 +90,7 @@ export const searchUnitsService = async (keyword: string) => {
         const request = new sql.Request(pool);
         request.input('Keyword', sql.NVarChar(200), `%${keyword}%`);
         
-        const query = `
-            SELECT TOP 100 
-                OrgUnitNo, 
-                OrgUnitNo + '  ' + UnitName + ' (' + UnitAbbr + ')' as UnitText
-            FROM InterfaceUnit
-            WHERE (OrgUnitNo LIKE @Keyword OR UnitName LIKE @Keyword OR UnitAbbr LIKE @Keyword)
-            AND GETDATE() BETWEEN BeginDate AND EndDate
-            ORDER BY OrgUnitNo
-        `;
-        
-        const result = await request.query(query);
+        const result = await request.execute('mp_InterfaceUnitSearch');
         return result.recordset || [];
     } catch (error) {
         console.error('Error executing searchUnitsService:', error);

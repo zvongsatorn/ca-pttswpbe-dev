@@ -197,8 +197,10 @@ export const getExportExcelService = async (
         const pool = await poolPromise;
         const request = new sql.Request(pool);
 
-        // --- NEW: Auto-resolve to latest available date if specific date is empty ---
-        const dateCheck = await pool.request().query(`SELECT TOP 1 EffectiveDate FROM MP_QuotaN WHERE EffectiveDate <= '${effectiveDateStr}' ORDER BY EffectiveDate DESC`);
+        // Fix SQL Injection: was using string interpolation. Now uses parameterized SP.
+        const dateCheck = await pool.request()
+            .input('EffectiveDateStr', sql.NVarChar(50), effectiveDateStr)
+            .execute('mp_QuotaNGetByDate');
         let finalDate = effectiveDateStr;
         if (dateCheck.recordset.length > 0) {
             finalDate = new Date(dateCheck.recordset[0].EffectiveDate).toISOString().split('T')[0];

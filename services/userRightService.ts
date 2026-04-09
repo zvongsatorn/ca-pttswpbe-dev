@@ -5,23 +5,10 @@ class UserRightService {
     async getOrgUnitInGroup(userGroupNo: string) {
         const pool = await poolPromise;
         try {
+            // Use SP for dynamic filter (pass NULL for 'all')
             const request = pool.request();
-            let query = `
-                SELECT 
-                    uio.OrgUnitNo AS OrgUnitID,
-                    uio.EmployeeID,
-                    u.FullName AS NameAll
-                FROM MP_UserInOrgUnitByGroup uio
-                LEFT JOIN MP_User u ON uio.EmployeeID = u.EmployeeID
-                WHERE uio.EndDate >= CAST(GETDATE() AS DATE)
-            `;
-            
-            if (userGroupNo !== 'all') {
-                request.input('UserGroupNo', sql.NVarChar, userGroupNo);
-                query += ` AND uio.UserGroupNo = @UserGroupNo`;
-            }
-            
-            const result = await request.query(query);
+            request.input('UserGroupNo', sql.NVarChar, userGroupNo !== 'all' ? userGroupNo : null);
+            const result = await request.execute('mp_OrgUnitInGroupGet');
             
             // Group by OrgUnitID for frontend expectations
             const grouped = result.recordset.reduce((acc: any[], current: any) => {
@@ -209,16 +196,7 @@ class UserRightService {
         const pool = await poolPromise;
         const result = await pool.request()
             .input('OrgUnitNo', sql.NVarChar, orgUnitNo)
-            .query(`
-                SELECT 
-                    uio.UserGroupNo, 
-                    uio.EmployeeID, 
-                    uio.OrgUnitNo,
-                    u.FullName AS NameAll
-                FROM MP_UserInOrgUnitByGroup uio
-                LEFT JOIN MP_User u ON uio.EmployeeID = u.EmployeeID
-                WHERE uio.OrgUnitNo = @OrgUnitNo AND uio.EndDate >= CAST(GETDATE() AS DATE)
-            `);
+            .execute('mp_UsersByOrgUnitGet');
         return result.recordset;
     }
 

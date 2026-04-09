@@ -45,13 +45,20 @@ class AuthController {
             // Map user data for Token validation completion
             const user = {
                 EmployeeID: userData.EmployeeID || userData.employeeID || userData.CODE || EmployeeID,
-                Name: userData.Name || userData.NAME || userData.FULLNAMETH || userData.FULLNAMEENG || userData.name || 'Admin User',
+                Name: userData.FullName || userData.fullName || userData.Name || userData.NAME || userData.FULLNAMETH || userData.FULLNAMEENG || userData.name || EmployeeID,
                 Email: userData.Email || userData.EMAIL || '',
                 UserID: userData.UserID || userData.UserId || ''
             };
 
             // 3. Get User Groups
-            const userGroups = await userGroupService.getGroupsForUser(EmployeeID);
+            let userGroups = await userGroupService.getGroupsForUser(EmployeeID);
+
+            // 3.1 Auto-assign to group 08 (OTHER) if user has no groups
+            if (userGroups.length === 0) {
+                console.log(`[Login] User ${EmployeeID} has no groups, auto-assigning to group 08 (OTHER)`);
+                await userGroupService.insertUserInGroup('08', EmployeeID, 'SYSTEM');
+                userGroups = await userGroupService.getGroupsForUser(EmployeeID);
+            }
 
             // 3.1 Get StartYear Config
             let startYear = await configService.getConfig('StartYear');
@@ -217,7 +224,14 @@ class AuthController {
                 UserID: userData.UserID || userData.UserId || ''
             };
 
-            const userGroups = await userGroupService.getGroupsForUser(EmployeeID);
+            let userGroups = await userGroupService.getGroupsForUser(EmployeeID);
+
+            // Auto-assign to group 08 (OTHER) if user has no groups
+            if (userGroups.length === 0) {
+                console.log(`[SSO] User ${EmployeeID} has no groups, auto-assigning to group 08 (OTHER)`);
+                await userGroupService.insertUserInGroup('08', EmployeeID, 'SYSTEM');
+                userGroups = await userGroupService.getGroupsForUser(EmployeeID);
+            }
             let startYear = await configService.getConfig('StartYear');
             if (!startYear) startYear = "2562";
 

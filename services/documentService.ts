@@ -1,4 +1,5 @@
 import { sql, poolPromise } from '../config/db.js';
+import { sendMail, resolveMailRecipient } from './mailService.js';
 
 export interface ApproverPayload {
     seqno: number;
@@ -64,9 +65,7 @@ export const submitDocumentService = async (payload: SubmitDocumentPayload, crea
             // First, lookup creator info from MP_User
             const creatorInfoReq = new sql.Request(transaction);
             creatorInfoReq.input('EmployeeID', sql.VarChar(20), createBy);
-            const creatorInfoRes = await creatorInfoReq.query(
-                `SELECT TOP 1 u.FullName, u.Email FROM MP_User u WHERE u.EmployeeID = @EmployeeID`
-            );
+            const creatorInfoRes = await creatorInfoReq.execute('mp_UserInfoGet');
             const creatorFullname = creatorInfoRes.recordset?.[0]?.FullName || createBy;
             const creatorEmail = creatorInfoRes.recordset?.[0]?.Email || null;
             const creatorUserGroupNo = payload.userGroupNo || null;
@@ -103,20 +102,43 @@ export const submitDocumentService = async (payload: SubmitDocumentPayload, crea
                     await itemReq.execute('mp_DocumentItemsInsert');
                 }
 
-                // Update MP_Transactions Status to 2 (Pending)
                 const trUpdateReq = new sql.Request(transaction);
                 trUpdateReq.input('TransactionNo', sql.VarChar(10), item.itemId);
+                trUpdateReq.input('Status', sql.Int, 2);
                 trUpdateReq.input('UpdateBy', sql.VarChar(20), createBy);
                 trUpdateReq.input('UpdateDate', sql.DateTime, today);
-                const trUpdateQuery = `
-                    UPDATE MP_Transactions 
-                    SET Status = 2, UpdateBy = @UpdateBy, UpdateDate = @UpdateDate
-                    WHERE TransactionNo = @TransactionNo
-                `;
-                await trUpdateReq.query(trUpdateQuery);
+                await trUpdateReq.execute('mp_TransactionsUpdateStatus');
             }
 
             await transaction.commit();
+
+            // Send notification emails to first approvers (Seqno 1)
+            try {
+                for (const item of payload.items) {
+                    const firstApprover = item.approvers.find(a => a.seqno === 1);
+                    if (firstApprover && firstApprover.email) {
+                        const recipient = await resolveMailRecipient('SendMailTrans', firstApprover.email);
+                        if (!recipient) continue;
+
+                        const subject = `[PTTSWP] โปรดพิจารณาคำขอ ${documentNo}`;
+                        const body = `
+                            <h2>แจ้งเตือนการเสนออนุมัติระบบ PTTSWP</h2>
+                            <p>เรียน คุณ ${firstApprover.fullname},</p>
+                            <p>มีคำขอหมายเลข <b>${documentNo}</b> (รายการ: ${item.itemId}) รอการพิจารณาจากท่าน</p>
+                            <p>ผู้เสนอ: ${creatorFullname}</p>
+                            <p>วันที่มีผล: ${effectiveDate.toLocaleDateString('th-TH')}</p>
+                            <p>โปรดตรวจสอบรายละเอียดที่: <a href="http://localhost:3000/mkd/inbox">PTTSWP Inbox</a></p>
+                            <hr/>
+                            <p style="color: gray; font-size: 12px;">นี่คือระบบเมลอัตโนมัติ โปรดติดต่อนักวิเคราะห์กำลังคนหากมีข้อสงสัย</p>
+                        `;
+                        await sendMail(recipient, subject, body);
+                    }
+                }
+            } catch (mailError) {
+                console.error('Email notification failed in submitDocumentService:', mailError);
+                // We don't throw here to ensure the transaction commit is not affected by email failure
+            }
+
             return { success: true, documentNo, message: 'Document submitted successfully' };
         } catch (error) {
             try {
@@ -138,29 +160,7 @@ export const getInboxService = async (employeeId: string) => {
         req.input('EmployeeID', sql.VarChar(20), employeeId);
         req.input('AuditStatus', sql.Int, 1); // Active
         
-        // Ensure DocumentStatus is 1 (Pending)
-        const query = `
-            SELECT 
-                d.DocumentNo, 
-                d.EffectiveDate, 
-                d.DocumentType, 
-                d.CreateBy, 
-                d.CreateDate
-            FROM MP_Document d
-            INNER JOIN MP_DocumentItems di ON d.DocumentNo = di.DocumentNo
-            WHERE di.EmployeeID = @EmployeeID 
-              AND di.AuditStatus = @AuditStatus
-              AND d.DocumentStatus = 1
-            GROUP BY 
-                d.DocumentNo, 
-                d.EffectiveDate, 
-                d.DocumentType, 
-                d.CreateBy, 
-                d.CreateDate
-            ORDER BY d.CreateDate DESC
-        `;
-        
-        const result = await req.query(query);
+        const result = await req.execute('mp_InboxGet');
         return result.recordset || [];
     } catch (error) {
         console.error('Error in getInboxService:', error);
@@ -176,16 +176,7 @@ export const getInboxCountService = async (employeeId: string) => {
         req.input('EmployeeID', sql.VarChar(20), employeeId);
         req.input('AuditStatus', sql.Int, 1); // Active
         
-        const query = `
-            SELECT COUNT(DISTINCT d.DocumentNo) as UnreadCount
-            FROM MP_Document d
-            INNER JOIN MP_DocumentItems di ON d.DocumentNo = di.DocumentNo
-            WHERE di.EmployeeID = @EmployeeID 
-              AND di.AuditStatus = @AuditStatus
-              AND d.DocumentStatus = 1
-        `;
-        
-        const result = await req.query(query);
+        const result = await req.execute('mp_InboxCountGet');
         return result.recordset?.[0]?.UnreadCount || 0;
     } catch (error) {
         console.error('Error in getInboxCountService:', error);
@@ -217,11 +208,7 @@ export const approveDocumentService = async (documentNo: string, itemId: string,
             nextSeqnoReq.input('ItemID', sql.VarChar(10), itemId);
             nextSeqnoReq.input('Seqno', sql.Int, seqno + 1);
             
-            const nextSeqnoQuery = `
-                SELECT TOP 1 * FROM MP_DocumentItems 
-                WHERE DocumentNo = @DocumentNo AND ItemID = @ItemID AND Seqno = @Seqno
-            `;
-            const nextSeqnoRes = await nextSeqnoReq.query(nextSeqnoQuery);
+            const nextSeqnoRes = await nextSeqnoReq.execute('mp_DocumentNextSeqnoGet');
 
             if (nextSeqnoRes.recordset && nextSeqnoRes.recordset.length > 0) {
                 // Activate next approver
@@ -236,16 +223,7 @@ export const approveDocumentService = async (documentNo: string, itemId: string,
                 // Automatically check if all items in Document are completely approved
                 const checkDocReq = new sql.Request(transaction);
                 checkDocReq.input('DocumentNo', sql.VarChar(13), documentNo);
-                
-                // If there are ANY items that do NOT have AuditStatus = 2 (or -1 depending on logic), we are not fully done.
-                // Wait, if an item is fully approved (max seqno is 2), all its seqnos have AuditStatus=2.
-                // We check if there are any active or pending items for this document
-                const checkDocQuery = `
-                    SELECT 1
-                    FROM MP_DocumentItems
-                    WHERE DocumentNo = @DocumentNo AND (AuditStatus = 1 OR AuditStatus = 0)
-                `;
-                const checkDocRes = await checkDocReq.query(checkDocQuery);
+                const checkDocRes = await checkDocReq.execute('mp_DocumentPendingCheck');
                 
                 if (!checkDocRes.recordset || checkDocRes.recordset.length === 0) {
                     // All items are completely approved (or rejected).
@@ -257,38 +235,74 @@ export const approveDocumentService = async (documentNo: string, itemId: string,
                     docUpdateReq.input('UpdateDate', sql.DateTime, today);
                     await docUpdateReq.execute('mp_DocumentUpdateStatus');
                     
-                    // Update MP_Transactions to 3 (Approved) for all items in this document that are successfully approved
-                    // (Assuming items that are approved are those that don't have AuditStatus = -1)
-                    const getApprovedItemsQuery = `
-                        SELECT DISTINCT ItemID 
-                        FROM MP_DocumentItems 
-                        WHERE DocumentNo = @DocumentNo 
-                          AND ItemID NOT IN (
-                              SELECT ItemID FROM MP_DocumentItems 
-                              WHERE DocumentNo = @DocumentNo AND AuditStatus = -1
-                          )
-                    `;
-                    const approvedItemsRes = await docUpdateReq.query(getApprovedItemsQuery);
+                    const approvedItemsRes = await docUpdateReq.execute('mp_DocumentApprovedItemsGet');
                     
                     if (approvedItemsRes.recordset && approvedItemsRes.recordset.length > 0) {
                         for (const row of approvedItemsRes.recordset) {
                            const trUpdateReq = new sql.Request(transaction);
                            trUpdateReq.input('TransactionNo', sql.VarChar(10), row.ItemID);
-                           // 3 = Approved (as per requirements)
-                           const trUpdateQuery = `
-                               UPDATE MP_Transactions 
-                               SET Status = 3, UpdateBy = @UpdateBy, UpdateDate = @UpdateDate
-                               WHERE TransactionNo = @TransactionNo
-                           `;
+                           trUpdateReq.input('Status', sql.Int, 3);
                            trUpdateReq.input('UpdateBy', sql.VarChar(20), updateBy);
                            trUpdateReq.input('UpdateDate', sql.DateTime, today);
-                           await trUpdateReq.query(trUpdateQuery);
+                           await trUpdateReq.execute('mp_TransactionsUpdateStatus');
                         }
                     }
                 }
             }
 
             await transaction.commit();
+
+            // Send notification emails after successful commit
+            try {
+                if (nextSeqnoRes.recordset && nextSeqnoRes.recordset.length > 0) {
+                    // Notify next approver
+                    const nextApprover = nextSeqnoRes.recordset[0];
+                    if (nextApprover.Email) {
+                        const recipient = await resolveMailRecipient('SendMailTrans', nextApprover.Email);
+                        if (recipient) {
+                            const subject = `[PTTSWP] โปรดพิจารณาคำขอ ${documentNo}`;
+                            const body = `
+                                <h2>แจ้งเตือนการพิจารณาคำขอระบบ PTTSWP</h2>
+                                <p>เรียน คุณ ${nextApprover.Fullname},</p>
+                                <p>มีคำขอหมายเลข <b>${documentNo}</b> (รายการ: ${itemId}) รอการพิจารณาจากท่าน</p>
+                                <p>โปรดตรวจสอบรายละเอียดที่: <a href="http://localhost:3000/mkd/inbox">PTTSWP Inbox</a></p>
+                                <hr/>
+                                <p style="color: gray; font-size: 12px;">นี่คือระบบเมลอัตโนมัติ</p>
+                            `;
+                            await sendMail(recipient, subject, body);
+                        }
+                    }
+                } else {
+                    // Full Approval - Notify Requester (Seqno 0)
+                    const requesterReq = new sql.Request(pool);
+                    requesterReq.input('DocumentNo', sql.VarChar(13), documentNo);
+                    requesterReq.input('ItemID', sql.VarChar(10), itemId);
+                    requesterReq.input('Seqno', sql.Int, 0);
+                    const requesterRes = await requesterReq.execute('mp_DocumentItemApproverGet'); // Get creator info
+                    
+                    if (requesterRes.recordset && requesterRes.recordset.length > 0) {
+                        const requester = requesterRes.recordset[0];
+                        if (requester.Email) {
+                            const recipient = await resolveMailRecipient('SendMailTrans', requester.Email);
+                            if (recipient) {
+                                const subject = `[PTTSWP] คำขอ ${documentNo} ได้รับการอนุมัติครบถ้วนแล้ว`;
+                                const body = `
+                                    <h2>แจ้งเตือนสถานะคำขอระบบ PTTSWP</h2>
+                                    <p>เรียน คุณ ${requester.Fullname},</p>
+                                    <p>คำขอหมายเลข <b>${documentNo}</b> (รายการ: ${itemId}) ของท่านได้รับการอนุมัติเรียบร้อยแล้ว</p>
+                                    <p>โปรดตรวจสอบรายละเอียดที่: <a href="http://localhost:3000/mkd/my-requests">My Requests</a></p>
+                                    <hr/>
+                                    <p style="color: gray; font-size: 12px;">นี่คือระบบเมลอัตโนมัติ</p>
+                                `;
+                                await sendMail(recipient, subject, body);
+                            }
+                        }
+                    }
+                }
+            } catch (mailError) {
+                console.error('Email notification failed in approveDocumentService:', mailError);
+            }
+
             return { success: true, message: 'Approved successfully' };
         } catch (error) {
             try {
@@ -325,11 +339,7 @@ export const rejectDocumentService = async (documentNo: string, itemId: string, 
             updateFutureReq.input('ItemID', sql.VarChar(10), itemId);
             updateFutureReq.input('Seqno', sql.Int, seqno);
             updateFutureReq.input('AuditDate', sql.DateTime, today);
-            await updateFutureReq.query(`
-                UPDATE MP_DocumentItems 
-                SET AuditStatus = -1, AuditDate = @AuditDate
-                WHERE DocumentNo = @DocumentNo AND ItemID = @ItemID AND Seqno > @Seqno AND AuditStatus = 0
-            `);
+            await updateFutureReq.execute('mp_DocumentItemsFutureRejectUpdate');
 
             // 2. Insert Remark
             const remarkReq = new sql.Request(transaction);
@@ -343,30 +353,19 @@ export const rejectDocumentService = async (documentNo: string, itemId: string, 
             // 3. Update MP_Transactions Status to 0
             const trUpdateReq = new sql.Request(transaction);
             trUpdateReq.input('TransactionNo', sql.VarChar(10), itemId);
+            trUpdateReq.input('Status', sql.Int, 0);
             trUpdateReq.input('UpdateBy', sql.VarChar(20), updateBy);
             trUpdateReq.input('UpdateDate', sql.DateTime, today);
-            
-            const trUpdateQuery = `
-                UPDATE MP_Transactions 
-                SET Status = 0, UpdateBy = @UpdateBy, UpdateDate = @UpdateDate
-                WHERE TransactionNo = @TransactionNo
-            `;
-            await trUpdateReq.query(trUpdateQuery);
+            await trUpdateReq.execute('mp_TransactionsUpdateStatus');
 
             // 4. Check if the original DocumentNo is now fully approved or rejected
             const checkDocReq = new sql.Request(transaction);
             checkDocReq.input('DocumentNo', sql.VarChar(13), documentNo);
-            const checkDocQuery = `
-                SELECT 1
-                FROM MP_DocumentItems
-                WHERE DocumentNo = @DocumentNo AND (AuditStatus = 1 OR AuditStatus = 0)
-            `;
-            const checkDocRes = await checkDocReq.query(checkDocQuery);
+            const checkDocRes = await checkDocReq.execute('mp_DocumentPendingCheck');
             
             if (!checkDocRes.recordset || checkDocRes.recordset.length === 0) {
                 // If no remaining active/pending items, update DocumentStatus
-                const allRejectedQuery = `SELECT 1 FROM MP_DocumentItems WHERE DocumentNo = @DocumentNo AND AuditStatus != -1`;
-                const allRejectedRes = await checkDocReq.query(allRejectedQuery);
+                const allRejectedRes = await checkDocReq.execute('mp_DocumentAllRejectedCheck');
 
                 const docUpdateReq = new sql.Request(transaction);
                 docUpdateReq.input('DocumentNo', sql.VarChar(13), documentNo);
@@ -384,6 +383,38 @@ export const rejectDocumentService = async (documentNo: string, itemId: string, 
             }
 
             await transaction.commit();
+
+            // Notify Requester about rejection
+            try {
+                const requesterReq = new sql.Request(pool);
+                requesterReq.input('DocumentNo', sql.VarChar(13), documentNo);
+                requesterReq.input('ItemID', sql.VarChar(10), itemId);
+                requesterReq.input('Seqno', sql.Int, 0);
+                const requesterRes = await requesterReq.execute('mp_DocumentItemApproverGet');
+                
+                if (requesterRes.recordset && requesterRes.recordset.length > 0) {
+                    const requester = requesterRes.recordset[0];
+                    if (requester.Email) {
+                        const recipient = await resolveMailRecipient('SendMailTrans', requester.Email);
+                        if (recipient) {
+                            const subject = `[PTTSWP] คำขอ ${documentNo} ถูกส่งคืน (Rejected)`;
+                            const body = `
+                                <h2>แจ้งเตือนการส่งคืนคำขอระบบ PTTSWP</h2>
+                                <p>เรียน คุณ ${requester.Fullname},</p>
+                                <p>คำขอหมายเลข <b>${documentNo}</b> (รายการ: ${itemId}) ของท่านถูกส่งคืน/ไม่ได้รับการอนุมัติ</p>
+                                <p><b>เหตุผล:</b> ${remark}</p>
+                                <p>โปรดตรวจสอบและแก้ไขได้ที่: <a href="http://localhost:3000/mkd/my-requests">My Requests</a></p>
+                                <hr/>
+                                <p style="color: gray; font-size: 12px;">นี่คือระบบเมลอัตโนมัติ</p>
+                            `;
+                            await sendMail(recipient, subject, body);
+                        }
+                    }
+                }
+            } catch (mailError) {
+                console.error('Email notification failed in rejectDocumentService:', mailError);
+            }
+
             return { success: true, message: 'Rejected transaction successfully.' };
         } catch (error) {
             try {
@@ -404,37 +435,7 @@ export const getMyRequestsService = async (employeeId: string) => {
         
         req.input('EmployeeID', sql.VarChar(20), employeeId);
         
-        // Find transactions where Status = 2 and CreateBy = employeeId
-        const query = `
-            SELECT 
-                t.TransactionNo,
-                t.CreateDate,
-                t.TransactionDesc,
-                di.Fullname AS CurrentHandler,
-                ug.UserGroupName AS UserGroupNo,
-                di.LastActionDate
-            FROM MP_Transactions t
-            OUTER APPLY (
-                SELECT TOP 1 
-                    di.Fullname, 
-                    di.UserGroupNo,
-                    -- Use the Document's CreateDate if this is the first approver, otherwise use the previous approver's AuditDate
-                    COALESCE(
-                        (SELECT TOP 1 AuditDate 
-                         FROM MP_DocumentItems prev 
-                         WHERE prev.DocumentNo = di.DocumentNo AND prev.Seqno = di.Seqno - 1),
-                        d.CreateDate
-                    ) as LastActionDate
-                FROM MP_DocumentItems di
-                INNER JOIN MP_Document d ON di.DocumentNo = d.DocumentNo
-                WHERE di.ItemID = t.TransactionNo AND di.AuditStatus = 1 AND d.DocumentStatus = 1
-            ) di
-            LEFT JOIN MP_UserGroup ug ON di.UserGroupNo = ug.UserGroupNo
-            WHERE t.CreateBy = @EmployeeID AND t.Status = 2
-            ORDER BY t.CreateDate DESC
-        `;
-        
-        const result = await req.query(query);
+        const result = await req.execute('mp_MyRequestsGet');
         return result.recordset || [];
     } catch (error) {
         console.error('Error in getMyRequestsService:', error);
@@ -450,47 +451,18 @@ export const getDocumentDetailService = async (documentNo: string, employeeId: s
         req.input('EmployeeID', sql.VarChar(20), employeeId);
 
         // Get document info
-        const docQuery = `SELECT * FROM MP_Document WHERE DocumentNo = @DocumentNo`;
-        const docRes = await req.query(docQuery);
+        const docRes = await req.execute('mp_DocumentInfoGet');
         if (!docRes.recordset?.length) return null;
         const document = docRes.recordset[0];
 
-        const itemsQuery = `
-            SELECT DISTINCT
-                di.ItemID, 
-                t.TransactionDesc, 
-                t.TransactionType,
-                rm.Note as ReqRemark,
-                r.Remark as RejectionReason,
-                (SELECT TOP 1 AuditStatus FROM MP_DocumentItems WHERE DocumentNo = di.DocumentNo AND ItemID = di.ItemID AND EmployeeID = @EmployeeID) as CurrentUserAuditStatus,
-                (SELECT COUNT(*) FROM MP_TransactionFile tf WHERE tf.TransactionNo = di.ItemID AND tf.FileStatus > 0) as FileCount,
-                (SELECT TOP 1 FileUpload FROM MP_TransactionFile tf WHERE tf.TransactionNo = di.ItemID AND tf.FileStatus > 0 ORDER BY tf.TransactionFileID DESC) as FileUrl
-            FROM MP_DocumentItems di
-            INNER JOIN MP_Transactions t ON di.ItemID = t.TransactionNo
-            LEFT JOIN MP_DocumentRemark r ON di.DocumentNo = r.DocumentNo AND di.ItemID = r.ItemID
-            LEFT JOIN MP_Remark rm ON rm.TransactionNo = di.ItemID
-            WHERE di.DocumentNo = @DocumentNo
-        `;
-        const itemsRes = await req.query(itemsQuery);
+        const itemsReq = new sql.Request(pool);
+        itemsReq.input('DocumentNo', sql.VarChar(13), documentNo);
+        itemsReq.input('EmployeeID', sql.VarChar(20), employeeId);
+        const itemsRes = await itemsReq.execute('mp_DocumentItemsDetailGet');
 
-        // Get approval logs for this document
-        // We get distinct approvers per log, in sequence
-        const logsQuery = `
-            SELECT DISTINCT
-                di.Seqno,
-                di.EmployeeID,
-                di.Fullname,
-                di.AuditStatus,
-                di.AuditDate,
-                di.UserGroupNo,
-                di.UnitSide,
-                ug.UserGroupName
-            FROM MP_DocumentItems di
-            LEFT JOIN MP_UserGroup ug ON di.UserGroupNo = ug.UserGroupNo
-            WHERE di.DocumentNo = @DocumentNo
-            ORDER BY di.Seqno ASC
-        `;
-        const logsRes = await req.query(logsQuery);
+        const logsReq = new sql.Request(pool);
+        logsReq.input('DocumentNo', sql.VarChar(13), documentNo);
+        const logsRes = await logsReq.execute('mp_DocumentLogsGet');
 
         return {
             document,
@@ -568,20 +540,7 @@ export const getProgressService = async (employeeId: string) => {
         const req = new sql.Request(pool);
         req.input('EmployeeID', sql.VarChar(20), employeeId);
 
-        // Get all in-progress documents (DocumentStatus = 1)
-        const docsQuery = `
-            SELECT 
-                d.DocumentNo,
-                d.EffectiveDate,
-                d.DocumentType,
-                d.CreateBy,
-                d.CreateDate,
-                d.DocumentStatus
-            FROM MP_Document d
-            WHERE d.DocumentStatus = 1
-            ORDER BY d.CreateDate DESC
-        `;
-        const docsRes = await req.query(docsQuery);
+        const docsRes = await req.execute('mp_DocumentProgressListGet');
         if (!docsRes.recordset?.length) return [];
 
         const results = [];
@@ -589,27 +548,10 @@ export const getProgressService = async (employeeId: string) => {
         for (const doc of docsRes.recordset) {
             const docNo = doc.DocumentNo;
 
-            // Get items (transactions) for this document
             const itemsReq = new sql.Request(pool);
             itemsReq.input('DocumentNo', sql.VarChar(13), docNo);
-            const itemsQuery = `
-                SELECT DISTINCT
-                    di.ItemID,
-                    t.TransactionDesc,
-                    t.TransactionType,
-                    t.Status as TransactionStatus,
-                    t.ConclusionNo,
-                    rm.Note as ReqRemark,
-                    r.Remark as RejectionReason,
-                    (SELECT COUNT(*) FROM MP_TransactionFile tf WHERE tf.TransactionNo = di.ItemID AND tf.FileStatus > 0) as FileCount,
-                    (SELECT TOP 1 FileUpload FROM MP_TransactionFile tf WHERE tf.TransactionNo = di.ItemID AND tf.FileStatus > 0 ORDER BY tf.TransactionFileID DESC) as FileUrl
-                FROM MP_DocumentItems di
-                INNER JOIN MP_Transactions t ON di.ItemID = t.TransactionNo
-                LEFT JOIN MP_DocumentRemark r ON di.DocumentNo = r.DocumentNo AND di.ItemID = r.ItemID
-                LEFT JOIN MP_Remark rm ON rm.TransactionNo = di.ItemID
-                WHERE di.DocumentNo = @DocumentNo
-            `;
-            const itemsRes = await itemsReq.query(itemsQuery);
+            itemsReq.input('EmployeeID', sql.VarChar(20), null);
+            const itemsRes = await itemsReq.execute('mp_DocumentItemsDetailGet');
 
             // Get approval logs
             const logsReq = new sql.Request(pool);
@@ -691,19 +633,7 @@ export const getAllTransactionsService = async (employeeId: string) => {
         const req = new sql.Request(pool);
         req.input('EmployeeID', sql.VarChar(20), employeeId);
 
-        // Get all documents regardless of status
-        const docsQuery = `
-            SELECT 
-                d.DocumentNo,
-                d.EffectiveDate,
-                d.DocumentType,
-                d.CreateBy,
-                d.CreateDate,
-                d.DocumentStatus
-            FROM MP_Document d
-            ORDER BY d.CreateDate DESC
-        `;
-        const docsRes = await req.query(docsQuery);
+        const docsRes = await req.execute('mp_AllDocumentsGet');
         if (!docsRes.recordset?.length) return [];
 
         const results = [];
@@ -714,44 +644,13 @@ export const getAllTransactionsService = async (employeeId: string) => {
             // Get items (transactions) for this document
             const itemsReq = new sql.Request(pool);
             itemsReq.input('DocumentNo', sql.VarChar(13), docNo);
-            const itemsQuery = `
-                SELECT DISTINCT
-                    di.ItemID,
-                    t.TransactionDesc,
-                    t.TransactionType,
-                    t.Status as TransactionStatus,
-                    t.ConclusionNo,
-                    rm.Note as ReqRemark,
-                    r.Remark as RejectionReason,
-                    (SELECT COUNT(*) FROM MP_TransactionFile tf WHERE tf.TransactionNo = di.ItemID AND tf.FileStatus > 0) as FileCount,
-                    (SELECT TOP 1 FileUpload FROM MP_TransactionFile tf WHERE tf.TransactionNo = di.ItemID AND tf.FileStatus > 0 ORDER BY tf.TransactionFileID DESC) as FileUrl
-                FROM MP_DocumentItems di
-                INNER JOIN MP_Transactions t ON di.ItemID = t.TransactionNo
-                LEFT JOIN MP_DocumentRemark r ON di.DocumentNo = r.DocumentNo AND di.ItemID = r.ItemID
-                LEFT JOIN MP_Remark rm ON rm.TransactionNo = di.ItemID
-                WHERE di.DocumentNo = @DocumentNo
-            `;
-            const itemsRes = await itemsReq.query(itemsQuery);
+            itemsReq.input('EmployeeID', sql.VarChar(20), null);
+            const itemsRes = await itemsReq.execute('mp_DocumentItemsDetailGet');
 
             // Get approval logs
             const logsReq = new sql.Request(pool);
             logsReq.input('DocumentNo', sql.VarChar(13), docNo);
-            const logsQuery = `
-                SELECT DISTINCT
-                    di.Seqno,
-                    di.EmployeeID,
-                    di.Fullname,
-                    di.AuditStatus,
-                    di.AuditDate,
-                    di.UserGroupNo,
-                    di.UnitSide,
-                    ug.UserGroupName
-                FROM MP_DocumentItems di
-                LEFT JOIN MP_UserGroup ug ON di.UserGroupNo = ug.UserGroupNo
-                WHERE di.DocumentNo = @DocumentNo
-                ORDER BY di.Seqno ASC
-            `;
-            const logsRes = await logsReq.query(logsQuery);
+            const logsRes = await logsReq.execute('mp_DocumentLogsGet');
 
             // Determine process stage
             const hasActive = logsRes.recordset?.some((l: { AuditStatus: number }) => l.AuditStatus === 1);
