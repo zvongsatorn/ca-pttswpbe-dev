@@ -17,6 +17,14 @@
     "./**/*.ts"
   ],
   "exclude": [
-    "node_modules"
+    "node_modules",
+    "fixdb.ts",
+    "tmp_sp.ts",
+    "test*.ts",
+    "check*.ts",
+    "chk.ts",
+    "debug*.ts",
+    "apply_sp_fix.ts",
+    "get_*.ts"
   ]
 }
