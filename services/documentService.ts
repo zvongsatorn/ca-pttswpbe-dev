@@ -448,7 +448,6 @@ export const getDocumentDetailService = async (documentNo: string, employeeId: s
         const pool = await poolPromise;
         const req = new sql.Request(pool);
         req.input('DocumentNo', sql.VarChar(13), documentNo);
-        req.input('EmployeeID', sql.VarChar(20), employeeId);
 
         // Get document info
         const docRes = await req.execute('mp_DocumentInfoGet');
