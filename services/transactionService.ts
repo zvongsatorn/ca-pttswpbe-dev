@@ -175,7 +175,7 @@ export const saveDraftTransactionService = async (
                     .input('FileUpload', sql.NVarChar(50), payload.fileUrl)
                     .input('CreateBy', sql.VarChar(20), createBy)
                     .input('CreateDate', sql.DateTime, createDate)
-                    .input('RefID', sql.Decimal(18,0), payload.refId ? payload.refId : 0)
+                    .input('RefID', sql.Decimal(18,0), payload.refId ? payload.refId : null)
                     .execute('mp_TransactionFileInsert');
 
             await transaction.commit();
@@ -240,13 +240,20 @@ export const getDraftTransactionsService = async (employeeId: string, effectiveD
         ]);
 
         // Attach resolved names to records
-        return records.map((r: any) => ({
-            ...r,
-            LevelGroupToName: r.LevelGroupTo ? (levelGroupNameMap[r.LevelGroupTo] || r.LevelGroupTo) : '',
-            LevelGroupFromName: r.LevelGroupFrom ? (levelGroupNameMap[r.LevelGroupFrom] || r.LevelGroupFrom) : '',
-            UnitTransferName: r.UnitTransfer ? (unitNameMap[r.UnitTransfer] || r.UnitTransfer) : '',
-            UnitReceiveName: r.UnitReceive ? (unitNameMap[r.UnitReceive] || r.UnitReceive) : '',
-        }));
+        return records.map((r: any) => {
+            let safeFileUrl = r.FileUpload || null;
+            if (safeFileUrl && !safeFileUrl.startsWith('uploads/')) {
+                safeFileUrl = `uploads/transactions/${safeFileUrl}`;
+            }
+            return {
+                ...r,
+                LevelGroupToName: r.LevelGroupTo ? (levelGroupNameMap[r.LevelGroupTo] || r.LevelGroupTo) : '',
+                LevelGroupFromName: r.LevelGroupFrom ? (levelGroupNameMap[r.LevelGroupFrom] || r.LevelGroupFrom) : '',
+                UnitTransferName: r.UnitTransfer ? (unitNameMap[r.UnitTransfer] || r.UnitTransfer) : '',
+                UnitReceiveName: r.UnitReceive ? (unitNameMap[r.UnitReceive] || r.UnitReceive) : '',
+                FileUpload: safeFileUrl
+            };
+        });
     } catch (error) {
         console.error('Error in getDraftTransactionsService:', error);
         throw error;
@@ -280,7 +287,7 @@ export const getExistingFilesService = async (
                name: row.FileName,
                transactionNo: row.TransactionNo,
                conclusionNo: row.ConclusionNo,
-               fileUrl: row.FileUpload
+               fileUrl: (row.FileUpload && !row.FileUpload.startsWith('uploads/')) ? `uploads/transactions/${row.FileUpload}` : row.FileUpload
             }));
         }
 

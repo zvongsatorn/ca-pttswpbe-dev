@@ -56,22 +56,28 @@ export const saveDraftTransaction = async (c: Context) => {
         const result = await saveDraftTransactionService(payload, createBy);
         const transactionNo: string = result?.transactionNo || '';
 
-        // If a file was uploaded, save it to uploads/transactions/[transactionNo]/[fileName]
+        // If a file was uploaded, save it to uploads/transactions/ (flat directory like mkd)
         if (fileEntry && transactionNo) {
-            const uploadsDir = path.join(process.cwd(), 'uploads', 'transactions', transactionNo);
+            const uploadsDir = path.join(process.cwd(), 'uploads', 'transactions');
             if (!existsSync(uploadsDir)) {
                 await mkdir(uploadsDir, { recursive: true });
             }
-            const fileName = fileEntry.name;
-            const savedFilePath = path.join(uploadsDir, fileName);
+            const originalName = fileEntry.name;
+            let extension = path.extname(originalName).toLowerCase();
+            if (!extension) extension = ".pdf";
+            
+            const { randomUUID } = await import('crypto');
+            const safeName = `${randomUUID()}${extension}`;
+            
+            const savedFilePath = path.join(uploadsDir, safeName);
             const fileBuffer = Buffer.from(await fileEntry.arrayBuffer());
             await writeFile(savedFilePath, fileBuffer);
 
-            // Update fileUrl in the DB record
-            const fileUrl = `uploads/transactions/${transactionNo}/${fileName}`;
-            payload.fileName = fileName;
-            payload.fileUrl = fileUrl;
-            await saveDraftTransactionService({ ...payload, fileUrl }, createBy, transactionNo);
+            // Update fileUrl in the DB record (ONLY store the safeName to stay within 50 chars)
+            // The frontend resolves the path automatically.
+            payload.fileName = originalName;
+            payload.fileUrl = safeName;
+            await saveDraftTransactionService({ ...payload }, createBy, transactionNo);
         }
 
         return c.json({
