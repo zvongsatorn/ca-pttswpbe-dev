@@ -128,7 +128,11 @@ export const resolveMailRecipient = async (configKey: string, originalRecipient:
 
         if (status === '2') {
             console.log(`[MailService] Redirecting mail from ${originalRecipient} to test address: ${testEmail} (Value1=2)`);
-            return testEmail || originalRecipient;
+            if (!testEmail || testEmail.trim() === '') {
+                console.warn(`[MailService] Test email (Value2) is not configured. Returning null to avoid sending to real user ${originalRecipient}.`);
+                return null;
+            }
+            return testEmail.trim();
         }
 
         return originalRecipient;

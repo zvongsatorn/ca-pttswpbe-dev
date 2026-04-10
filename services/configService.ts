@@ -48,7 +48,10 @@ class ConfigService {
         const missingKeys = keys.filter(k => !this.configCache[k]);
         
         if (missingKeys.length === 0) {
-            keys.forEach(k => results[k] = this.configCache[k]);
+            keys.forEach(k => {
+                const cachedVal = this.configCache[k];
+                results[k] = cachedVal.includes('|') ? cachedVal.split('|')[0] : cachedVal;
+            });
             return results;
         }
 
@@ -62,10 +65,15 @@ class ConfigService {
             const result = await request.execute('mp_ConfigMultiGet');
             
             result.recordset.forEach((row: any) => {
-                this.configCache[row.KeyName] = row.Value1;
+                const val1 = row.Value1 || "";
+                const val2 = row.Value2 || "";
+                this.configCache[row.KeyName] = `${val1}|${val2}`;
             });
             
-            keys.forEach(k => results[k] = this.configCache[k] || "");
+            keys.forEach(k => {
+                const cachedVal = this.configCache[k] || "";
+                results[k] = cachedVal.includes('|') ? cachedVal.split('|')[0] : cachedVal;
+            });
             return results;
         } catch (err) {
             console.error(`Error fetching configs:`, err);
