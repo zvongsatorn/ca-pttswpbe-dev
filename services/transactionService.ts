@@ -168,6 +168,7 @@ export const saveDraftTransactionService = async (
         } // End of if (!existingTransactionNo)
 
         // mp_TransactionFileInsert (if file provided)
+        if (payload.fileName && payload.fileName.trim() !== '') {
                 await transaction.request()
                     .input('EffectiveDate', sql.DateTime, effectiveDate)
                     .input('TransactionNo', sql.VarChar(10), transactionNo)
@@ -177,6 +178,7 @@ export const saveDraftTransactionService = async (
                     .input('CreateDate', sql.DateTime, createDate)
                     .input('RefID', sql.Decimal(18,0), payload.refId ? payload.refId : null)
                     .execute('mp_TransactionFileInsert');
+        }
 
             await transaction.commit();
             return { success: true, transactionNo, message: 'Draft saved successfully' };

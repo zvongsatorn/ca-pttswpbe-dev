@@ -18,8 +18,32 @@ export const saveDraftTransaction = async (c: Context) => {
         const body = JSON.parse(payloadStr);
         const createBy = body.employeeId || 'SYSTEM';
 
-        const payload: DraftTransactionPayload = {
-            transactionType: body.transactionType,
+        // Process file upload first if present
+        let fileUrlToSave = body.detailData?.existingFileUrl || null;
+        let fileNameToSave = body.detailData?.existingFileName || null;
+        
+        if (fileEntry) {
+            const uploadsDir = path.join(process.cwd(), 'uploads', 'transactions');
+            if (!existsSync(uploadsDir)) {
+                await mkdir(uploadsDir, { recursive: true });
+            }
+            const originalName = fileEntry.name;
+            let extension = path.extname(originalName).toLowerCase();
+            if (!extension) extension = ".pdf";
+            
+            const { randomUUID } = await import('crypto');
+            const safeName = `${randomUUID()}${extension}`;
+            
+            const savedFilePath = path.join(uploadsDir, safeName);
+            const fileBuffer = Buffer.from(await fileEntry.arrayBuffer());
+            await writeFile(savedFilePath, fileBuffer);
+            
+            fileNameToSave = originalName;
+            fileUrlToSave = safeName;
+        }
+
+        const payload = {
+            transactionType: parseInt(body.transactionType as string),
             effectiveMonth: body.effectiveMonth,
             effectiveYear: body.effectiveYear,
             poolRsFlag: body.poolRsFlag,
@@ -46,40 +70,15 @@ export const saveDraftTransaction = async (c: Context) => {
             levelGroupFromName: body.detailData?.levelGroupFromName || '',
             levelGroupToName: body.detailData?.levelGroupToName || '',
 
-            // File fields - will fill after saving or use existing file if selected
-            fileName: fileEntry?.name || body.detailData?.existingFileName,
-            fileUrl: body.detailData?.existingFileUrl,
+            // File fields
+            fileName: fileNameToSave,
+            fileUrl: fileUrlToSave,
             refId: body.detailData?.existingFileId, // Using existing TransactionFileID as RefID
         };
 
-        // Save draft first (service generates transactionNo)
+        // Save draft and the file record in a single call
         const result = await saveDraftTransactionService(payload, createBy);
-        const transactionNo: string = result?.transactionNo || '';
-
-        // If a file was uploaded, save it to uploads/transactions/ (flat directory like mkd)
-        if (fileEntry && transactionNo) {
-            const uploadsDir = path.join(process.cwd(), 'uploads', 'transactions');
-            if (!existsSync(uploadsDir)) {
-                await mkdir(uploadsDir, { recursive: true });
-            }
-            const originalName = fileEntry.name;
-            let extension = path.extname(originalName).toLowerCase();
-            if (!extension) extension = ".pdf";
-            
-            const { randomUUID } = await import('crypto');
-            const safeName = `${randomUUID()}${extension}`;
-            
-            const savedFilePath = path.join(uploadsDir, safeName);
-            const fileBuffer = Buffer.from(await fileEntry.arrayBuffer());
-            await writeFile(savedFilePath, fileBuffer);
-
-            // Update fileUrl in the DB record (ONLY store the safeName to stay within 50 chars)
-            // The frontend resolves the path automatically.
-            payload.fileName = originalName;
-            payload.fileUrl = safeName;
-            await saveDraftTransactionService({ ...payload }, createBy, transactionNo);
-        }
-
+        
         return c.json({
             status: 200,
             message: 'Draft saved successfully',
