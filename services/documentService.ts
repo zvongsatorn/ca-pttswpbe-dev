@@ -1,5 +1,50 @@
 import { sql, poolPromise } from '../config/db.js';
 import { sendMail, resolveMailRecipient } from './mailService.js';
+import { createMailLog } from './mailLogService.js';
+
+const sendMailWithLog = async (params: {
+    recipient: string | null;
+    requestedRecipient?: string | null;
+    subject: string;
+    body: string;
+    sendFromBy: string;
+    sendToBy?: string | null;
+    refNo?: string | null;
+    context: string;
+}) => {
+    const now = new Date();
+    const requestedRecipient = (params.requestedRecipient || '').trim();
+    const finalRecipient = (params.recipient || '').trim();
+    const logRecipient = finalRecipient || requestedRecipient;
+    const canSend = finalRecipient !== '';
+    const result = canSend
+        ? await sendMail(finalRecipient, params.subject, params.body)
+        : { success: false, error: 'Skip sending because resolved recipient is empty' };
+    const remark = canSend ? null : 'SKIP';
+
+    try {
+        await createMailLog({
+            sendFromBy: params.sendFromBy || 'SYSTEM',
+            sendFromDate: now,
+            sendToBy: params.sendToBy || null,
+            emailTo: logRecipient,
+            mailSubject: params.subject,
+            mailBody: params.body,
+            effectiveDate: now,
+            isCC: 0,
+            isSend: canSend && result.success ? 1 : 0,
+            remark,
+            ccRecipients: [],
+            refNo: params.refNo || null,
+            createBy: params.sendFromBy || 'SYSTEM',
+            createDate: now
+        });
+    } catch (logError) {
+        console.error(`[${params.context}] Failed to insert MP_MailTo log:`, logError);
+    }
+
+    return result;
+};
 
 export interface ApproverPayload {
     seqno: number;
@@ -118,7 +163,6 @@ export const submitDocumentService = async (payload: SubmitDocumentPayload, crea
                     const firstApprover = item.approvers.find(a => a.seqno === 1);
                     if (firstApprover && firstApprover.email) {
                         const recipient = await resolveMailRecipient('SendMailTrans', firstApprover.email);
-                        if (!recipient) continue;
 
                         const subject = `[PTTSWP] โปรดพิจารณาคำขอ ${documentNo}`;
                         const body = `
@@ -131,7 +175,16 @@ export const submitDocumentService = async (payload: SubmitDocumentPayload, crea
                             <hr/>
                             <p style="color: gray; font-size: 12px;">นี่คือระบบเมลอัตโนมัติ โปรดติดต่อนักวิเคราะห์กำลังคนหากมีข้อสงสัย</p>
                         `;
-                        await sendMail(recipient, subject, body);
+                        await sendMailWithLog({
+                            recipient,
+                            requestedRecipient: firstApprover.email,
+                            subject,
+                            body,
+                            sendFromBy: createBy,
+                            sendToBy: firstApprover.employeeId || null,
+                            refNo: documentNo,
+                            context: 'submitDocumentService'
+                        });
                     }
                 }
             } catch (mailError) {
@@ -259,18 +312,25 @@ export const approveDocumentService = async (documentNo: string, itemId: string,
                     const nextApprover = nextSeqnoRes.recordset[0];
                     if (nextApprover.Email) {
                         const recipient = await resolveMailRecipient('SendMailTrans', nextApprover.Email);
-                        if (recipient) {
-                            const subject = `[PTTSWP] โปรดพิจารณาคำขอ ${documentNo}`;
-                            const body = `
-                                <h2>แจ้งเตือนการพิจารณาคำขอระบบ PTTSWP</h2>
-                                <p>เรียน คุณ ${nextApprover.Fullname},</p>
-                                <p>มีคำขอหมายเลข <b>${documentNo}</b> (รายการ: ${itemId}) รอการพิจารณาจากท่าน</p>
-                                <p>โปรดตรวจสอบรายละเอียดที่: <a href="http://localhost:3000/mkd/inbox">PTTSWP Inbox</a></p>
-                                <hr/>
-                                <p style="color: gray; font-size: 12px;">นี่คือระบบเมลอัตโนมัติ</p>
-                            `;
-                            await sendMail(recipient, subject, body);
-                        }
+                        const subject = `[PTTSWP] โปรดพิจารณาคำขอ ${documentNo}`;
+                        const body = `
+                            <h2>แจ้งเตือนการพิจารณาคำขอระบบ PTTSWP</h2>
+                            <p>เรียน คุณ ${nextApprover.Fullname},</p>
+                            <p>มีคำขอหมายเลข <b>${documentNo}</b> (รายการ: ${itemId}) รอการพิจารณาจากท่าน</p>
+                            <p>โปรดตรวจสอบรายละเอียดที่: <a href="http://localhost:3000/mkd/inbox">PTTSWP Inbox</a></p>
+                            <hr/>
+                            <p style="color: gray; font-size: 12px;">นี่คือระบบเมลอัตโนมัติ</p>
+                        `;
+                        await sendMailWithLog({
+                            recipient,
+                            requestedRecipient: nextApprover.Email,
+                            subject,
+                            body,
+                            sendFromBy: updateBy,
+                            sendToBy: nextApprover.EmployeeID || nextApprover.EmployeeId || null,
+                            refNo: documentNo,
+                            context: 'approveDocumentService'
+                        });
                     }
                 } else {
                     // Full Approval - Notify Requester (Seqno 0)
@@ -284,18 +344,25 @@ export const approveDocumentService = async (documentNo: string, itemId: string,
                         const requester = requesterRes.recordset[0];
                         if (requester.Email) {
                             const recipient = await resolveMailRecipient('SendMailTrans', requester.Email);
-                            if (recipient) {
-                                const subject = `[PTTSWP] คำขอ ${documentNo} ได้รับการอนุมัติครบถ้วนแล้ว`;
-                                const body = `
-                                    <h2>แจ้งเตือนสถานะคำขอระบบ PTTSWP</h2>
-                                    <p>เรียน คุณ ${requester.Fullname},</p>
-                                    <p>คำขอหมายเลข <b>${documentNo}</b> (รายการ: ${itemId}) ของท่านได้รับการอนุมัติเรียบร้อยแล้ว</p>
-                                    <p>โปรดตรวจสอบรายละเอียดที่: <a href="http://localhost:3000/mkd/my-requests">My Requests</a></p>
-                                    <hr/>
-                                    <p style="color: gray; font-size: 12px;">นี่คือระบบเมลอัตโนมัติ</p>
-                                `;
-                                await sendMail(recipient, subject, body);
-                            }
+                            const subject = `[PTTSWP] คำขอ ${documentNo} ได้รับการอนุมัติครบถ้วนแล้ว`;
+                            const body = `
+                                <h2>แจ้งเตือนสถานะคำขอระบบ PTTSWP</h2>
+                                <p>เรียน คุณ ${requester.Fullname},</p>
+                                <p>คำขอหมายเลข <b>${documentNo}</b> (รายการ: ${itemId}) ของท่านได้รับการอนุมัติเรียบร้อยแล้ว</p>
+                                <p>โปรดตรวจสอบรายละเอียดที่: <a href="http://localhost:3000/mkd/my-requests">My Requests</a></p>
+                                <hr/>
+                                <p style="color: gray; font-size: 12px;">นี่คือระบบเมลอัตโนมัติ</p>
+                            `;
+                            await sendMailWithLog({
+                                recipient,
+                                requestedRecipient: requester.Email,
+                                subject,
+                                body,
+                                sendFromBy: updateBy,
+                                sendToBy: requester.EmployeeID || requester.EmployeeId || null,
+                                refNo: documentNo,
+                                context: 'approveDocumentService'
+                            });
                         }
                     }
                 }
@@ -396,19 +463,26 @@ export const rejectDocumentService = async (documentNo: string, itemId: string, 
                     const requester = requesterRes.recordset[0];
                     if (requester.Email) {
                         const recipient = await resolveMailRecipient('SendMailTrans', requester.Email);
-                        if (recipient) {
-                            const subject = `[PTTSWP] คำขอ ${documentNo} ถูกส่งคืน (Rejected)`;
-                            const body = `
-                                <h2>แจ้งเตือนการส่งคืนคำขอระบบ PTTSWP</h2>
-                                <p>เรียน คุณ ${requester.Fullname},</p>
-                                <p>คำขอหมายเลข <b>${documentNo}</b> (รายการ: ${itemId}) ของท่านถูกส่งคืน/ไม่ได้รับการอนุมัติ</p>
-                                <p><b>เหตุผล:</b> ${remark}</p>
-                                <p>โปรดตรวจสอบและแก้ไขได้ที่: <a href="http://localhost:3000/mkd/my-requests">My Requests</a></p>
-                                <hr/>
-                                <p style="color: gray; font-size: 12px;">นี่คือระบบเมลอัตโนมัติ</p>
-                            `;
-                            await sendMail(recipient, subject, body);
-                        }
+                        const subject = `[PTTSWP] คำขอ ${documentNo} ถูกส่งคืน (Rejected)`;
+                        const body = `
+                            <h2>แจ้งเตือนการส่งคืนคำขอระบบ PTTSWP</h2>
+                            <p>เรียน คุณ ${requester.Fullname},</p>
+                            <p>คำขอหมายเลข <b>${documentNo}</b> (รายการ: ${itemId}) ของท่านถูกส่งคืน/ไม่ได้รับการอนุมัติ</p>
+                            <p><b>เหตุผล:</b> ${remark}</p>
+                            <p>โปรดตรวจสอบและแก้ไขได้ที่: <a href="http://localhost:3000/mkd/my-requests">My Requests</a></p>
+                            <hr/>
+                            <p style="color: gray; font-size: 12px;">นี่คือระบบเมลอัตโนมัติ</p>
+                        `;
+                        await sendMailWithLog({
+                            recipient,
+                            requestedRecipient: requester.Email,
+                            subject,
+                            body,
+                            sendFromBy: updateBy,
+                            sendToBy: requester.EmployeeID || requester.EmployeeId || null,
+                            refNo: documentNo,
+                            context: 'rejectDocumentService'
+                        });
                     }
                 }
             } catch (mailError) {

@@ -592,6 +592,7 @@ const processOneRecipient = async (params: {
         effectiveDate: limitDate,
         isCC: 0,
         isSend: sendResult.isSend,
+        remark: sendResult.finalRecipient ? null : 'SKIP',
         ccRecipients: [],
         createBy: 'SYSTEM',
         createDate: now
@@ -783,6 +784,7 @@ export const sendMailAlertDebugTest = async (params: {
         effectiveDate: now,
         isCC: 0,
         isSend: sendResult.isSend,
+        remark: sendResult.finalRecipient ? null : 'SKIP',
         ccRecipients: [],
         refNo: `DBG${templateType.replace(/_/g, '').slice(0, 8)}${getDateTimeKey(now)}`.slice(0, 20),
         createBy: requestedBy,

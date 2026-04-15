@@ -17,6 +17,7 @@ export interface CreateMailLogPayload {
     effectiveDate?: Date | null;
     isCC: number;
     isSend: number;
+    remark?: string | null;
     ccRecipients?: MailCcRecipient[];
     refNo?: string | null;
     createBy?: string | null;
@@ -54,15 +55,16 @@ const insertMailTo = async (tx: sql.Transaction, payload: CreateMailLogPayload):
     baseRequest.input('EffectiveDate', sql.DateTime, payload.effectiveDate ?? payload.sendFromDate);
     baseRequest.input('IsCC', sql.Int, payload.isCC);
     baseRequest.input('IsSend', sql.Int, payload.isSend);
+    baseRequest.input('Remark', sql.VarChar(100), fit(payload.remark, 100));
 
     try {
         const result = await baseRequest.query(`
             INSERT INTO MP_MailTo (
-                SendFromBy, SendFromDate, SendToBy, EmailTo, MailFrom, MailSubject, MailBody, EffectiveDate, IsCC, IsSend
+                SendFromBy, SendFromDate, SendToBy, EmailTo, MailFrom, MailSubject, MailBody, EffectiveDate, IsCC, IsSend, Remark
             )
             OUTPUT INSERTED.MailToID
             VALUES (
-                @SendFromBy, @SendFromDate, @SendToBy, @EmailTo, @MailFrom, @MailSubject, @MailBody, @EffectiveDate, @IsCC, @IsSend
+                @SendFromBy, @SendFromDate, @SendToBy, @EmailTo, @MailFrom, @MailSubject, @MailBody, @EffectiveDate, @IsCC, @IsSend, @Remark
             )
         `);
 
@@ -88,6 +90,7 @@ const insertMailTo = async (tx: sql.Transaction, payload: CreateMailLogPayload):
         manualRequest.input('EffectiveDate', sql.DateTime, payload.effectiveDate ?? payload.sendFromDate);
         manualRequest.input('IsCC', sql.Int, payload.isCC);
         manualRequest.input('IsSend', sql.Int, payload.isSend);
+        manualRequest.input('Remark', sql.VarChar(100), fit(payload.remark, 100));
 
         const fallbackResult = await manualRequest.query(`
             DECLARE @NextMailToID decimal(18, 0);
@@ -95,10 +98,10 @@ const insertMailTo = async (tx: sql.Transaction, payload: CreateMailLogPayload):
             FROM MP_MailTo WITH (UPDLOCK, HOLDLOCK);
 
             INSERT INTO MP_MailTo (
-                MailToID, SendFromBy, SendFromDate, SendToBy, EmailTo, MailFrom, MailSubject, MailBody, EffectiveDate, IsCC, IsSend
+                MailToID, SendFromBy, SendFromDate, SendToBy, EmailTo, MailFrom, MailSubject, MailBody, EffectiveDate, IsCC, IsSend, Remark
             )
             VALUES (
-                @NextMailToID, @SendFromBy, @SendFromDate, @SendToBy, @EmailTo, @MailFrom, @MailSubject, @MailBody, @EffectiveDate, @IsCC, @IsSend
+                @NextMailToID, @SendFromBy, @SendFromDate, @SendToBy, @EmailTo, @MailFrom, @MailSubject, @MailBody, @EffectiveDate, @IsCC, @IsSend, @Remark
             );
 
             SELECT @NextMailToID AS MailToID;

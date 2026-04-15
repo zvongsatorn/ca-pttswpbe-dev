@@ -1,6 +1,55 @@
 import { sql, poolPromise } from '../config/db.js';
 import pisService from './pisService.js';
 import { sendMail, resolveMailRecipient } from './mailService.js';
+import { createMailLog } from './mailLogService.js';
+
+const buildMkdMailRefNo = (manDriverId: string | number): string => {
+    return `MKD${String(manDriverId || '')}`.slice(0, 20);
+};
+
+const sendMailWithLog = async (params: {
+    recipient: string | null;
+    requestedRecipient?: string | null;
+    subject: string;
+    body: string;
+    sendFromBy: string;
+    sendToBy?: string | null;
+    refNo?: string | null;
+    context: string;
+}) => {
+    const now = new Date();
+    const requestedRecipient = (params.requestedRecipient || '').trim();
+    const finalRecipient = (params.recipient || '').trim();
+    const logRecipient = finalRecipient || requestedRecipient;
+    const canSend = finalRecipient !== '';
+    const result = canSend
+        ? await sendMail(finalRecipient, params.subject, params.body)
+        : { success: false, error: 'Skip sending because resolved recipient is empty' };
+    const remark = canSend ? null : 'SKIP';
+
+    try {
+        await createMailLog({
+            sendFromBy: params.sendFromBy || 'SYSTEM',
+            sendFromDate: now,
+            sendToBy: params.sendToBy || null,
+            emailTo: logRecipient,
+            mailSubject: params.subject,
+            mailBody: params.body,
+            effectiveDate: now,
+            isCC: 0,
+            isSend: canSend && result.success ? 1 : 0,
+            remark,
+            ccRecipients: [],
+            refNo: params.refNo || null,
+            createBy: params.sendFromBy || 'SYSTEM',
+            createDate: now
+        });
+    } catch (logError) {
+        console.error(`[${params.context}] Failed to insert MP_MailTo log:`, logError);
+    }
+
+    return result;
+};
 
 export const getStartYearService = async () => {
     try {
@@ -904,7 +953,7 @@ export const requestApproveMKDService = async (manDriverId: string, employeeId: 
                 const nextApproverReq = new sql.Request(transaction);
                 nextApproverReq.input('ApproveID', sql.Decimal(18, 0), activeApproveId);
                 nextApproverReq.input('Seqno', sql.Int, 1);
-                const nextRes = await nextApproverReq.query('SELECT FNAME, LNAME, EmailAddr FROM MP_ApproveHist WHERE ApproveID = @ApproveID AND Seqno = @Seqno');
+                const nextRes = await nextApproverReq.query('SELECT FNAME, LNAME, EmailAddr, REP_CODE FROM MP_ApproveHist WHERE ApproveID = @ApproveID AND Seqno = @Seqno');
                 
                 if (nextRes.recordset && nextRes.recordset.length > 0) {
                     const next = nextRes.recordset[0];
@@ -920,9 +969,16 @@ export const requestApproveMKDService = async (manDriverId: string, employeeId: 
                             <p style="color: gray; font-size: 12px;">นี่คือระบบเมลอัตโนมัติ</p>
                         `;
                         const recipient = await resolveMailRecipient('SendMailManDriver', next.EmailAddr);
-                        if (recipient) {
-                            await sendMail(recipient, subject, body);
-                        }
+                        await sendMailWithLog({
+                            recipient,
+                            requestedRecipient: next.EmailAddr,
+                            subject,
+                            body,
+                            sendFromBy: employeeId,
+                            sendToBy: next.REP_CODE || null,
+                            refNo: buildMkdMailRefNo(manDriverId),
+                            context: 'requestApproveMKDService'
+                        });
                     }
                 }
             } catch (mailError) {
@@ -1141,9 +1197,16 @@ export const submitMKDApproveActionService = async (
                             <p style="color: gray; font-size: 12px;">นี่คือระบบเมลอัตโนมัติ</p>
                         `;
                         const recipient = await resolveMailRecipient('SendMailManDriver', next.EmailAddr);
-                        if (recipient) {
-                            await sendMail(recipient, subject, body);
-                        }
+                        await sendMailWithLog({
+                            recipient,
+                            requestedRecipient: next.EmailAddr,
+                            subject,
+                            body,
+                            sendFromBy: employeeId,
+                            sendToBy: next.REP_CODE || next.EmployeeID || next.EmployeeId || null,
+                            refNo: buildMkdMailRefNo(manDriverId),
+                            context: 'submitMKDApproveActionService'
+                        });
                     }
                 } catch (mailError) {
                     console.error('Email notification failed for next approver in MKD:', mailError);
@@ -1161,7 +1224,7 @@ export const submitMKDApproveActionService = async (
                 try {
                     const reqUserReq = new sql.Request(transaction);
                     reqUserReq.input('ApproveID', sql.Decimal(18, 0), approveId);
-                    const reqRes = await reqUserReq.query('SELECT FNAME, LNAME, EmailAddr FROM MP_ApproveHist WHERE ApproveID = @ApproveID AND Seqno = 0');
+                    const reqRes = await reqUserReq.query('SELECT FNAME, LNAME, EmailAddr, REP_CODE FROM MP_ApproveHist WHERE ApproveID = @ApproveID AND Seqno = 0');
                     if (reqRes.recordset && reqRes.recordset.length > 0) {
                         const reqUser = reqRes.recordset[0];
                         if (reqUser.EmailAddr) {
@@ -1175,9 +1238,16 @@ export const submitMKDApproveActionService = async (
                                 <p style="color: gray; font-size: 12px;">นี่คือระบบเมลอัตโนมัติ</p>
                             `;
                             const recipient = await resolveMailRecipient('SendMailManDriver', reqUser.EmailAddr);
-                            if (recipient) {
-                                await sendMail(recipient, subject, body);
-                            }
+                            await sendMailWithLog({
+                                recipient,
+                                requestedRecipient: reqUser.EmailAddr,
+                                subject,
+                                body,
+                                sendFromBy: employeeId,
+                                sendToBy: reqUser.REP_CODE || null,
+                                refNo: buildMkdMailRefNo(manDriverId),
+                                context: 'submitMKDApproveActionService'
+                            });
                         }
                     }
                 } catch (mailError) {
@@ -1212,7 +1282,7 @@ export const submitMKDApproveActionService = async (
             try {
                 const reqUserReq = new sql.Request(transaction);
                 reqUserReq.input('ApproveID', sql.Decimal(18, 0), approveId);
-                const reqRes = await reqUserReq.query('SELECT FNAME, LNAME, EmailAddr FROM MP_ApproveHist WHERE ApproveID = @ApproveID AND Seqno = 0');
+                const reqRes = await reqUserReq.query('SELECT FNAME, LNAME, EmailAddr, REP_CODE FROM MP_ApproveHist WHERE ApproveID = @ApproveID AND Seqno = 0');
                 if (reqRes.recordset && reqRes.recordset.length > 0) {
                     const reqUser = reqRes.recordset[0];
                     if (reqUser.EmailAddr) {
@@ -1227,9 +1297,16 @@ export const submitMKDApproveActionService = async (
                             <p style="color: gray; font-size: 12px;">นี่คือระบบเมลอัตโนมัติ</p>
                         `;
                         const recipient = await resolveMailRecipient('SendMailManDriver', reqUser.EmailAddr);
-                        if (recipient) {
-                            await sendMail(recipient, subject, body);
-                        }
+                        await sendMailWithLog({
+                            recipient,
+                            requestedRecipient: reqUser.EmailAddr,
+                            subject,
+                            body,
+                            sendFromBy: employeeId,
+                            sendToBy: reqUser.REP_CODE || null,
+                            refNo: buildMkdMailRefNo(manDriverId),
+                            context: 'submitMKDApproveActionService'
+                        });
                     }
                 }
             } catch (err) {
