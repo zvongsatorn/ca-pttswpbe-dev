@@ -745,8 +745,6 @@ export const getBorrowTransactionsService = async (employeeId?: string) => {
         const req = new sql.Request(pool);
 
         // Get all approved borrow transactions
-        // Optionally filter by employeeId if provided
-        let whereClause = `WHERE t.TransactionType = 6 AND t.Status = 3`;
         if (employeeId) {
             req.input('EmployeeID', sql.VarChar(20), employeeId);
             // Don't filter by employee, show all approved borrows so any HR can return
@@ -755,8 +753,42 @@ export const getBorrowTransactionsService = async (employeeId?: string) => {
         const result = await req.execute('mp_BorrowTransactionsGet');
         if (!result.recordset?.length) return [];
 
+        // Defensive dedupe: some DB joins (e.g. document item joins) can repeat the same borrow row.
+        const toTimestamp = (value: unknown): number => {
+            const parsed = new Date(String(value ?? '')).getTime();
+            return Number.isFinite(parsed) ? parsed : 0;
+        };
+        const toNumber = (value: unknown): number => {
+            const parsed = Number(value);
+            return Number.isFinite(parsed) ? parsed : 0;
+        };
+        const mergeBorrowRows = (
+            a: Record<string, unknown>,
+            b: Record<string, unknown>
+        ): Record<string, unknown> => {
+            const aDocTs = toTimestamp(a.DocumentCreateDate ?? a.CreateDate ?? a.UpdateDate);
+            const bDocTs = toTimestamp(b.DocumentCreateDate ?? b.CreateDate ?? b.UpdateDate);
+            const preferred = bDocTs >= aDocTs ? b : a;
+            const fallback = bDocTs >= aDocTs ? a : b;
+
+            return {
+                ...fallback,
+                ...preferred,
+                TotalReturned: Math.max(toNumber(a.TotalReturned), toNumber(b.TotalReturned)),
+            };
+        };
+
+        const rawRecords = result.recordset as Record<string, unknown>[];
+        const dedupedByTransactionNo = new Map<string, Record<string, unknown>>();
+        rawRecords.forEach((row, index) => {
+            const txNo = String(row.TransactionNo ?? '').trim();
+            const key = txNo || `__row_${index}`;
+            const existing = dedupedByTransactionNo.get(key);
+            dedupedByTransactionNo.set(key, existing ? mergeBorrowRows(existing, row) : row);
+        });
+
         // Enrich with unit names and level names
-        const records = result.recordset;
+        const records = Array.from(dedupedByTransactionNo.values());
         const unitNos = new Set<string>();
         const levelGroupNos = new Set<string>();
 
