@@ -46,6 +46,108 @@ const sendMailWithLog = async (params: {
     return result;
 };
 
+interface MailTransactionRow {
+    transactionNo: string;
+    transactionTypeText: string;
+    transactionDesc: string;
+}
+
+const escapeHtml = (value: string): string =>
+    String(value || '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+
+const formatTransactionTypeText = (typeNo: number | null | undefined): string => {
+    switch (typeNo) {
+        case 1: return 'โอนกรอบอัตรากำลังภายใต้สายผู้ช่วย';
+        case 2: return 'โอนกรอบอัตรากำลังอื่นๆ';
+        case 3: return 'ปรับสัดส่วนกรอบอัตรากำลังภายในหน่วยงาน';
+        case 4: return 'เพิ่มลดกรอบอัตรากำลังในหน่วยงาน';
+        case 5: return 'บันทึก Remark หน่วยงาน';
+        case 6: return 'ยืมกรอบอัตรากำลัง';
+        case 7: return 'คืนยืมกรอบอัตรากำลัง';
+        default: return '-';
+    }
+};
+
+const getTransactionRowsByNos = async (pool: sql.ConnectionPool, transactionNos: string[]): Promise<MailTransactionRow[]> => {
+    const uniqueNos = Array.from(new Set((transactionNos || []).map((n) => String(n || '').trim()).filter(Boolean)));
+    if (!uniqueNos.length) return [];
+
+    try {
+        const request = new sql.Request(pool);
+        const placeholders = uniqueNos.map((transactionNo, idx) => {
+            const param = `TransactionNo${idx}`;
+            request.input(param, sql.VarChar(20), transactionNo);
+            return `@${param}`;
+        });
+
+        const query = `
+            SELECT
+                TransactionNo,
+                TransactionType,
+                TransactionDesc
+            FROM MP_Transactions WITH (NOLOCK)
+            WHERE TransactionNo IN (${placeholders.join(',')})
+        `;
+
+        const result = await request.query(query);
+        return (result.recordset || []).map((row: any) => ({
+            transactionNo: String(row?.TransactionNo || '').trim(),
+            transactionTypeText: formatTransactionTypeText(Number.isFinite(Number(row?.TransactionType)) ? Number(row.TransactionType) : null),
+            transactionDesc: String(row?.TransactionDesc || '').trim() || '-'
+        }));
+    } catch (error) {
+        console.warn('[documentService] Failed to lookup transaction rows:', error);
+        return uniqueNos.map((transactionNo) => ({
+            transactionNo,
+            transactionTypeText: '-',
+            transactionDesc: '-'
+        }));
+    }
+};
+
+const buildTransactionReviewBody = (params: {
+    recipientName: string;
+    senderName: string;
+    documentNo: string;
+    rows: MailTransactionRow[];
+    addressLoginUrl: string;
+}): string => {
+    const transactionCount = params.rows.length;
+    const tableRows = params.rows.map((row) => [
+        "<tr>",
+        `<td style='background-color:#f8fafc;color:#1f2937;padding:8px;vertical-align:top;border:1px solid #e5e7eb;'>${escapeHtml(row.transactionNo)}</td>`,
+        `<td style='background-color:#f8fafc;color:#1f2937;padding:8px;vertical-align:top;border:1px solid #e5e7eb;'>${escapeHtml(row.transactionTypeText)}</td>`,
+        `<td style='background-color:#f8fafc;color:#1f2937;padding:8px;vertical-align:top;border:1px solid #e5e7eb;'>${escapeHtml(row.transactionDesc).replace(/\r?\n/g, '<br>')}</td>`,
+        "</tr>"
+    ].join('')).join('');
+
+    const transactionTable = [
+        "<table style='border-collapse:collapse;width:100%;max-width:980px;margin-top:8px;'>",
+        "<tr style='text-align:center;font-weight:700;color:#ffffff;background-color:#0ea5e9;'>",
+        "<td style='padding:8px;border:1px solid #e5e7eb;'>ID</td>",
+        "<td style='padding:8px;border:1px solid #e5e7eb;'>ประเภท</td>",
+        "<td style='padding:8px;border:1px solid #e5e7eb;'>รายการ</td>",
+        "</tr>",
+        tableRows,
+        "</table>"
+    ].join('');
+
+    return [
+        `เรียน คุณ${escapeHtml(params.recipientName)}`,
+        '<br><br>',
+        `<div style='font-size: medium;'>มีการเปลี่ยนแปลงกรอบอัตรากำลัง ${transactionCount} รายการ ส่งมาจาก คุณ${escapeHtml(params.senderName)} รอให้ตรวจสอบ</div><br>`,
+        `<div style='font-size: medium;'><b>มีคำขอหมายเลข:</b> ${escapeHtml(params.documentNo)}</div><br>`,
+        transactionTable,
+        '<br><br>กรุณาเข้าไปดำเนินการในระบบ ตามลิ้งค์ด้านล่างนี้',
+        `<br><a href='${escapeHtml(params.addressLoginUrl)}'>${escapeHtml(params.addressLoginUrl)}</a>`
+    ].join('');
+};
+
 export interface ApproverPayload {
     seqno: number;
     employeeId: string;
@@ -66,6 +168,61 @@ export interface SubmitDocumentPayload {
     items: DocumentItemPayload[];
     parentDocumentNo?: string;
 }
+
+interface SubmitFirstApproverMailGroup {
+    requestedEmail: string;
+    recipientName: string;
+    recipientEmployeeId: string | null;
+    itemIds: string[];
+}
+
+const buildSubmitFirstApproverMailGroups = (items: DocumentItemPayload[]): SubmitFirstApproverMailGroup[] => {
+    const groups = new Map<string, {
+        requestedEmail: string;
+        recipientName: string;
+        recipientEmployeeId: string | null;
+        itemIdSet: Set<string>;
+    }>();
+
+    for (const item of items || []) {
+        const firstApprover = item.approvers.find((a) => a.seqno === 1);
+        const itemId = String(item.itemId || '').trim();
+        const requestedEmail = String(firstApprover?.email || '').trim();
+        if (!firstApprover || !itemId || !requestedEmail) continue;
+
+        const recipientEmployeeId = String(firstApprover.employeeId || '').trim();
+        const key = recipientEmployeeId
+            ? `emp:${recipientEmployeeId.toUpperCase()}`
+            : `mail:${requestedEmail.toLowerCase()}`;
+        const recipientName = String(firstApprover.fullname || '').trim();
+
+        const existing = groups.get(key);
+        if (existing) {
+            existing.itemIdSet.add(itemId);
+            if (!existing.recipientName && recipientName) {
+                existing.recipientName = recipientName;
+            }
+            if (!existing.requestedEmail && requestedEmail) {
+                existing.requestedEmail = requestedEmail;
+            }
+            continue;
+        }
+
+        groups.set(key, {
+            requestedEmail,
+            recipientName,
+            recipientEmployeeId: recipientEmployeeId || null,
+            itemIdSet: new Set([itemId])
+        });
+    }
+
+    return Array.from(groups.values()).map((group) => ({
+        requestedEmail: group.requestedEmail,
+        recipientName: group.recipientName,
+        recipientEmployeeId: group.recipientEmployeeId,
+        itemIds: Array.from(group.itemIdSet)
+    }));
+};
 
 export const submitDocumentService = async (payload: SubmitDocumentPayload, createBy: string) => {
     try {
@@ -159,33 +316,36 @@ export const submitDocumentService = async (payload: SubmitDocumentPayload, crea
 
             // Send notification emails to first approvers (Seqno 1)
             try {
-                for (const item of payload.items) {
-                    const firstApprover = item.approvers.find(a => a.seqno === 1);
-                    if (firstApprover && firstApprover.email) {
-                        const recipient = await resolveMailRecipient('SendMailTrans', firstApprover.email);
+                const loginUrl = 'http://localhost:3000/login';
+                const transactionRows = await getTransactionRowsByNos(pool, payload.items.map((i) => i.itemId));
+                const rowByNo = new Map<string, MailTransactionRow>(
+                    transactionRows.map((r) => [r.transactionNo, r])
+                );
+                const firstApproverGroups = buildSubmitFirstApproverMailGroups(payload.items);
 
-                        const subject = `[PTTSWP] โปรดพิจารณาคำขอ ${documentNo}`;
-                        const body = `
-                            <h2>แจ้งเตือนการเสนออนุมัติระบบ PTTSWP</h2>
-                            <p>เรียน คุณ ${firstApprover.fullname},</p>
-                            <p>มีคำขอหมายเลข <b>${documentNo}</b> (รายการ: ${item.itemId}) รอการพิจารณาจากท่าน</p>
-                            <p>ผู้เสนอ: ${creatorFullname}</p>
-                            <p>วันที่มีผล: ${effectiveDate.toLocaleDateString('th-TH')}</p>
-                            <p>โปรดตรวจสอบรายละเอียดที่: <a href="http://localhost:3000/mkd/inbox">PTTSWP Inbox</a></p>
-                            <hr/>
-                            <p style="color: gray; font-size: 12px;">นี่คือระบบเมลอัตโนมัติ โปรดติดต่อนักวิเคราะห์กำลังคนหากมีข้อสงสัย</p>
-                        `;
-                        await sendMailWithLog({
-                            recipient,
-                            requestedRecipient: firstApprover.email,
-                            subject,
-                            body,
-                            sendFromBy: createBy,
-                            sendToBy: firstApprover.employeeId || null,
-                            refNo: documentNo,
-                            context: 'submitDocumentService'
-                        });
-                    }
+                for (const group of firstApproverGroups) {
+                    const recipient = await resolveMailRecipient('SendMailTrans', group.requestedEmail);
+                    const subject = `[PTTSWP] Transaction: มีการเปลี่ยนแปลงกรอบอัตรากำลัง ส่งมาให้ตรวจสอบ`;
+                    const rows = group.itemIds.map((itemNo) =>
+                        rowByNo.get(itemNo) || { transactionNo: itemNo, transactionTypeText: '-', transactionDesc: '-' }
+                    );
+                    const body = buildTransactionReviewBody({
+                        recipientName: group.recipientName || group.requestedEmail,
+                        senderName: creatorFullname,
+                        documentNo,
+                        rows,
+                        addressLoginUrl: loginUrl
+                    });
+                    await sendMailWithLog({
+                        recipient,
+                        requestedRecipient: group.requestedEmail,
+                        subject,
+                        body,
+                        sendFromBy: createBy,
+                        sendToBy: group.recipientEmployeeId,
+                        refNo: documentNo,
+                        context: 'submitDocumentService'
+                    });
                 }
             } catch (mailError) {
                 console.error('Email notification failed in submitDocumentService:', mailError);
@@ -288,7 +448,10 @@ export const approveDocumentService = async (documentNo: string, itemId: string,
                     docUpdateReq.input('UpdateDate', sql.DateTime, today);
                     await docUpdateReq.execute('mp_DocumentUpdateStatus');
                     
-                    const approvedItemsRes = await docUpdateReq.execute('mp_DocumentApprovedItemsGet');
+                    // Use a fresh request so we don't pass extra params from mp_DocumentUpdateStatus
+                    const approvedItemsReq = new sql.Request(transaction);
+                    approvedItemsReq.input('DocumentNo', sql.VarChar(13), documentNo);
+                    const approvedItemsRes = await approvedItemsReq.execute('mp_DocumentApprovedItemsGet');
                     
                     if (approvedItemsRes.recordset && approvedItemsRes.recordset.length > 0) {
                         for (const row of approvedItemsRes.recordset) {
@@ -312,15 +475,22 @@ export const approveDocumentService = async (documentNo: string, itemId: string,
                     const nextApprover = nextSeqnoRes.recordset[0];
                     if (nextApprover.Email) {
                         const recipient = await resolveMailRecipient('SendMailTrans', nextApprover.Email);
-                        const subject = `[PTTSWP] โปรดพิจารณาคำขอ ${documentNo}`;
-                        const body = `
-                            <h2>แจ้งเตือนการพิจารณาคำขอระบบ PTTSWP</h2>
-                            <p>เรียน คุณ ${nextApprover.Fullname},</p>
-                            <p>มีคำขอหมายเลข <b>${documentNo}</b> (รายการ: ${itemId}) รอการพิจารณาจากท่าน</p>
-                            <p>โปรดตรวจสอบรายละเอียดที่: <a href="http://localhost:3000/mkd/inbox">PTTSWP Inbox</a></p>
-                            <hr/>
-                            <p style="color: gray; font-size: 12px;">นี่คือระบบเมลอัตโนมัติ</p>
-                        `;
+                        const actorReq = new sql.Request(pool);
+                        actorReq.input('EmployeeID', sql.VarChar(20), updateBy);
+                        const actorRes = await actorReq.execute('mp_UserInfoGet');
+                        const actorName = actorRes.recordset?.[0]?.FullName || updateBy;
+                        const loginUrl = 'http://localhost:3000/login';
+                        const transactionRows = await getTransactionRowsByNos(pool, [itemId]);
+                        const selectedRow = transactionRows[0] || { transactionNo: itemId, transactionTypeText: '-', transactionDesc: '-' };
+
+                        const subject = `[PTTSWP] Transaction: มีการเปลี่ยนแปลงกรอบอัตรากำลัง ส่งมาให้ตรวจสอบ`;
+                        const body = buildTransactionReviewBody({
+                            recipientName: nextApprover.Fullname || nextApprover.FullnameTH || '-',
+                            senderName: actorName,
+                            documentNo,
+                            rows: [selectedRow],
+                            addressLoginUrl: loginUrl
+                        });
                         await sendMailWithLog({
                             recipient,
                             requestedRecipient: nextApprover.Email,
@@ -337,8 +507,16 @@ export const approveDocumentService = async (documentNo: string, itemId: string,
                     const requesterReq = new sql.Request(pool);
                     requesterReq.input('DocumentNo', sql.VarChar(13), documentNo);
                     requesterReq.input('ItemID', sql.VarChar(10), itemId);
-                    requesterReq.input('Seqno', sql.Int, 0);
-                    const requesterRes = await requesterReq.execute('mp_DocumentItemApproverGet'); // Get creator info
+                    const requesterRes = await requesterReq.query(`
+                        SELECT TOP 1
+                            EmployeeID,
+                            Fullname,
+                            Email
+                        FROM MP_DocumentItems WITH (NOLOCK)
+                        WHERE DocumentNo = @DocumentNo
+                          AND ItemID = @ItemID
+                          AND Seqno = 0
+                    `); // Creator row
                     
                     if (requesterRes.recordset && requesterRes.recordset.length > 0) {
                         const requester = requesterRes.recordset[0];
@@ -456,8 +634,16 @@ export const rejectDocumentService = async (documentNo: string, itemId: string, 
                 const requesterReq = new sql.Request(pool);
                 requesterReq.input('DocumentNo', sql.VarChar(13), documentNo);
                 requesterReq.input('ItemID', sql.VarChar(10), itemId);
-                requesterReq.input('Seqno', sql.Int, 0);
-                const requesterRes = await requesterReq.execute('mp_DocumentItemApproverGet');
+                const requesterRes = await requesterReq.query(`
+                    SELECT TOP 1
+                        EmployeeID,
+                        Fullname,
+                        Email
+                    FROM MP_DocumentItems WITH (NOLOCK)
+                    WHERE DocumentNo = @DocumentNo
+                      AND ItemID = @ItemID
+                      AND Seqno = 0
+                `);
                 
                 if (requesterRes.recordset && requesterRes.recordset.length > 0) {
                     const requester = requesterRes.recordset[0];
@@ -537,10 +723,23 @@ export const getDocumentDetailService = async (documentNo: string, employeeId: s
         logsReq.input('DocumentNo', sql.VarChar(13), documentNo);
         const logsRes = await logsReq.execute('mp_DocumentLogsGet');
 
+        // Active approval rows for current viewer (source of truth for enabling Accept/Reject)
+        const myActiveReq = new sql.Request(pool);
+        myActiveReq.input('DocumentNo', sql.VarChar(13), documentNo);
+        myActiveReq.input('EmployeeID', sql.VarChar(20), employeeId);
+        const myActiveRes = await myActiveReq.query(`
+            SELECT ItemID, Seqno, EmployeeID, AuditStatus, UnitSide
+            FROM MP_DocumentItems WITH (NOLOCK)
+            WHERE DocumentNo = @DocumentNo
+              AND EmployeeID = @EmployeeID
+              AND AuditStatus = 1
+        `);
+
         return {
             document,
             items: itemsRes.recordset || [],
-            logs: logsRes.recordset || []
+            logs: logsRes.recordset || [],
+            myActiveApprovals: myActiveRes.recordset || []
         };
     } catch (error) {
         console.error('Error in getDocumentDetailService:', error);
@@ -610,10 +809,21 @@ export const rejectAllDocumentService = async (documentNo: string, remark: strin
 export const getProgressService = async (employeeId: string) => {
     try {
         const pool = await poolPromise;
-        const req = new sql.Request(pool);
-        req.input('EmployeeID', sql.VarChar(20), employeeId);
+        let docsRes;
+        try {
+            const req = new sql.Request(pool);
+            req.input('EmployeeID', sql.VarChar(20), employeeId);
+            docsRes = await req.execute('mp_DocumentProgressListGet');
+        } catch (error: any) {
+            const message = String(error?.message || '');
+            if (!message.includes('has no parameters and arguments were supplied')) {
+                throw error;
+            }
 
-        const docsRes = await req.execute('mp_DocumentProgressListGet');
+            // Fallback for DB where this SP has no input parameters
+            const reqNoParam = new sql.Request(pool);
+            docsRes = await reqNoParam.execute('mp_DocumentProgressListGet');
+        }
         if (!docsRes.recordset?.length) return [];
 
         const results = [];
@@ -703,10 +913,21 @@ export const getProgressService = async (employeeId: string) => {
 export const getAllTransactionsService = async (employeeId: string) => {
     try {
         const pool = await poolPromise;
-        const req = new sql.Request(pool);
-        req.input('EmployeeID', sql.VarChar(20), employeeId);
+        let docsRes;
+        try {
+            const req = new sql.Request(pool);
+            req.input('EmployeeID', sql.VarChar(20), employeeId);
+            docsRes = await req.execute('mp_AllDocumentsGet');
+        } catch (error: any) {
+            const message = String(error?.message || '');
+            if (!message.includes('has no parameters and arguments were supplied')) {
+                throw error;
+            }
 
-        const docsRes = await req.execute('mp_AllDocumentsGet');
+            // Fallback for DB where this SP has no input parameters
+            const reqNoParam = new sql.Request(pool);
+            docsRes = await reqNoParam.execute('mp_AllDocumentsGet');
+        }
         if (!docsRes.recordset?.length) return [];
 
         const results = [];
