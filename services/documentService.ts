@@ -273,10 +273,18 @@ export const submitDocumentService = async (payload: SubmitDocumentPayload, crea
             const creatorUserGroupNo = payload.userGroupNo || null;
 
             for (const item of payload.items) {
+                const itemId = String(item?.itemId || '').trim();
+                if (!itemId) {
+                    throw new Error('Invalid submit payload: itemId is required for every item');
+                }
+                if (itemId.length > 10) {
+                    throw new Error(`Invalid submit payload: itemId "${itemId}" exceeds 10 characters`);
+                }
+
                 // Insert Creator (Seqno = 0)
                 const creatorReq = new sql.Request(transaction);
                 creatorReq.input('DocumentNo', sql.VarChar(13), documentNo);
-                creatorReq.input('ItemID', sql.VarChar(10), item.itemId);
+                creatorReq.input('ItemID', sql.VarChar(10), itemId);
                 creatorReq.input('Seqno', sql.Int, 0);
                 creatorReq.input('EmployeeID', sql.VarChar(20), createBy);
                 creatorReq.input('Fullname', sql.NVarChar(200), creatorFullname);
@@ -289,7 +297,7 @@ export const submitDocumentService = async (payload: SubmitDocumentPayload, crea
                 for (const approver of item.approvers) {
                     const itemReq = new sql.Request(transaction);
                     itemReq.input('DocumentNo', sql.VarChar(13), documentNo);
-                    itemReq.input('ItemID', sql.VarChar(10), item.itemId);
+                    itemReq.input('ItemID', sql.VarChar(10), itemId);
                     itemReq.input('Seqno', sql.Int, approver.seqno);
                     itemReq.input('EmployeeID', sql.VarChar(20), approver.employeeId);
                     itemReq.input('Fullname', sql.NVarChar(200), approver.fullname);
@@ -305,11 +313,24 @@ export const submitDocumentService = async (payload: SubmitDocumentPayload, crea
                 }
 
                 const trUpdateReq = new sql.Request(transaction);
-                trUpdateReq.input('TransactionNo', sql.VarChar(10), item.itemId);
+                trUpdateReq.input('TransactionNo', sql.VarChar(10), itemId);
                 trUpdateReq.input('Status', sql.Int, 2);
                 trUpdateReq.input('UpdateBy', sql.VarChar(20), createBy);
                 trUpdateReq.input('UpdateDate', sql.DateTime, today);
                 await trUpdateReq.execute('mp_TransactionsUpdateStatus');
+
+                // Guard against silent submit success where transaction status was not actually updated.
+                const verifyReq = new sql.Request(transaction);
+                verifyReq.input('TransactionNo', sql.VarChar(10), itemId);
+                const verifyRes = await verifyReq.query(`
+                    SELECT TOP 1 Status
+                    FROM MP_Transactions WITH (NOLOCK)
+                    WHERE TransactionNo = @TransactionNo
+                `);
+                const updatedStatus = Number(verifyRes.recordset?.[0]?.Status);
+                if (updatedStatus !== 2) {
+                    throw new Error(`Failed to update transaction status to 2 for itemId "${itemId}"`);
+                }
             }
 
             await transaction.commit();

@@ -789,6 +789,40 @@ export const getBorrowTransactionsService = async (employeeId?: string) => {
 
         // Enrich with unit names and level names
         const records = Array.from(dedupedByTransactionNo.values());
+        const borrowTransactionNos = records
+            .map((r) => String(r.TransactionNo ?? '').trim())
+            .filter(Boolean);
+
+        // Include pending/approved return requests so RemainingCount is reduced immediately after submit.
+        const returnedAmountByBorrowTx = new Map<string, number>();
+        if (borrowTransactionNos.length > 0) {
+            const pendingReq = new sql.Request(pool);
+            const placeholders = borrowTransactionNos.map((txNo, idx) => {
+                const param = `BorrowTx${idx}`;
+                pendingReq.input(param, sql.VarChar(10), txNo);
+                return `@${param}`;
+            });
+
+            const pendingSql = `
+                SELECT
+                    RefTransactionNo,
+                    SUM(CAST(ISNULL(Amount, 0) AS INT)) AS ReturnedAmount
+                FROM MP_Transactions WITH (NOLOCK)
+                WHERE TransactionType = 7
+                  AND Status IN (1, 2, 3)
+                  AND RefTransactionNo IN (${placeholders.join(',')})
+                GROUP BY RefTransactionNo
+            `;
+            const pendingRes = await pendingReq.query(pendingSql);
+            (pendingRes.recordset || []).forEach((row: any) => {
+                const refNo = String(row?.RefTransactionNo || '').trim();
+                const returnedAmount = toNumber(row?.ReturnedAmount);
+                if (refNo) {
+                    returnedAmountByBorrowTx.set(refNo, returnedAmount);
+                }
+            });
+        }
+
         const unitNos = new Set<string>();
         const levelGroupNos = new Set<string>();
 
@@ -802,7 +836,9 @@ export const getBorrowTransactionsService = async (employeeId?: string) => {
         // Resolve unit names
         const unitNameMap: Record<string, string> = {};
         for (const unitNo of unitNos) {
-            const effDate = records[0]?.EffectiveDate || new Date();
+            const effDateRaw = records[0]?.EffectiveDate;
+            const parsedEffDate = new Date(String(effDateRaw ?? ''));
+            const effDate = Number.isNaN(parsedEffDate.getTime()) ? new Date() : parsedEffDate;
             unitNameMap[unitNo] = await getUnitName(pool, effDate, unitNo);
         }
 
@@ -821,14 +857,23 @@ export const getBorrowTransactionsService = async (employeeId?: string) => {
             }
         }
 
-        const enriched = records.map((r: { LevelGroupTo?: string; LevelGroupFrom?: string; UnitTransfer?: string; UnitReceive?: string; Amount?: number; TotalReturned?: number; [key: string]: unknown }) => ({
-            ...r,
-            LevelGroupToName: r.LevelGroupTo ? (levelGroupNameMap[r.LevelGroupTo] || r.LevelGroupTo) : '',
-            LevelGroupFromName: r.LevelGroupFrom ? (levelGroupNameMap[r.LevelGroupFrom] || r.LevelGroupFrom) : '',
-            UnitTransferName: r.UnitTransfer ? (unitNameMap[r.UnitTransfer] || r.UnitTransfer) : '',
-            UnitReceiveName: r.UnitReceive ? (unitNameMap[r.UnitReceive] || r.UnitReceive) : '',
-            RemainingCount: (r.Amount || 0) - (r.TotalReturned || 0),
-        }));
+        const enriched = records.map((r: { TransactionNo?: string; LevelGroupTo?: string; LevelGroupFrom?: string; UnitTransfer?: string; UnitReceive?: string; Amount?: number; TotalReturned?: number; [key: string]: unknown }) => {
+            const txNo = String(r.TransactionNo || '').trim();
+            const returnedByStatus = toNumber(r.TotalReturned);
+            const returnedByPending = returnedAmountByBorrowTx.get(txNo) || 0;
+            const totalReturned = Math.max(returnedByStatus, returnedByPending);
+            const amount = toNumber(r.Amount);
+
+            return {
+                ...r,
+                TotalReturned: totalReturned,
+                LevelGroupToName: r.LevelGroupTo ? (levelGroupNameMap[r.LevelGroupTo] || r.LevelGroupTo) : '',
+                LevelGroupFromName: r.LevelGroupFrom ? (levelGroupNameMap[r.LevelGroupFrom] || r.LevelGroupFrom) : '',
+                UnitTransferName: r.UnitTransfer ? (unitNameMap[r.UnitTransfer] || r.UnitTransfer) : '',
+                UnitReceiveName: r.UnitReceive ? (unitNameMap[r.UnitReceive] || r.UnitReceive) : '',
+                RemainingCount: Math.max(0, amount - totalReturned),
+            };
+        });
 
         return enriched;
     } catch (error) {
