@@ -52,6 +52,13 @@ interface MailTransactionRow {
     transactionDesc: string;
 }
 
+interface UnitSnapshotRow {
+    orgUnitNo: string;
+    unitName: string;
+    parentOrgUnitNo: string;
+    bgNo: string;
+}
+
 const escapeHtml = (value: string): string =>
     String(value || '')
         .replace(/&/g, '&amp;')
@@ -71,6 +78,156 @@ const formatTransactionTypeText = (typeNo: number | null | undefined): string =>
         case 7: return 'คืนยืมกรอบอัตรากำลัง';
         default: return '-';
     }
+};
+
+const normalizeText = (value: unknown): string => String(value ?? '').trim();
+
+const firstNonEmptyText = (...values: unknown[]): string => {
+    for (const value of values) {
+        const normalized = normalizeText(value);
+        if (normalized) return normalized;
+    }
+    return '';
+};
+
+const unitSnapshotCache = new Map<string, Map<string, UnitSnapshotRow>>();
+
+const toMonthSnapshotKey = (effectiveDateRaw: unknown): string => {
+    const parsed = new Date(String(effectiveDateRaw ?? ''));
+    if (Number.isNaN(parsed.getTime())) {
+        const now = new Date();
+        return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+    }
+    return `${parsed.getFullYear()}-${String(parsed.getMonth() + 1).padStart(2, '0')}`;
+};
+
+const parseEffectiveMonthDate = (effectiveDateRaw: unknown): Date => {
+    const parsed = new Date(String(effectiveDateRaw ?? ''));
+    if (Number.isNaN(parsed.getTime())) {
+        const now = new Date();
+        return new Date(now.getFullYear(), now.getMonth(), 1, 0, 0, 0, 0);
+    }
+    return new Date(parsed.getFullYear(), parsed.getMonth(), 1, 0, 0, 0, 0);
+};
+
+const getUnitSnapshotMapByEffectiveDate = async (
+    pool: sql.ConnectionPool,
+    effectiveDateRaw: unknown
+): Promise<Map<string, UnitSnapshotRow>> => {
+    const cacheKey = toMonthSnapshotKey(effectiveDateRaw);
+    const cached = unitSnapshotCache.get(cacheKey);
+    if (cached) return cached;
+
+    const snapshotDate = parseEffectiveMonthDate(effectiveDateRaw);
+    const req = new sql.Request(pool);
+    req.input('EffectiveDate', sql.DateTime, snapshotDate);
+    const res = await req.execute('mp_UnitGetByEffectiveDate');
+
+    const map = new Map<string, UnitSnapshotRow>();
+    (res.recordset || []).forEach((row: any) => {
+        const orgUnitNo = normalizeText(row?.OrgUnitNo);
+        if (!orgUnitNo) return;
+        map.set(orgUnitNo, {
+            orgUnitNo,
+            unitName: firstNonEmptyText(row?.UnitName, row?.UnitAbbr, orgUnitNo),
+            parentOrgUnitNo: normalizeText(row?.ParentOrgUnitNo),
+            bgNo: normalizeText(row?.BGNo)
+        });
+    });
+
+    unitSnapshotCache.set(cacheKey, map);
+    return map;
+};
+
+const resolveDocumentOrgFilters = async (
+    pool: sql.ConnectionPool,
+    firstItem: Record<string, unknown> | undefined,
+    effectiveDateRaw: unknown
+) => {
+    let agencyId = firstNonEmptyText(
+        firstItem?.UnitReceive,
+        firstItem?.UnitTransfer,
+        firstItem?.OrgUnitNo
+    );
+    let agencyName = firstNonEmptyText(
+        firstItem?.UnitReceiveName,
+        firstItem?.UnitTransferName,
+        firstItem?.OrgUnitName,
+        firstItem?.UnitName
+    );
+    let divisionId = firstNonEmptyText(
+        firstItem?.ParentOrgUnitNo,
+        firstItem?.DivisionNo
+    );
+    let divisionName = firstNonEmptyText(
+        firstItem?.ParentOrgUnitName,
+        firstItem?.DivisionName
+    );
+    let businessUnitId = firstNonEmptyText(
+        firstItem?.BGNo,
+        firstItem?.BusinessUnitNo,
+        firstItem?.BusinessUnit
+    );
+    let businessUnitName = firstNonEmptyText(
+        firstItem?.BGName,
+        firstItem?.BusinessUnitName
+    );
+
+    // Fallback: some DB versions return limited fields from mp_DocumentItemsDetailGet.
+    // In that case, resolve org data from MP_Transactions by ItemID.
+    if (!agencyId || !divisionId || !businessUnitId) {
+        const itemId = firstNonEmptyText(firstItem?.ItemID, firstItem?.TransactionNo);
+        if (itemId) {
+            try {
+                const txReq = new sql.Request(pool);
+                txReq.input('TransactionNo', sql.VarChar(10), itemId);
+                const txRes = await txReq.query(`
+                    SELECT TOP 1
+                        UnitReceive,
+                        UnitTransfer
+                    FROM MP_Transactions WITH (NOLOCK)
+                    WHERE TransactionNo = @TransactionNo
+                `);
+                const txRow = txRes.recordset?.[0];
+                if (txRow) {
+                    if (!agencyId) {
+                        agencyId = firstNonEmptyText(txRow?.UnitReceive, txRow?.UnitTransfer);
+                    }
+                }
+            } catch (error) {
+                console.warn('[documentService] Failed to resolve org filters from MP_Transactions:', error);
+            }
+        }
+    }
+
+    if (agencyId || divisionId) {
+        const unitMap = await getUnitSnapshotMapByEffectiveDate(pool, effectiveDateRaw);
+        const agency = agencyId ? unitMap.get(agencyId) : undefined;
+
+        if (agency) {
+            if (!agencyName) agencyName = firstNonEmptyText(agency.unitName, agencyId);
+            if (!divisionId) divisionId = agency.parentOrgUnitNo;
+            if (!businessUnitId) businessUnitId = agency.bgNo;
+        }
+
+        if (divisionId && !divisionName) {
+            const division = unitMap.get(divisionId);
+            divisionName = firstNonEmptyText(division?.unitName, divisionId);
+        }
+    }
+
+    if (!agencyName && agencyId) agencyName = agencyId;
+    if (!divisionName && divisionId) divisionName = divisionId;
+    if (!businessUnitName && businessUnitId) businessUnitName = businessUnitId;
+
+    return {
+        agencyId,
+        agencyName,
+        divisionId,
+        divisionName,
+        businessUnitId,
+        businessUnitName
+    };
 };
 
 const getTransactionRowsByNos = async (pool: sql.ConnectionPool, transactionNos: string[]): Promise<MailTransactionRow[]> => {
@@ -907,6 +1064,11 @@ export const getProgressService = async (employeeId: string) => {
             const typeCategory = firstItem?.TransactionType === 1 ? 'transfer' :
                                  firstItem?.TransactionType === 4 ? 'add' :
                                  firstItem?.TransactionType === 3 ? 'adjust' : 'other';
+            const orgFilters = await resolveDocumentOrgFilters(
+                pool,
+                (firstItem || {}) as Record<string, unknown>,
+                doc.EffectiveDate
+            );
 
             results.push({
                 documentNo: docNo,
@@ -919,6 +1081,12 @@ export const getProgressService = async (employeeId: string) => {
                 category,
                 typeCategory,
                 resolution,
+                businessUnitId: orgFilters.businessUnitId,
+                businessUnitName: orgFilters.businessUnitName,
+                divisionId: orgFilters.divisionId,
+                divisionName: orgFilters.divisionName,
+                agencyId: orgFilters.agencyId,
+                agencyName: orgFilters.agencyName,
                 items: itemsRes.recordset || [],
                 logs: logsRes.recordset || []
             });
