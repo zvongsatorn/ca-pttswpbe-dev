@@ -1,6 +1,12 @@
 import { Context } from 'hono';
 import userRightService from '../services/userRightService.js';
 
+const normalizeCode = (value: any, length: number) => {
+    const raw = String(value ?? '').trim();
+    if (!raw) return '';
+    return /^\d+$/.test(raw) ? raw.padStart(length, '0') : raw;
+};
+
 class UserRightController {
     async getOrgUnitInGroup(c: Context) {
         try {
@@ -137,12 +143,25 @@ class UserRightController {
     async copyOrg(c: Context) {
         try {
             const { UserGroupNo, EmployeeIDFrom, EmployeeIDTo, CreateBy } = await c.req.json();
-            if (!UserGroupNo || !EmployeeIDFrom || !EmployeeIDTo || !CreateBy) {
+            const normalizedUserGroupNo = normalizeCode(UserGroupNo, 2);
+            const normalizedEmployeeIDFrom = normalizeCode(EmployeeIDFrom, 8);
+            const normalizedEmployeeIDTo = normalizeCode(EmployeeIDTo, 8);
+            const normalizedCreateBy = normalizeCode(CreateBy, 8) || 'SYSTEM';
+
+            if (!normalizedUserGroupNo || !normalizedEmployeeIDFrom || !normalizedEmployeeIDTo || !normalizedCreateBy) {
                 return c.json({ error: 'Missing parameters' }, 400);
             }
-            await userRightService.copyOrg(UserGroupNo, EmployeeIDFrom, EmployeeIDTo, CreateBy);
+
+            await userRightService.copyOrg(
+                normalizedUserGroupNo,
+                normalizedEmployeeIDFrom,
+                normalizedEmployeeIDTo,
+                normalizedCreateBy
+            );
+
             return c.json({ success: true, message: 'Copied organization rights successfully' });
         } catch (err: any) {
+            console.error('Error in copyOrg:', err);
             return c.json({ error: err.message }, 500);
         }
     }

@@ -1,3 +1,9 @@
+# Research and Debugging
+research/
+backend.log
+*env.txt
+sp_output.txt
+
 # Dependency directories
 node_modules/
 /jspm_packages

@@ -1,5 +1,6 @@
 import { Context } from 'hono';
 import { randomUUID } from 'crypto';
+import ExcelJS from 'exceljs';
 import {
     getStartYearService,
     getHistoryManDriverService,
@@ -874,9 +875,6 @@ export const downloadMasterKeyTemplate = async (c: Context) => {
         const populate = c.req.query('populate');
         
         if (populate === 'true') {
-            // Dynamic import ExcelJS
-            const ExcelJS = (await import('exceljs')).default;
-            
             // Load template into ExcelJS
             const workbook = new ExcelJS.Workbook();
             await workbook.xlsx.readFile(templatePath);

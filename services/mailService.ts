@@ -60,6 +60,7 @@ export const sendMail = async (to: string, subject: string, body: string, isHtml
         if (!sender) {
             sender = process.env.MAIL_SENDER || '';
         }
+        sender = sender.trim();
 
         if (!sender) {
             throw new Error('MAIL_SENDER not configured (not in DB or .env)');
@@ -68,20 +69,24 @@ export const sendMail = async (to: string, subject: string, body: string, isHtml
         const token = await getAccessToken();
         const url = `https://graph.microsoft.com/v1.0/users/${sender}/sendMail`;
 
-        const mailPayload = {
-            message: {
-                subject: subject,
-                body: {
-                    contentType: isHtml ? 'HTML' : 'Text',
-                    content: body
-                },
-                toRecipients: [
-                    {
-                        emailAddress: {
-                            address: to
-                        }
+        const baseMessage: any = {
+            subject: subject,
+            body: {
+                contentType: isHtml ? 'HTML' : 'Text',
+                content: body
+            },
+            toRecipients: [
+                {
+                    emailAddress: {
+                        address: to
                     }
-                ]
+                }
+            ]
+        };
+
+        const payload = {
+            message: {
+                ...baseMessage
             },
             saveToSentItems: 'false'
         };
@@ -92,7 +97,7 @@ export const sendMail = async (to: string, subject: string, body: string, isHtml
                 'Authorization': `Bearer ${token}`,
                 'Content-Type': 'application/json'
             },
-            body: JSON.stringify(mailPayload)
+            body: JSON.stringify(payload)
         });
 
         if (!response.ok) {
@@ -117,7 +122,7 @@ export const sendMail = async (to: string, subject: string, body: string, isHtml
  */
 export const resolveMailRecipient = async (configKey: string, originalRecipient: string): Promise<string | null> => {
     try {
-        const config = await configService.getConfigDetails(configKey);
+        const config = await configService.getConfigDetails(configKey, true);
         const status = config.Value1; // '0', '1', or '2'
         const testEmail = config.Value2;
 

@@ -101,6 +101,22 @@ export const getUserByEmail = async (email: string) => {
     }
 };
 
+export const updateUserProfilePicture = async (employeeId: string, filename: string) => {
+    try {
+        const pool = await poolPromise;
+        const request = new sql.Request(pool);
+
+        request.input('EmployeeID', sql.VarChar(50), employeeId);
+        request.input('ProfilePicture', sql.VarChar(50), filename);
+
+        await request.query('UPDATE MP_User SET ProfilePicture = @ProfilePicture WHERE EmployeeID = @EmployeeID');
+        return { success: true };
+    } catch (error) {
+        console.error('Error in updateUserProfilePicture:', error);
+        throw error;
+    }
+};
+
 export default {
     getUserOtherService,
     insertUserOtherService,
@@ -108,5 +124,6 @@ export default {
     getUserWithPassword,
     checkUserOther,
     syncUserFromAD,
-    getUserByEmail
+    getUserByEmail,
+    updateUserProfilePicture
 };

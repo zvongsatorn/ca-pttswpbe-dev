@@ -14,8 +14,8 @@ class ConfigService {
         return details.Value1;
     }
 
-    async getConfigDetails(key: string): Promise<{ Value1: string; Value2: string }> {
-        if (this.configCache[key]) {
+    async getConfigDetails(key: string, forceRefresh: boolean = false): Promise<{ Value1: string; Value2: string }> {
+        if (!forceRefresh && this.configCache[key]) {
             // Check if we already have Value2 cached (using a simple delimiter or separate cache)
             const cachedValue = this.configCache[key];
             if (cachedValue.includes('|')) {

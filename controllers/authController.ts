@@ -5,6 +5,7 @@ import jwt from 'jsonwebtoken';
 import configService from '../services/configService.js';
 import userGroupService from '../services/userGroupService.js';
 import * as userService from '../services/userService.js';
+import { insertLogActionService } from '../services/logService.js';
 
 class AuthController {
     login = async (c: Context) => {
@@ -79,10 +80,25 @@ class AuthController {
                     email: user.Email,
                     position: userData.Position || '',
                     orgUnit: userData.OrgUnit || '',
+                    profilePicture: userData.ProfilePicture || '',
                 },
                 SECRET_KEY,
                 { expiresIn: '1d' }
             );
+
+            const defaultUserGroupNo = String(userGroups?.[0]?.userGroupNo || '').trim();
+            try {
+                await insertLogActionService({
+                    employeeId: user.EmployeeID,
+                    actionId: 1,
+                    subjectId: 0,
+                    userRole: defaultUserGroupNo,
+                    note: 'Login successful',
+                    adminFlag: defaultUserGroupNo === '01' ? 1 : 0
+                });
+            } catch (logError) {
+                console.error('[Login] Failed to write action log:', logError);
+            }
 
             // 5. Return Response
             return c.json({
@@ -92,7 +108,8 @@ class AuthController {
                     employeeID: user.EmployeeID,
                     name: user.Name,
                     email: user.Email,
-                    userGroups: userGroups
+                    userGroups: userGroups,
+                    profilePicture: userData.ProfilePicture || '',
                 },
                 config: {
                     startYear
@@ -249,10 +266,25 @@ class AuthController {
                     email: user.Email,
                     position: userData.Position || '',
                     orgUnit: userData.OrgUnit || '',
+                    profilePicture: userData.ProfilePicture || '',
                 },
                 SECRET_KEY,
                 { expiresIn: '1d' }
             );
+
+            const defaultUserGroupNo = String(userGroups?.[0]?.userGroupNo || '').trim();
+            try {
+                await insertLogActionService({
+                    employeeId: user.EmployeeID,
+                    actionId: 1,
+                    subjectId: 0,
+                    userRole: defaultUserGroupNo,
+                    note: 'SSO Login successful',
+                    adminFlag: defaultUserGroupNo === '01' ? 1 : 0
+                });
+            } catch (logError) {
+                console.error('[SSO Login] Failed to write action log:', logError);
+            }
 
             return c.json({
                 message: 'SSO Login successful',
@@ -261,7 +293,8 @@ class AuthController {
                     employeeID: user.EmployeeID,
                     name: user.Name,
                     email: user.Email,
-                    userGroups: userGroups
+                    userGroups: userGroups,
+                    profilePicture: userData.ProfilePicture || '',
                 },
                 config: {
                     startYear

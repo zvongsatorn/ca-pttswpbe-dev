@@ -6,6 +6,7 @@ import { secureHeaders } from 'hono/secure-headers';
 import { serveStatic } from '@hono/node-server/serve-static';
 import { loadEnv } from './config/loadEnv.js';
 import configService from './services/configService.js';
+import { initializeMailAlertScheduler } from './services/mailAlertSchedulerService.js';
 
 loadEnv();
 
@@ -58,9 +59,14 @@ import userRightRoutes from './routes/userRightRoutes.js';
 import calendarRoutes from './routes/calendarRoutes.js';
 import secondmentRoutes from './routes/secondmentRoutes.js';
 import pirRoutes from './routes/pirRoutes.js';
+import costRoutes from './routes/costRoutes.js';
+import landscapeRoutes from './routes/landscapeRoutes.js';
 import userRoutes from './routes/userRoutes.js';
 import trackingRoutes from './routes/trackingRoutes.js';
 import retirementRoutes from './routes/retirementRoutes.js';
+import reportRoutes from './routes/reportRoutes.js';
+import logRoutes from './routes/logRoutes.js';
+import delayRoutes from './routes/delayRoutes.js';
 import { filesProxy } from './controllers/mkdController.js';
 
 
@@ -76,9 +82,14 @@ app.route('/api/user-rights', userRightRoutes);
 app.route('/api/calendar', calendarRoutes);
 app.route('/api/secondment', secondmentRoutes);
 app.route('/api/pir', pirRoutes);
+app.route('/api/cost', costRoutes);
+app.route('/api/landscape', landscapeRoutes);
 app.route('/api/users', userRoutes);
 app.route('/api/tracking', trackingRoutes);
 app.route('/api/retirement', retirementRoutes);
+app.route('/api/report', reportRoutes);
+app.route('/api/log', logRoutes);
+app.route('/api/delay', delayRoutes);
 app.get('/api/files-proxy', filesProxy);
 
 
@@ -102,6 +113,7 @@ let server: any;
         });
         
         console.log(`Server is running on port ${port}`);
+        initializeMailAlertScheduler();
     } catch (err) {
         console.error("Failed to load configuration or start server:", err);
         process.exit(1);

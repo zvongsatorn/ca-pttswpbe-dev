@@ -1,10 +1,12 @@
 import { Hono } from 'hono';
-import * as userController from '../controllers/userController.js';
+import { getUserOther, insertUserOther, deleteUserOther, uploadProfilePicture, getProfilePicture } from '../controllers/userController.js';
 
 const router = new Hono();
 
-router.get('/other', userController.getUserOther);
-router.post('/other', userController.insertUserOther);
-router.delete('/other/:employeeId', userController.deleteUserOther);
+router.get('/other', getUserOther);
+router.post('/other', insertUserOther);
+router.delete('/other/:employeeId', deleteUserOther);
+router.post('/profile-picture', uploadProfilePicture);
+router.get('/profile-picture/:filename', getProfilePicture);
 
 export default router;

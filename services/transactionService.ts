@@ -22,6 +22,7 @@ export interface DraftTransactionPayload {
     conclusionDate: string;
     unitTransfer: string;
     transferInd: number;
+    refTransactionNo?: string | null;
     
     
     // files
@@ -53,6 +54,373 @@ const getUnitName = async (pool: typeof sql.ConnectionPool.prototype, effectiveD
     return unitNo;
 };
 
+interface RemarkInsertParams {
+    transactionNo: string;
+    orgUnitNo: string;
+    note: string;
+    status: number;
+    createBy: string;
+    createDate: Date;
+}
+
+interface UnitSnapshot {
+    orgUnitNo: string;
+    unitName: string;
+    unitAbbr: string;
+    parentOrgUnitNo: string;
+    bgNo: string;
+}
+
+interface StructureChangeRemark {
+    unitNo: string;
+    unitName: string;
+    remark: string;
+}
+
+export interface CreateApprovedStructureRemarkParams {
+    effectiveDate: Date;
+    createBy: string;
+}
+
+export interface CreateApprovedStructureRemarkResult {
+    success: boolean;
+    effectiveDate: string;
+    previousEffectiveDate: string;
+    totalDetected: number;
+    insertedCount: number;
+    skippedCount: number;
+    changes: Array<{
+        unitNo: string;
+        unitName: string;
+        remark: string;
+        action: 'INSERTED' | 'SKIPPED_EXISTING';
+    }>;
+}
+
+const toMonthStart = (date: Date): Date => {
+    return new Date(date.getFullYear(), date.getMonth(), 1, 0, 0, 0, 0);
+};
+
+const toIsoDate = (date: Date): string => {
+    const year = date.getFullYear();
+    const month = String(date.getMonth() + 1).padStart(2, '0');
+    const day = String(date.getDate()).padStart(2, '0');
+    return `${year}-${month}-${day}`;
+};
+
+const normalizeText = (value: unknown): string => {
+    return String(value || '')
+        .replace(/\s+/g, ' ')
+        .trim();
+};
+
+const normalizeComparable = (value: unknown): string => normalizeText(value).toLowerCase();
+
+const truncateText = (value: string, maxLength: number): string => {
+    if (!value) return '';
+    return value.length > maxLength ? value.substring(0, maxLength) : value;
+};
+
+const storedProcedureParameterSupportCache = new Map<string, boolean>();
+
+const supportsStoredProcedureParameter = async (
+    pool: typeof sql.ConnectionPool.prototype,
+    procedureName: string,
+    parameterName: string
+): Promise<boolean> => {
+    const normalizedParam = parameterName.startsWith('@') ? parameterName : `@${parameterName}`;
+    const cacheKey = `${procedureName.toLowerCase()}:${normalizedParam.toLowerCase()}`;
+    const cached = storedProcedureParameterSupportCache.get(cacheKey);
+    if (cached !== undefined) return cached;
+
+    try {
+        const request = new sql.Request(pool);
+        request.input('SpecificName', sql.NVarChar(128), procedureName);
+        request.input('ParameterName', sql.NVarChar(128), normalizedParam);
+        const result = await request.query(`
+            SELECT TOP 1 1 AS ExistsFlag
+            FROM INFORMATION_SCHEMA.PARAMETERS
+            WHERE SPECIFIC_SCHEMA = 'dbo'
+              AND SPECIFIC_NAME = @SpecificName
+              AND PARAMETER_NAME = @ParameterName
+        `);
+        const supported = (result.recordset || []).length > 0;
+        storedProcedureParameterSupportCache.set(cacheKey, supported);
+        return supported;
+    } catch (error) {
+        console.warn(`[transactionService] Failed to inspect parameter support for ${procedureName}.${normalizedParam}:`, error);
+        storedProcedureParameterSupportCache.set(cacheKey, false);
+        return false;
+    }
+};
+
+const buildRemarkInsertRequest = (
+    transaction: sql.Transaction,
+    payload: RemarkInsertParams,
+    includeRemarkFlag: boolean
+) => {
+    const request = new sql.Request(transaction);
+    request.input('TransactionNo', sql.VarChar(10), payload.transactionNo);
+    request.input('OrgUnitNo', sql.VarChar(8), payload.orgUnitNo || '');
+    if (includeRemarkFlag) {
+        request.input('RemarkFlag', sql.Int, 1);
+    }
+    request.input('Note', sql.NVarChar(500), truncateText(payload.note, 500));
+    request.input('Status', sql.Int, payload.status);
+    request.input('CreateBy', sql.VarChar(20), payload.createBy.substring(0, 20));
+    request.input('CreateDate', sql.DateTime, payload.createDate);
+    return request;
+};
+
+const executeRemarkInsert = async (
+    transaction: sql.Transaction,
+    payload: RemarkInsertParams,
+    includeRemarkFlag: boolean
+) => {
+    await buildRemarkInsertRequest(transaction, payload, includeRemarkFlag).execute('mp_RemarkInsert');
+};
+
+const generateTransactionNo = async (
+    transaction: sql.Transaction,
+    effectiveDate: Date
+): Promise<string> => {
+    const year = effectiveDate.getFullYear();
+    const month = effectiveDate.getMonth() + 1;
+    const adYY = String(year).slice(-2);
+    const mm = String(month).padStart(2, '0');
+    const prefix = `TR${adYY}${mm}`;
+
+    const lastTrRes = await new sql.Request(transaction)
+        .input('Prefix', sql.VarChar(10), prefix)
+        .execute('mp_TransactionsLastNoGet');
+
+    let runningNumber = 1;
+    if (lastTrRes.recordset && lastTrRes.recordset.length > 0 && lastTrRes.recordset[0].TransactionNo) {
+        const lastTrNo = String(lastTrRes.recordset[0].TransactionNo);
+        const lastRunningStr = lastTrNo.substring(prefix.length);
+        const parsed = Number.parseInt(lastRunningStr, 10);
+        if (Number.isFinite(parsed)) {
+            runningNumber = parsed + 1;
+        }
+    }
+
+    return `${prefix}${String(runningNumber).padStart(4, '0')}`;
+};
+
+const getUnitSnapshotByEffectiveDate = async (
+    pool: typeof sql.ConnectionPool.prototype,
+    effectiveDate: Date
+): Promise<UnitSnapshot[]> => {
+    const request = new sql.Request(pool);
+    request.input('EffectiveDate', sql.DateTime, effectiveDate);
+    const result = await request.execute('mp_UnitGetByEffectiveDate');
+
+    return (result.recordset || []).map((row: any) => ({
+        orgUnitNo: normalizeText(row?.OrgUnitNo),
+        unitName: normalizeText(row?.UnitName),
+        unitAbbr: normalizeText(row?.UnitAbbr),
+        parentOrgUnitNo: normalizeText(row?.ParentOrgUnitNo),
+        bgNo: normalizeText(row?.BGNo),
+    }));
+};
+
+const getUnitDisplayLabel = (unit: UnitSnapshot | undefined): string => {
+    if (!unit) return '';
+    const abbr = normalizeText(unit.unitAbbr);
+    const name = normalizeText(unit.unitName);
+    if (abbr && name && abbr !== name) return `${abbr} (${name})`;
+    return abbr || name || unit.orgUnitNo || '';
+};
+
+const getParentLabel = (
+    parentNo: string,
+    currentMap: Map<string, UnitSnapshot>,
+    previousMap: Map<string, UnitSnapshot>
+): string => {
+    const normalized = normalizeText(parentNo);
+    if (!normalized) return '-';
+    const currentLabel = getUnitDisplayLabel(currentMap.get(normalized));
+    if (currentLabel) return currentLabel;
+    const previousLabel = getUnitDisplayLabel(previousMap.get(normalized));
+    if (previousLabel) return previousLabel;
+    return normalized;
+};
+
+const buildStructureChangeRemarks = (
+    currentUnits: UnitSnapshot[],
+    previousUnits: UnitSnapshot[]
+): StructureChangeRemark[] => {
+    const previousMap = new Map<string, UnitSnapshot>(
+        previousUnits.map((unit) => [unit.orgUnitNo, unit])
+    );
+    const currentMap = new Map<string, UnitSnapshot>(
+        currentUnits.map((unit) => [unit.orgUnitNo, unit])
+    );
+
+    const remarks: StructureChangeRemark[] = [];
+
+    for (const current of currentUnits) {
+        if (!current.orgUnitNo) continue;
+
+        const previous = previousMap.get(current.orgUnitNo);
+        if (!previous) continue;
+
+        const parentChanged = normalizeComparable(previous.parentOrgUnitNo) !== normalizeComparable(current.parentOrgUnitNo);
+        const bgChanged = normalizeComparable(previous.bgNo) !== normalizeComparable(current.bgNo);
+        const nameChanged = normalizeComparable(previous.unitName) !== normalizeComparable(current.unitName);
+        const abbrChanged = normalizeComparable(previous.unitAbbr) !== normalizeComparable(current.unitAbbr);
+
+        if (!parentChanged && !bgChanged && !nameChanged && !abbrChanged) continue;
+
+        const messages: string[] = [];
+        const currentLabel = getUnitDisplayLabel(current) || current.orgUnitNo;
+
+        if (parentChanged) {
+            const oldParent = getParentLabel(previous.parentOrgUnitNo, currentMap, previousMap);
+            const newParent = getParentLabel(current.parentOrgUnitNo, currentMap, previousMap);
+            messages.push(`ปรับโครงสร้าง: ${currentLabel} ย้ายสังกัดจาก ${oldParent} ไป ${newParent}`);
+        }
+
+        if (bgChanged) {
+            const oldBg = normalizeText(previous.bgNo) || '-';
+            const newBg = normalizeText(current.bgNo) || '-';
+            messages.push(`ปรับโครงสร้าง: ${currentLabel} ย้าย BU จาก ${oldBg} ไป ${newBg}`);
+        }
+
+        if (nameChanged || abbrChanged) {
+            const oldName = normalizeText(previous.unitName) || previous.orgUnitNo;
+            const newName = normalizeText(current.unitName) || current.orgUnitNo;
+            const oldAbbr = normalizeText(previous.unitAbbr) || '-';
+            const newAbbr = normalizeText(current.unitAbbr) || '-';
+
+            if (nameChanged && abbrChanged) {
+                messages.push(`หน่วยงานเปลี่ยนแปลง: ชื่อจาก ${oldName} (${oldAbbr}) เป็น ${newName} (${newAbbr})`);
+            } else if (nameChanged) {
+                messages.push(`หน่วยงานเปลี่ยนแปลง: ชื่อจาก ${oldName} เป็น ${newName}`);
+            } else {
+                messages.push(`หน่วยงานเปลี่ยนแปลง: ชื่อย่อจาก ${oldAbbr} เป็น ${newAbbr}`);
+            }
+        }
+
+        const remark = truncateText(messages.join(' | '), 500);
+        if (!remark) continue;
+
+        remarks.push({
+            unitNo: current.orgUnitNo,
+            unitName: normalizeText(current.unitName) || current.orgUnitNo,
+            remark
+        });
+    }
+
+    return remarks;
+};
+
+const hasApprovedRemarkForUnitInMonth = async (
+    transaction: sql.Transaction,
+    effectiveDate: Date,
+    unitNo: string
+): Promise<boolean> => {
+    const request = new sql.Request(transaction);
+    request.input('EffectiveDate', sql.Date, effectiveDate);
+    request.input('UnitReceive', sql.VarChar(8), unitNo);
+    const result = await request.query(`
+        SELECT TOP 1 t.TransactionNo
+        FROM MP_Transactions t WITH (NOLOCK)
+        WHERE
+            t.TransactionType = 5
+            AND ISNULL(t.Status, 0) = 3
+            AND CONVERT(date, t.EffectiveDate) = @EffectiveDate
+            AND ISNULL(LTRIM(RTRIM(t.UnitReceive)), '') = @UnitReceive
+    `);
+
+    return (result.recordset || []).length > 0;
+};
+
+export const createApprovedStructureRemarkTransactionsService = async (
+    params: CreateApprovedStructureRemarkParams
+): Promise<CreateApprovedStructureRemarkResult> => {
+    const effectiveDate = toMonthStart(params.effectiveDate);
+    const previousEffectiveDate = toMonthStart(new Date(effectiveDate.getFullYear(), effectiveDate.getMonth() - 1, 1));
+    const createBy = normalizeText(params.createBy) || 'SYSTEM';
+
+    const pool = await poolPromise;
+    const supportsRemarkFlag = await supportsStoredProcedureParameter(pool, 'mp_RemarkInsert', '@RemarkFlag');
+    const [currentUnits, previousUnits] = await Promise.all([
+        getUnitSnapshotByEffectiveDate(pool, effectiveDate),
+        getUnitSnapshotByEffectiveDate(pool, previousEffectiveDate)
+    ]);
+
+    const detectedChanges = buildStructureChangeRemarks(currentUnits, previousUnits);
+    if (detectedChanges.length === 0) {
+        return {
+            success: true,
+            effectiveDate: toIsoDate(effectiveDate),
+            previousEffectiveDate: toIsoDate(previousEffectiveDate),
+            totalDetected: 0,
+            insertedCount: 0,
+            skippedCount: 0,
+            changes: []
+        };
+    }
+
+    const dbTransaction = new sql.Transaction(pool);
+    await dbTransaction.begin();
+
+    try {
+        let insertedCount = 0;
+        let skippedCount = 0;
+        const now = new Date();
+        const changes: CreateApprovedStructureRemarkResult['changes'] = [];
+
+        for (const change of detectedChanges) {
+            const exists = await hasApprovedRemarkForUnitInMonth(dbTransaction, effectiveDate, change.unitNo);
+            if (exists) {
+                skippedCount += 1;
+                changes.push({
+                    unitNo: change.unitNo,
+                    unitName: change.unitName,
+                    remark: change.remark,
+                    action: 'SKIPPED_EXISTING'
+                });
+                continue;
+            }
+
+            const transactionNo = await generateTransactionNo(dbTransaction, effectiveDate);
+            await executeRemarkInsert(dbTransaction, {
+                transactionNo,
+                orgUnitNo: change.unitNo,
+                note: change.remark,
+                status: 3, // approved
+                createBy,
+                createDate: now
+            }, supportsRemarkFlag);
+
+            insertedCount += 1;
+            changes.push({
+                unitNo: change.unitNo,
+                unitName: change.unitName,
+                remark: change.remark,
+                action: 'INSERTED'
+            });
+        }
+
+        await dbTransaction.commit();
+
+        return {
+            success: true,
+            effectiveDate: toIsoDate(effectiveDate),
+            previousEffectiveDate: toIsoDate(previousEffectiveDate),
+            totalDetected: detectedChanges.length,
+            insertedCount,
+            skippedCount,
+            changes
+        };
+    } catch (error) {
+        await dbTransaction.rollback();
+        throw error;
+    }
+};
+
 export const saveDraftTransactionService = async (
     payload: DraftTransactionPayload, 
     createBy: string,
@@ -60,6 +428,7 @@ export const saveDraftTransactionService = async (
 ) => {
     try {
         const pool = await poolPromise;
+        const supportsRemarkFlag = await supportsStoredProcedureParameter(pool, 'mp_RemarkInsert', '@RemarkFlag');
         const transaction = new sql.Transaction(pool);
         await transaction.begin();
 
@@ -77,25 +446,7 @@ export const saveDraftTransactionService = async (
             if (existingTransactionNo) {
                 transactionNo = existingTransactionNo;
             } else {
-                const adYY = yearAD.toString().slice(-2);
-                const mm = monthIndex.toString().padStart(2, '0');
-                const prefix = `TR${adYY}${mm}`;
-
-                // Get last TransactionNo with matching prefix
-                const lastTrRes = await transaction.request()
-                    .input('Prefix', sql.VarChar(10), prefix)
-                    .execute('mp_TransactionsLastNoGet');
-
-                let runningNumber = 1;
-                if (lastTrRes.recordset && lastTrRes.recordset.length > 0 && lastTrRes.recordset[0].TransactionNo) {
-                    const lastTrNo = lastTrRes.recordset[0].TransactionNo; // e.g. TR26010001
-                    const lastRunningStr = lastTrNo.substring(prefix.length); // '0001'
-                    if (!isNaN(parseInt(lastRunningStr))) {
-                        runningNumber = parseInt(lastRunningStr) + 1;
-                    }
-                }
-                
-                transactionNo = `${prefix}${runningNumber.toString().padStart(4, '0')}`;
+                transactionNo = await generateTransactionNo(transaction, effectiveDate);
             }
             
             const status = 1; // 1 = Draft
@@ -103,18 +454,15 @@ export const saveDraftTransactionService = async (
 
             if (!existingTransactionNo) {
                 if (payload.transactionType === 5) {
-                    await transaction.request()
-                        .input('TransactionNo', sql.VarChar(10), transactionNo)
-                        .input('OrgUnitNo', sql.VarChar(8), payload.unitReceive)
-                        .input('Note', sql.NVarChar(500), payload.remark)
-                        .input('Status', sql.Int, status)
-                        .input('CreateBy', sql.VarChar(20), createBy)
-                        .input('CreateDate', sql.DateTime, createDate)
-                        .execute('mp_RemarkInsert');
+                    await executeRemarkInsert(transaction, {
+                        transactionNo,
+                        orgUnitNo: payload.unitReceive,
+                        note: payload.remark,
+                        status,
+                        createBy,
+                        createDate
+                    }, supportsRemarkFlag);
                 } else {
-                    // mp_TransactionsInsert
-                    const req = new sql.Request(transaction);
-                    
                     // Build desc using real unit names from DB via mp_UnitNameGet
                     const conclusionPart = payload.conclusionNo ? `${payload.conclusionNo} : ` : '';
                     const unitTransferName = await getUnitName(pool, effectiveDate, payload.unitTransfer) || payload.unitTransferName || payload.unitTransfer;
@@ -124,48 +472,54 @@ export const saveDraftTransactionService = async (
 
                     let desc = '';
                     if (payload.transactionType === 1 || payload.transactionType === 2) {
-                    desc = `${conclusionPart}หน่วยงาน${unitTransferName} โอนย้ายอัตรากำลังให้หน่วยงาน ${unitReceiveName} ที่ระดับ ${levelToName} จำนวน ${payload.amount || 0} อัตรา`;
-                } else if (payload.transactionType === 3) {
-                    desc = `${conclusionPart}หน่วยงาน${unitTransferName} ปรับเปลี่ยนอัตรากำลังจากระดับ ${levelFromName} ไปที่ระดับ ${levelToName} จำนวน ${payload.amount || 0} อัตรา`;
-                } else if (payload.transactionType === 4) {
-                    const typeAction = payload.transferInd === 1 ? 'เพิ่ม' : 'ลด';
-                    desc = `${conclusionPart}หน่วยงาน${unitTransferName} ${typeAction}กรอบอัตรากำลัง ที่ระดับ ${levelToName} จำนวน ${payload.amount || 0} อัตรา`;
-                } else if (payload.transactionType === 6) {
-                    desc = `${conclusionPart}หน่วยงาน${unitTransferName} ให้ยืมอัตรากำลังกับหน่วยงาน ${unitReceiveName} จำนวน ${payload.amount || 0} อัตรา`;
-                } else if (payload.transactionType === 7) {
-                    desc = `${conclusionPart}หน่วยงาน${unitReceiveName} คืนกรอบอัตรากำลังให้หน่วยงาน ${unitTransferName} ที่ระดับ ${levelToName} จำนวน ${payload.amount || 0} อัตรา`;
-                }
-                
-                // Truncate desc if it exceeds 500 characters
-                if (desc.length > 500) {
-                    desc = desc.substring(0, 500);
-                }
+                        desc = `${conclusionPart}หน่วยงาน${unitTransferName} โอนย้ายอัตรากำลังให้หน่วยงาน ${unitReceiveName} ที่ระดับ ${levelToName} จำนวน ${payload.amount || 0} อัตรา`;
+                    } else if (payload.transactionType === 3) {
+                        desc = `${conclusionPart}หน่วยงาน${unitTransferName} ปรับเปลี่ยนอัตรากำลังจากระดับ ${levelFromName} ไปที่ระดับ ${levelToName} จำนวน ${payload.amount || 0} อัตรา`;
+                    } else if (payload.transactionType === 4) {
+                        const typeAction = payload.transferInd === 1 ? 'เพิ่ม' : 'ลด';
+                        desc = `${conclusionPart}หน่วยงาน${unitTransferName} ${typeAction}กรอบอัตรากำลัง ที่ระดับ ${levelToName} จำนวน ${payload.amount || 0} อัตรา`;
+                    } else if (payload.transactionType === 6) {
+                        desc = `${conclusionPart}หน่วยงาน${unitTransferName} ให้ยืมอัตรากำลังกับหน่วยงาน ${unitReceiveName} จำนวน ${payload.amount || 0} อัตรา`;
+                    } else if (payload.transactionType === 7) {
+                        desc = `${conclusionPart}หน่วยงาน${unitReceiveName} คืนกรอบอัตรากำลังให้หน่วยงาน ${unitTransferName} ที่ระดับ ${levelToName} จำนวน ${payload.amount || 0} อัตรา`;
+                    }
 
-                req.input('TransactionNo', sql.VarChar(10), transactionNo);
-                req.input('EffectiveDate', sql.DateTime, effectiveDate);
-                req.input('ConclusionNo', sql.NVarChar(100), payload.conclusionNo || '');
-                req.input('ConclusionDate', sql.DateTime, payload.conclusionDate ? new Date(payload.conclusionDate) : new Date());
-                req.input('TransactionDesc', sql.NVarChar(500), desc);
-                req.input('TransactionType', sql.Int, payload.transactionType);
-                req.input('Amount', sql.Int, payload.amount || 0);
-                req.input('UnitReceive', sql.VarChar(8), payload.unitReceive || '');
-                req.input('UnitTransfer', sql.VarChar(8), payload.unitTransfer || '');
-                req.input('LevelGroupFrom', sql.VarChar(4), payload.levelGroupFrom || '');
-                req.input('LevelGroupTo', sql.VarChar(4), payload.levelGroupTo || '');
-                req.input('TransferInd', sql.Int, payload.transferInd || 0);
-                req.input('Status', sql.Int, status);
-                req.input('Policyflag', sql.Int, payload.policyFlag || 0);
-                req.input('PoolRsFlag', sql.Int, payload.poolRsFlag || 0);
-                req.input('StrgFlag', sql.Int, payload.strgFlag || 0);
-                req.input('BSType', sql.Int, payload.bsType || 0);
-                req.input('SpecFlag', sql.Int, payload.specFlag || 0);
-                req.input('LineStaffFlag', sql.Int, payload.lineStaffFlag || 0);
-                req.input('CreateBy', sql.VarChar(10), createBy.substring(0, 10)); // size limit 10
-                req.input('CreateDate', sql.DateTime, createDate);
-                
-                await req.execute('mp_TransactionsInsert');
-            }
-        } // End of if (!existingTransactionNo)
+                    if (desc.length > 500) {
+                        desc = desc.substring(0, 500);
+                    }
+
+                    const buildInsertRequest = (includeRefTransactionNo: boolean) => {
+                        const req = new sql.Request(transaction);
+                        req.input('TransactionNo', sql.VarChar(10), transactionNo);
+                        req.input('EffectiveDate', sql.DateTime, effectiveDate);
+                        req.input('ConclusionNo', sql.NVarChar(100), payload.conclusionNo || '');
+                        req.input('ConclusionDate', sql.DateTime, payload.conclusionDate ? new Date(payload.conclusionDate) : new Date());
+                        req.input('TransactionDesc', sql.NVarChar(500), desc);
+                        req.input('TransactionType', sql.Int, payload.transactionType);
+                        req.input('Amount', sql.Int, payload.amount || 0);
+                        req.input('UnitReceive', sql.VarChar(8), payload.unitReceive || '');
+                        req.input('UnitTransfer', sql.VarChar(8), payload.unitTransfer || '');
+                        req.input('LevelGroupFrom', sql.VarChar(4), payload.levelGroupFrom || '');
+                        req.input('LevelGroupTo', sql.VarChar(4), payload.levelGroupTo || '');
+                        req.input('TransferInd', sql.Int, payload.transferInd || 0);
+                        req.input('Status', sql.Int, status);
+                        req.input('Policyflag', sql.Int, payload.policyFlag || 0);
+                        req.input('PoolRsFlag', sql.Int, payload.poolRsFlag || 0);
+                        req.input('StrgFlag', sql.Int, payload.strgFlag || 0);
+                        req.input('BSType', sql.Int, payload.bsType || 0);
+                        req.input('SpecFlag', sql.Int, payload.specFlag || 0);
+                        req.input('LineStaffFlag', sql.Int, payload.lineStaffFlag || 0);
+                        req.input('CreateBy', sql.VarChar(10), createBy.substring(0, 10)); // size limit 10
+                        req.input('CreateDate', sql.DateTime, createDate);
+                        if (includeRefTransactionNo) {
+                            req.input('RefTransactionNo', sql.VarChar(10), payload.refTransactionNo ? payload.refTransactionNo.trim() : null);
+                        }
+                        return req;
+                    };
+
+                    await buildInsertRequest(true).execute('mp_TransactionsInsert');
+                }
+            } // End of if (!existingTransactionNo)
 
         // mp_TransactionFileInsert (if file provided)
         if (payload.fileName && payload.fileName.trim() !== '') {
@@ -496,6 +850,120 @@ export const getHRCenterDataService = async (
         return result.recordset;
     } catch (error) {
         console.error('Error in getHRCenterDataService:', error);
+        throw error;
+    }
+};
+
+export interface MonitorHistoryQueryParams {
+    fromDate: Date;
+    toDate: Date;
+    employeeId: string;
+    orgUnitNo: string;
+    userGroupNo: string;
+}
+
+export const getMonitorHistoryService = async (params: MonitorHistoryQueryParams): Promise<Record<string, unknown>[]> => {
+    try {
+        const pool = await poolPromise;
+        const request = new sql.Request(pool);
+
+        request.input('FromDate', sql.DateTime, params.fromDate);
+        request.input('ToDate', sql.DateTime, params.toDate);
+        request.input('EmployeeID', sql.VarChar(10), params.employeeId);
+        request.input('OrgUnitNo', sql.VarChar(8), params.orgUnitNo);
+        request.input('UserGroupNo', sql.VarChar(2), params.userGroupNo);
+
+        const result = await request.execute('mp_GetMonitorHistory');
+        return result.recordset || [];
+    } catch (error) {
+        console.error('Error executing mp_GetMonitorHistory:', error);
+        throw error;
+    }
+};
+
+export const getTransactionActionLogService = async (refNo: string): Promise<Record<string, unknown>[]> => {
+    try {
+        const pool = await poolPromise;
+        const request = new sql.Request(pool);
+
+        request.input('RefNo', sql.VarChar(20), refNo);
+        const result = await request.execute('mp_ActionLogGet');
+        return result.recordset || [];
+    } catch (error) {
+        console.error('Error executing mp_ActionLogGet:', error);
+        throw error;
+    }
+};
+
+export const getTransactionLogYearService = async (
+    orgUnitNo: string,
+    year: number
+): Promise<Record<string, unknown>[]> => {
+    try {
+        const pool = await poolPromise;
+        const request = new sql.Request(pool);
+
+        request.input('OrgUnitNo', sql.VarChar(8), orgUnitNo);
+        request.input('year', sql.Int, year);
+
+        const result = await request.execute('mp_TransactionLogYear');
+        return result.recordset || [];
+    } catch (error) {
+        console.error('Error executing mp_TransactionLogYear:', error);
+        throw error;
+    }
+};
+
+export const getTransactionLogYearDetailService = async (
+    orgUnitNo: string,
+    year: number,
+    month: number
+): Promise<Record<string, unknown>[]> => {
+    try {
+        const pool = await poolPromise;
+        const request = new sql.Request(pool);
+
+        request.input('OrgUnitNo', sql.VarChar(8), orgUnitNo);
+        request.input('year', sql.Int, year);
+        request.input('month', sql.Int, month);
+
+        const result = await request.execute('mp_TransactionLogYearDetail');
+        return result.recordset || [];
+    } catch (error) {
+        console.error('Error executing mp_TransactionLogYearDetail:', error);
+        throw error;
+    }
+};
+
+export const getSapMonitorGridService = async (
+    effectiveDate: Date
+): Promise<Record<string, unknown>[]> => {
+    try {
+        const pool = await poolPromise;
+        const request = new sql.Request(pool);
+
+        request.input('EffectiveDate', sql.DateTime, effectiveDate);
+        const result = await request.execute('mp_logSAP_GetData');
+        return result.recordset || [];
+    } catch (error) {
+        console.error('Error executing mp_logSAP_GetData:', error);
+        throw error;
+    }
+};
+
+export const getSapMonitorLogService = async (
+    effectiveDate: string
+): Promise<Record<string, unknown>[]> => {
+    try {
+        const pool = await poolPromise;
+        const request = new sql.Request(pool);
+
+        // Legacy API sent effective date as yyyyMMdd string.
+        request.input('EffectiveDate', sql.VarChar(20), effectiveDate);
+        const result = await request.execute('mp_logInterfaceGetByEffectiveDate');
+        return result.recordset || [];
+    } catch (error) {
+        console.error('Error executing mp_logInterfaceGetByEffectiveDate:', error);
         throw error;
     }
 };

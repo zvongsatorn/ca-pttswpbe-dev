@@ -1,25 +1,154 @@
 import { Context } from 'hono';
-import { saveDraftTransactionService, getExistingFilesService, getDraftTransactionsService, deleteDraftTransactionService, getApproversFlowService, directApproveTransactionsService, getBorrowTransactionsService, getReturnsByBorrowService, getHRCenterDataService, DraftTransactionPayload } from '../services/transactionService.js';
+import {
+    saveDraftTransactionService,
+    getExistingFilesService,
+    getDraftTransactionsService,
+    deleteDraftTransactionService,
+    getApproversFlowService,
+    directApproveTransactionsService,
+    createApprovedStructureRemarkTransactionsService,
+    getBorrowTransactionsService,
+    getReturnsByBorrowService,
+    getHRCenterDataService,
+    getMonitorHistoryService,
+    getTransactionActionLogService,
+    getTransactionLogYearService,
+    getTransactionLogYearDetailService,
+    getSapMonitorGridService,
+    getSapMonitorLogService,
+    DraftTransactionPayload
+} from '../services/transactionService.js';
+import { validateTransactionCreationWindowService } from '../services/calendarService.js';
 import { writeFile, mkdir } from 'fs/promises';
 import { existsSync } from 'fs';
 import path from 'path';
 
+const THAI_MONTH_NAMES = ['มกราคม', 'กุมภาพันธ์', 'มีนาคม', 'เมษายน', 'พฤษภาคม', 'มิถุนายน', 'กรกฎาคม', 'สิงหาคม', 'กันยายน', 'ตุลาคม', 'พฤศจิกายน', 'ธันวาคม'];
+
+const parseEffectiveDateForStructureDebug = (
+    monthRaw: unknown,
+    yearRaw: unknown,
+    effectiveDateRaw: unknown
+): Date => {
+    let month: number | null = null;
+    let year: number | null = null;
+
+    const monthParsed = Number.parseInt(String(monthRaw ?? ''), 10);
+    if (Number.isInteger(monthParsed) && monthParsed >= 1 && monthParsed <= 12) {
+        month = monthParsed;
+    }
+
+    const yearParsed = Number.parseInt(String(yearRaw ?? ''), 10);
+    if (Number.isInteger(yearParsed)) {
+        year = yearParsed > 2400 ? yearParsed - 543 : yearParsed;
+    }
+
+    if ((!month || !year) && typeof effectiveDateRaw === 'string' && effectiveDateRaw.trim()) {
+        const parsed = new Date(effectiveDateRaw);
+        if (!Number.isNaN(parsed.getTime())) {
+            month = parsed.getMonth() + 1;
+            year = parsed.getFullYear();
+        }
+    }
+
+    if (!month || !year) {
+        const today = new Date();
+        month = today.getMonth() + 1;
+        year = today.getFullYear();
+    }
+
+    return new Date(year, month - 1, 1, 0, 0, 0, 0);
+};
+
+const parseEffectiveMonthYear = (
+    effectiveMonthRaw: unknown,
+    effectiveYearRaw: unknown
+): { month: number | null; year: number | null } => {
+    const monthName = String(effectiveMonthRaw ?? '').trim();
+    const month = THAI_MONTH_NAMES.indexOf(monthName) + 1;
+
+    const yearParsed = Number.parseInt(String(effectiveYearRaw ?? '').trim(), 10);
+    const year = Number.isInteger(yearParsed) ? yearParsed : null;
+
+    return {
+        month: month > 0 ? month : null,
+        year
+    };
+};
+
 export const saveDraftTransaction = async (c: Context) => {
     try {
-        // Parse multipart FormData (frontend now sends FormData with 'payload' + optional 'file')
-        const formData = await c.req.formData();
-        const payloadStr = formData.get('payload') as string;
-        const fileEntry = formData.get('file') as File | null;
+        const contentType = c.req.header('content-type') || '';
+        let body: Record<string, any> | null = null;
+        let fileEntry: File | null = null;
 
-        if (!payloadStr) {
-            return c.json({ status: 400, message: 'Missing payload field' }, 400);
+        if (contentType.includes('multipart/form-data')) {
+            const formData = await c.req.formData();
+            const payloadRaw = formData.get('payload');
+            fileEntry = formData.get('file') as File | null;
+
+            if (typeof payloadRaw !== 'string' || !payloadRaw.trim()) {
+                return c.json({ status: 400, message: 'Missing payload field' }, 400);
+            }
+            body = JSON.parse(payloadRaw);
+        } else {
+            const raw = await c.req.json().catch(() => null) as any;
+            const payloadRaw = raw?.payload;
+
+            if (payloadRaw && typeof payloadRaw === 'object') {
+                body = payloadRaw;
+            } else if (typeof payloadRaw === 'string' && payloadRaw.trim()) {
+                body = JSON.parse(payloadRaw);
+            } else if (raw && typeof raw === 'object') {
+                body = raw;
+            }
         }
 
-        const body = JSON.parse(payloadStr);
+        if (!body) {
+            return c.json({ status: 400, message: 'Invalid payload' }, 400);
+        }
+
+        const parsedEffective = parseEffectiveMonthYear(body.effectiveMonth, body.effectiveYear);
+        if (!parsedEffective.month || !parsedEffective.year) {
+            return c.json({ status: 400, message: 'Invalid effectiveMonth or effectiveYear' }, 400);
+        }
+
+        const calendarWindowCheck = await validateTransactionCreationWindowService(
+            parsedEffective.month,
+            parsedEffective.year
+        );
+
+        if (!calendarWindowCheck.isAllowed) {
+            return c.json({
+                status: 403,
+                message: calendarWindowCheck.message,
+                data: {
+                    calendarStart: calendarWindowCheck.startDate,
+                    calendarEnd: calendarWindowCheck.endDate
+                }
+            }, 403);
+        }
+
         const createBy = body.employeeId || 'SYSTEM';
 
+        // DB column for FileUpload stores only the file name (no folder prefix).
+        const normalizeUploadFileName = (value: unknown): string | undefined => {
+            if (typeof value !== 'string') return undefined;
+            const trimmed = value.trim();
+            if (!trimmed) return undefined;
+            const normalized = trimmed.replace(/\\/g, '/');
+            return path.basename(normalized);
+        };
+
+        const normalizeTransactionNo = (value: unknown): string | undefined => {
+            if (typeof value !== 'string') return undefined;
+            const trimmed = value.trim();
+            if (!trimmed) return undefined;
+            return trimmed.substring(0, 10);
+        };
+
         // Process file upload first if present
-        let fileUrlToSave = body.detailData?.existingFileUrl || null;
+        let fileUrlToSave = normalizeUploadFileName(body.detailData?.existingFileUrl);
         let fileNameToSave = body.detailData?.existingFileName || null;
         
         if (fileEntry) {
@@ -74,6 +203,7 @@ export const saveDraftTransaction = async (c: Context) => {
             fileName: fileNameToSave,
             fileUrl: fileUrlToSave,
             refId: body.detailData?.existingFileId, // Using existing TransactionFileID as RefID
+            refTransactionNo: normalizeTransactionNo(body.refTransactionNo ?? body.detailData?.refTransactionNo),
         };
 
         // Save draft and the file record in a single call
@@ -137,8 +267,7 @@ export const getDraftTransactions = async (c: Context) => {
         }
 
         // Compute first day of the effective month
-        const monthNames = ['มกราคม', 'กุมภาพันธ์', 'มีนาคม', 'เมษายน', 'พฤษภาคม', 'มิถุนายน', 'กรกฎาคม', 'สิงหาคม', 'กันยายน', 'ตุลาคม', 'พฤศจิกายน', 'ธันวาคม'];
-        const monthIndex = effectiveMonth ? monthNames.indexOf(effectiveMonth) + 1 : new Date().getMonth() + 1;
+        const monthIndex = effectiveMonth ? THAI_MONTH_NAMES.indexOf(effectiveMonth) + 1 : new Date().getMonth() + 1;
         const yearAD = effectiveYear ? parseInt(effectiveYear) - 543 : new Date().getFullYear();
         const effectiveDate = new Date(`${yearAD}-${monthIndex.toString().padStart(2, '0')}-01T00:00:00Z`);
 
@@ -249,6 +378,38 @@ export const directApproveTransactions = async (c: Context) => {
     }
 };
 
+export const debugGenerateApprovedStructureRemarks = async (c: Context) => {
+    try {
+        const body = await c.req.json().catch(() => ({} as Record<string, unknown>));
+        const tokenUser = ((c.req as any).user || {}) as Record<string, unknown>;
+
+        const effectiveDate = parseEffectiveDateForStructureDebug(
+            body.effectiveMonth,
+            body.effectiveYear,
+            body.effectiveDate
+        );
+        const createBy = String(body.createBy || tokenUser.id || 'SYSTEM').trim() || 'SYSTEM';
+
+        const result = await createApprovedStructureRemarkTransactionsService({
+            effectiveDate,
+            createBy
+        });
+
+        return c.json({
+            status: 200,
+            message: 'Structure-change remark transaction generated successfully',
+            data: result
+        }, 200);
+    } catch (error: any) {
+        console.error('Error in debugGenerateApprovedStructureRemarks controller:', error);
+        return c.json({
+            status: 500,
+            message: 'Internal server error',
+            error: error.message
+        }, 500);
+    }
+};
+
 export const getBorrowTransactions = async (c: Context) => {
     try {
         const employeeId = c.req.query('employeeId') || undefined;
@@ -327,6 +488,245 @@ export const getHRCenterData = async (c: Context) => {
         return c.json({
             status: 500,
             message: "Internal server error",
+            error: error.message
+        }, 500);
+    }
+};
+
+const toDateFromMonthYear = (monthRaw: string, yearRaw: string): Date | null => {
+    if (!monthRaw || !yearRaw) return null;
+
+    const month = Number.parseInt(monthRaw, 10);
+    if (!Number.isInteger(month) || month < 1 || month > 12) {
+        return null;
+    }
+
+    let year = Number.parseInt(yearRaw, 10);
+    if (!Number.isInteger(year)) {
+        return null;
+    }
+
+    if (year > 2400) {
+        year -= 543;
+    }
+
+    const date = new Date(year, month - 1, 1);
+    if (
+        Number.isNaN(date.getTime()) ||
+        date.getFullYear() !== year ||
+        date.getMonth() !== month - 1 ||
+        date.getDate() !== 1
+    ) {
+        return null;
+    }
+
+    date.setHours(0, 0, 0, 0);
+    return date;
+};
+
+const normalizeEffectiveDateForLog = (effectiveDateRaw: string): string | null => {
+    const raw = effectiveDateRaw.trim();
+    if (!raw) return null;
+
+    const fromDmy = raw.match(/^(\d{1,2})[/-](\d{1,2})[/-](\d{4})$/);
+    if (fromDmy) {
+        const day = Number.parseInt(fromDmy[1], 10);
+        const month = Number.parseInt(fromDmy[2], 10);
+        let year = Number.parseInt(fromDmy[3], 10);
+        if (year > 2400) year -= 543;
+
+        const date = new Date(year, month - 1, day);
+        if (
+            !Number.isNaN(date.getTime()) &&
+            date.getFullYear() === year &&
+            date.getMonth() === month - 1 &&
+            date.getDate() === day
+        ) {
+            return `${year.toString().padStart(4, '0')}${month.toString().padStart(2, '0')}${day.toString().padStart(2, '0')}`;
+        }
+    }
+
+    const digitOnly = raw.replace(/\D/g, '');
+    if (digitOnly.length === 8) {
+        const yearRawNum = Number.parseInt(digitOnly.slice(0, 4), 10);
+        const month = Number.parseInt(digitOnly.slice(4, 6), 10);
+        const day = Number.parseInt(digitOnly.slice(6, 8), 10);
+        const year = yearRawNum > 2400 ? yearRawNum - 543 : yearRawNum;
+        const date = new Date(year, month - 1, day);
+
+        if (
+            !Number.isNaN(date.getTime()) &&
+            date.getFullYear() === year &&
+            date.getMonth() === month - 1 &&
+            date.getDate() === day
+        ) {
+            return `${year.toString().padStart(4, '0')}${month.toString().padStart(2, '0')}${day.toString().padStart(2, '0')}`;
+        }
+    }
+
+    const parsed = new Date(raw);
+    if (Number.isNaN(parsed.getTime())) return null;
+    const year = parsed.getFullYear();
+    const month = parsed.getMonth() + 1;
+    const day = parsed.getDate();
+    return `${year.toString().padStart(4, '0')}${month.toString().padStart(2, '0')}${day.toString().padStart(2, '0')}`;
+};
+
+export const getMonitorHistory = async (c: Context) => {
+    try {
+        const dmonth1 = c.req.query('dmonth1') || '';
+        const dyear1 = c.req.query('dyear1') || '';
+        const dmonth2 = c.req.query('dmonth2') || '';
+        const dyear2 = c.req.query('dyear2') || '';
+        const employeeId = c.req.query('EmployeeID') || c.req.query('employeeId') || '';
+        const orgUnitNo = c.req.query('OrgUnitNo') || c.req.query('orgUnitNo') || '';
+        const userGroupNo = c.req.query('UserGroupNo') || c.req.query('userGroupNo') || '';
+
+        if (!dmonth1 || !dyear1 || !dmonth2 || !dyear2 || !employeeId || !orgUnitNo || !userGroupNo) {
+            return c.json({ status: 400, message: 'Missing required query parameters' }, 400);
+        }
+
+        const fromDate = toDateFromMonthYear(dmonth1, dyear1);
+        const toDate = toDateFromMonthYear(dmonth2, dyear2);
+        if (!fromDate || !toDate) {
+            return c.json({ status: 400, message: 'Invalid month/year format' }, 400);
+        }
+
+        if (fromDate > toDate) {
+            return c.json({ status: 400, message: 'From date must be less than or equal to To date' }, 400);
+        }
+
+        const data = await getMonitorHistoryService({
+            fromDate,
+            toDate,
+            employeeId,
+            orgUnitNo,
+            userGroupNo
+        });
+
+        return c.json({ status: 200, data }, 200);
+    } catch (error: any) {
+        console.error('Error in getMonitorHistory controller:', error);
+        return c.json({
+            status: 500,
+            message: 'Internal server error',
+            error: error.message
+        }, 500);
+    }
+};
+
+export const getTransactionActionLog = async (c: Context) => {
+    try {
+        const refNo = c.req.query('refNo') || c.req.query('RefNo') || '';
+        if (!refNo) {
+            return c.json({ status: 400, message: 'Missing refNo parameter' }, 400);
+        }
+
+        const data = await getTransactionActionLogService(refNo);
+        return c.json({ status: 200, data }, 200);
+    } catch (error: any) {
+        console.error('Error in getTransactionActionLog controller:', error);
+        return c.json({
+            status: 500,
+            message: 'Internal server error',
+            error: error.message
+        }, 500);
+    }
+};
+
+export const getTransactionLogYear = async (c: Context) => {
+    try {
+        const orgUnitNo = c.req.query('OrgUnitNo') || c.req.query('orgUnitNo') || '';
+        const yearRaw = c.req.query('dyear') || c.req.query('year') || '';
+
+        const year = Number.parseInt(yearRaw, 10);
+        if (!orgUnitNo || !Number.isInteger(year) || year < 1900 || year > 3000) {
+            return c.json({ status: 400, message: 'Missing or invalid OrgUnitNo/dyear parameter' }, 400);
+        }
+
+        const data = await getTransactionLogYearService(orgUnitNo, year);
+        return c.json({ status: 200, data }, 200);
+    } catch (error: any) {
+        console.error('Error in getTransactionLogYear controller:', error);
+        return c.json({
+            status: 500,
+            message: 'Internal server error',
+            error: error.message
+        }, 500);
+    }
+};
+
+export const getTransactionLogYearDetail = async (c: Context) => {
+    try {
+        const orgUnitNo = c.req.query('OrgUnitNo') || c.req.query('orgUnitNo') || '';
+        const yearRaw = c.req.query('dyear') || c.req.query('year') || '';
+        const monthRaw = c.req.query('dmonth') || c.req.query('month') || '';
+
+        const year = Number.parseInt(yearRaw, 10);
+        const month = Number.parseInt(monthRaw, 10);
+
+        if (
+            !orgUnitNo ||
+            !Number.isInteger(year) ||
+            year < 1900 ||
+            year > 3000 ||
+            !Number.isInteger(month) ||
+            month < 1 ||
+            month > 12
+        ) {
+            return c.json({ status: 400, message: 'Missing or invalid OrgUnitNo/dyear/dmonth parameter' }, 400);
+        }
+
+        const data = await getTransactionLogYearDetailService(orgUnitNo, year, month);
+        return c.json({ status: 200, data }, 200);
+    } catch (error: any) {
+        console.error('Error in getTransactionLogYearDetail controller:', error);
+        return c.json({
+            status: 500,
+            message: 'Internal server error',
+            error: error.message
+        }, 500);
+    }
+};
+
+export const getSapMonitorGrid = async (c: Context) => {
+    try {
+        const monthRaw = c.req.query('dmonth') || c.req.query('month') || '';
+        const yearRaw = c.req.query('dyear') || c.req.query('year') || '';
+
+        const effectiveDate = toDateFromMonthYear(monthRaw, yearRaw);
+        if (!effectiveDate) {
+            return c.json({ status: 400, message: 'Missing or invalid dmonth/dyear parameter' }, 400);
+        }
+
+        const data = await getSapMonitorGridService(effectiveDate);
+        return c.json({ status: 200, data }, 200);
+    } catch (error: any) {
+        console.error('Error in getSapMonitorGrid controller:', error);
+        return c.json({
+            status: 500,
+            message: 'Internal server error',
+            error: error.message
+        }, 500);
+    }
+};
+
+export const getSapMonitorLog = async (c: Context) => {
+    try {
+        const effectiveDateRaw = c.req.query('EffectiveDate') || c.req.query('effectiveDate') || '';
+        const effectiveDate = normalizeEffectiveDateForLog(effectiveDateRaw);
+
+        if (!effectiveDate) {
+            return c.json({ status: 400, message: 'Missing or invalid EffectiveDate parameter' }, 400);
+        }
+
+        const data = await getSapMonitorLogService(effectiveDate);
+        return c.json({ status: 200, data }, 200);
+    } catch (error: any) {
+        console.error('Error in getSapMonitorLog controller:', error);
+        return c.json({
+            status: 500,
+            message: 'Internal server error',
             error: error.message
         }, 500);
     }
