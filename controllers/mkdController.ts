@@ -38,6 +38,12 @@ import {
     cancelMKDService
 } from '../services/mkdService.js';
 
+const normalizeUserGroupNo = (value: string): string => {
+    const trimmed = String(value || '').trim();
+    if (!trimmed) return '';
+    return /^\d+$/.test(trimmed) ? trimmed.padStart(2, '0') : trimmed;
+};
+
 export const getStartYear = async (c: Context) => {
     try {
         const result = await getStartYearService();
@@ -79,7 +85,8 @@ export const getHistoryManDriver = async (c: Context) => {
         const requestType = c.req.query('RequestType') ? parseInt(c.req.query('RequestType') as string) : 1;
         const employeeId = c.req.query('EmployeeID') || '';
         const orgUnitNo = c.req.query('OrgUnitNo') || '';
-        const userGroupNo = c.req.query('UserGroupNo') || '';
+        const userGroupNo = normalizeUserGroupNo(c.req.query('UserGroupNo') || '');
+        const scopedEmployeeId = userGroupNo === '04' ? '' : employeeId;
         const division = c.req.query('division') || '';
 
         if (!effectiveYear) {
@@ -90,7 +97,7 @@ export const getHistoryManDriver = async (c: Context) => {
             effectiveMonth,
             effectiveYear,
             requestType,
-            employeeId,
+            scopedEmployeeId,
             orgUnitNo,
             userGroupNo,
             division

@@ -67,6 +67,7 @@ import retirementRoutes from './routes/retirementRoutes.js';
 import reportRoutes from './routes/reportRoutes.js';
 import logRoutes from './routes/logRoutes.js';
 import delayRoutes from './routes/delayRoutes.js';
+import interfaceRoutes from './routes/interfaceRoutes.js';
 import { filesProxy } from './controllers/mkdController.js';
 
 
@@ -90,6 +91,7 @@ app.route('/api/retirement', retirementRoutes);
 app.route('/api/report', reportRoutes);
 app.route('/api/log', logRoutes);
 app.route('/api/delay', delayRoutes);
+app.route('/api/interface', interfaceRoutes);
 app.get('/api/files-proxy', filesProxy);
 
 

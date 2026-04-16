@@ -907,17 +907,31 @@ export const getHRCenterDataService = async (
 ) => {
     try {
         const pool = await poolPromise;
-        const req = new sql.Request(pool);
-        
-        req.input('EffectiveDate', sql.DateTime, effectiveDate);
-        req.input('EmployeeID', sql.VarChar(10), employeeId);
-        req.input('UserGroupNO', sql.VarChar(2), userGroupNo);
-
         let result;
         if (viewMode === 'department') {
+            const req = new sql.Request(pool);
+            req.input('EffectiveDate', sql.DateTime, effectiveDate);
+            req.input('EmployeeID', sql.VarChar(10), employeeId);
+            req.input('UserGroupNO', sql.VarChar(2), userGroupNo);
             result = await req.execute('mp_HRCenter_OrgUnit_GetTrans');
         } else {
-            result = await req.execute('mp_HRCenter_OrgUnit_GetAll');
+            try {
+                const req = new sql.Request(pool);
+                req.input('EffectiveDate', sql.DateTime, effectiveDate);
+                req.input('EmployeeID', sql.VarChar(10), employeeId);
+                req.input('UserGroupNO', sql.VarChar(2), userGroupNo);
+                result = await req.execute('mp_HRCenter_OrgUnit_GetDataAll_ByChild');
+            } catch (error: any) {
+                const message = String(error?.message || '').toLowerCase();
+                if (!message.includes('could not find stored procedure')) {
+                    throw error;
+                }
+                const fallbackReq = new sql.Request(pool);
+                fallbackReq.input('EffectiveDate', sql.DateTime, effectiveDate);
+                fallbackReq.input('EmployeeID', sql.VarChar(10), employeeId);
+                fallbackReq.input('UserGroupNO', sql.VarChar(2), userGroupNo);
+                result = await fallbackReq.execute('mp_HRCenter_OrgUnit_GetAll');
+            }
         }
 
         if (!result || !result.recordset) {

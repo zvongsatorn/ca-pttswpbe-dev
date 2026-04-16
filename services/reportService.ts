@@ -1,6 +1,7 @@
 import { sql, poolPromise } from '../config/db.js';
 
 type Report08LevelMap = Map<string, Map<string, number>>;
+type Report09OrgYearMap = Map<string, Map<number, { support: number; bu: number }>>;
 
 type TableMeta = {
     schemaName: string;
@@ -31,6 +32,16 @@ const REPORT08_BEGIN_COL_CANDIDATES = ['BeginDate', 'StartDate', 'FromDate', 'Ef
 const REPORT08_END_COL_CANDIDATES = ['EndDate', 'ToDate', 'EffectiveEndDate'];
 const REPORT08_EFFECTIVE_COL_CANDIDATES = ['EffectiveDate', 'CheckDate', 'DataDate', 'MonthDate', 'TranDate'];
 const REPORT08_AMOUNT_COL_CANDIDATES = ['CostEmployee', 'CostAmount', 'Amount', 'BudgetAmount', 'ExpenseAmount', 'TotalAmount', 'TotalCost', 'Cost', 'Value'];
+
+const REPORT09_INFO_TABLE_CANDIDATES = ['infodata', 'InfoData'];
+const REPORT09_POSITION_TABLE_CANDIDATES = ['InterfacePosition', 'interfaceposition'];
+const REPORT09_RETIRE_YEAR_COL_CANDIDATES = ['RETIREYEAR', 'RetireYear'];
+const REPORT09_INFO_POSITION_COL_CANDIDATES = ['POSCODE', 'PositionID', 'PositionCode', 'PosCode'];
+const REPORT09_POSITION_ID_COL_CANDIDATES = ['PositionID', 'POSCODE', 'PositionCode', 'PosCode'];
+const REPORT09_ORG_COL_CANDIDATES = ['OrgUnitID', 'OrgUnitId', 'OrgUnitNo', 'OrgUnitNO', 'OrgUnit', 'UnitNo', 'UnitCode', 'OrgNo'];
+const REPORT09_BS_TYPE_COL_CANDIDATES = ['BSType', 'BsType', 'BS_Type', 'TypeBS'];
+const REPORT09_SIGN_POS_COL_CANDIDATES = ['SignPos', 'SignPOS', 'SignPosition', 'SignPosFlag'];
+const REPORT09_EMPLOYEE_COL_CANDIDATES = ['EmployeeID', 'EmployeeId', 'EmpID', 'EmpId', 'EmployeeNo'];
 
 export const getDashboardDataService = async (
     effectiveMonth: string,
@@ -395,10 +406,23 @@ const getTableMeta = async (
     const rows = Array.isArray(tableRes.recordset) ? tableRes.recordset as Array<Record<string, unknown>> : [];
     if (!rows.length) return null;
 
+    const rankTable = (row: Record<string, unknown>, candidate: string) => {
+        const tableName = String(row.table_name || '').toLowerCase();
+        const schemaName = String(row.schema_name || '').toLowerCase();
+        const tableExact = tableName === candidate.toLowerCase() ? 0 : 1;
+        const schemaRank = schemaName === 'dbo' ? 0 : 1;
+        return tableExact * 10 + schemaRank;
+    };
+
     let selected: Record<string, unknown> | null = null;
     for (const candidate of tableCandidates) {
-        selected = rows.find((row) => String(row.table_name || '').toLowerCase() === candidate.toLowerCase()) || null;
-        if (selected) break;
+        const matched = rows
+            .filter((row) => String(row.table_name || '').toLowerCase() === candidate.toLowerCase())
+            .sort((a, b) => rankTable(a, candidate) - rankTable(b, candidate));
+        if (matched.length > 0) {
+            selected = matched[0];
+            break;
+        }
     }
 
     if (!selected) selected = rows[0];
@@ -1074,17 +1098,39 @@ export const getReport06DataService = async (
         const effectiveDate = new Date(effectiveDateStr);
 
         request.input('Effectivedate', sql.DateTime, effectiveDate);
-        request.input('division', sql.VarChar(8), division || null);
-        request.input('BGNo', sql.VarChar(3), bgNo || null);
         request.input('EmployeeID', sql.VarChar(8), employeeId);
-        request.input('UserGroupNo', sql.VarChar(2), userGroupNo);
+        request.input('UserGroupNO', sql.VarChar(2), userGroupNo);
 
-        const result = await request.execute('mp_ReportUnit_Effectivedate_2');
+        const result = await request.execute('mp_ReportActualMovement_Effectivedate');
         const rows = Array.isArray(result.recordset) ? result.recordset : [];
 
         return rows.map((rawRow, index) => {
             const row = (rawRow && typeof rawRow === 'object') ? (rawRow as Record<string, unknown>) : {};
             const { num, text } = buildRowAccessor(row);
+
+            // --- กรอบ breakdown ---
+            const qn_1 = num('quota_n_1'); const qn_2 = num('quota_n_2'); const qn_3 = num('quota_n_3'); const qn_4 = num('quota_n_4');
+            const qn_5 = num('quota_n_5'); const qn_6 = num('quota_n_6'); const qn_7 = num('quota_n_7'); const qn_total = num('quota_n_total');
+            const qp_1 = num('quota_p_1'); const qp_2 = num('quota_p_2'); const qp_3 = num('quota_p_3'); const qp_4 = num('quota_p_4');
+            const qp_5 = num('quota_p_5'); const qp_6 = num('quota_p_6'); const qp_7 = num('quota_p_7'); const qp_total = num('quota_p_total');
+            const qs_1 = num('quota_s_1'); const qs_2 = num('quota_s_2'); const qs_3 = num('quota_s_3'); const qs_4 = num('quota_s_4');
+            const qs_5 = num('quota_s_5'); const qs_6 = num('quota_s_6'); const qs_7 = num('quota_s_7'); const qs_total = num('quota_s_total');
+
+            // --- คน breakdown ---
+            const mn_1 = num('actual_n_1'); const mn_2 = num('actual_n_2'); const mn_3 = num('actual_n_3'); const mn_4 = num('actual_n_4');
+            const mn_5 = num('actual_n_5'); const mn_6 = num('actual_n_6'); const mn_7 = num('actual_n_7'); const mn_total = num('actual_n_total');
+            const mp_1 = num('actual_p_1'); const mp_2 = num('actual_p_2'); const mp_3 = num('actual_p_3'); const mp_4 = num('actual_p_4');
+            const mp_5 = num('actual_p_5'); const mp_6 = num('actual_p_6'); const mp_7 = num('actual_p_7'); const mp_total = num('actual_p_total');
+            const ms_1 = num('actual_s_1'); const ms_2 = num('actual_s_2'); const ms_3 = num('actual_s_3'); const ms_4 = num('actual_s_4');
+            const ms_5 = num('actual_s_5'); const ms_6 = num('actual_s_6'); const ms_7 = num('actual_s_7'); const ms_total = num('actual_s_total');
+
+            // Combined totals (backward compat for Report 7: q = ปกติ+Pool, ไม่รวม Sec)
+            const q_1 = qn_1 + qp_1; const q_2 = qn_2 + qp_2; const q_3 = qn_3 + qp_3; const q_4 = qn_4 + qp_4;
+            const q_5 = qn_5 + qp_5; const q_6 = qn_6 + qp_6; const q_7 = qn_7 + qp_7; const q_total = qn_total + qp_total;
+            const m_1 = mn_1 + mp_1; const m_2 = mn_2 + mp_2; const m_3 = mn_3 + mp_3; const m_4 = mn_4 + mp_4;
+            const m_5 = mn_5 + mp_5; const m_6 = mn_6 + mp_6; const m_7 = mn_7 + mp_7; const m_total = mn_total + mp_total;
+
+            const f_amount = num('f_amount');
 
             return {
                 key: `r6-${index + 1}`,
@@ -1097,41 +1143,35 @@ export const getReport06DataService = async (
                 unit_level_name: text('UnitLevelName'),
                 unit_short: text('UnitAbbr', 'UnitShort'),
                 unit_name: text('UnitName'),
-                q_1: num('q_1'),
-                m_1: num('m_1'),
-                f_1: num('f_1'),
-                t_1: num('t_1'),
-                q_2: num('q_2'),
-                m_2: num('m_2'),
-                f_2: num('f_2'),
-                t_2: num('t_2'),
-                q_3: num('q_3'),
-                m_3: num('m_3'),
-                f_3: num('f_3'),
-                t_3: num('t_3'),
-                q_4: num('q_4'),
-                m_4: num('m_4'),
-                f_4: num('f_4'),
-                t_4: num('t_4'),
-                q_5: num('q_5'),
-                m_5: num('m_5'),
-                f_5: num('f_5'),
-                t_5: num('t_5'),
-                q_6: num('q_6'),
-                m_6: num('m_6'),
-                f_6: num('f_6'),
-                t_6: num('t_6'),
-                q_7: num('q_7'),
-                m_7: num('m_7'),
-                f_7: num('f_7'),
-                t_7: num('t_7'),
-                q_total: num('q_total'),
-                q_8: num('q_8', 'q_contact', 'Q_Contact'),
-                q_10: num('q_10', 'q_subcontact', 'Q_SubContact'),
-                m_total: num('m_total'),
-                f_total: num('f_total'),
-                total: num('total'),
-                remark: text('remark', 'note')
+
+                // --- Combined (backward compat) ---
+                q_1, m_1, f_1: 0, t_1: q_1 - m_1,
+                q_2, m_2, f_2: 0, t_2: q_2 - m_2,
+                q_3, m_3, f_3: 0, t_3: q_3 - m_3,
+                q_4, m_4, f_4: 0, t_4: q_4 - m_4,
+                q_5, m_5, f_5: 0, t_5: q_5 - m_5,
+                q_6, m_6, f_6: 0, t_6: q_6 - m_6,
+                q_7, m_7, f_7: 0, t_7: q_7 - m_7,
+                q_total, m_total,
+                f_total: f_amount,
+                total: q_total - m_total - f_amount,
+                q_8: num('q_contact'),
+                q_10: num('q_subcontact'),
+
+                // --- กรอบ ปกติ ---
+                qn_1, qn_2, qn_3, qn_4, qn_5, qn_6, qn_7, qn_total,
+                // --- กรอบ Pool ---
+                qp_1, qp_2, qp_3, qp_4, qp_5, qp_6, qp_7, qp_total,
+                // --- กรอบ Sec ---
+                qs_1, qs_2, qs_3, qs_4, qs_5, qs_6, qs_7, qs_total,
+                // --- คน ปกติ ---
+                mn_1, mn_2, mn_3, mn_4, mn_5, mn_6, mn_7, mn_total,
+                // --- คน Pool ---
+                mp_1, mp_2, mp_3, mp_4, mp_5, mp_6, mp_7, mp_total,
+                // --- คน Sec ---
+                ms_1, ms_2, ms_3, ms_4, ms_5, ms_6, ms_7, ms_total,
+
+                remark: text('TransactionDesc', 'note', 'remark')
             };
         });
     } catch (error) {
@@ -1367,7 +1407,435 @@ export const getReport08DataService = async (
     }
 };
 
-const mapReport10LevelGroup = (levelName: string): '010' | '020_030' | '040' | '050' | 'OTHER' => {
+const buildReport09Years = (effectiveYear: number): number[] =>
+    Array.from({ length: 5 }, (_, idx) => effectiveYear + idx);
+
+const normalizeReport09OrgUnitKey = (value: unknown): string => {
+    const raw = toTrimText(value);
+    if (!raw) return '';
+    // Business rule from user/domain: OrgUnitNo = OrgUnitID.
+    // Keep exact code (trim only), do not strip prefix digits or reformat.
+    return raw;
+};
+
+const createEmptyReport09Node = (displayYears: number[]) => {
+    const node: Record<string, number> = {
+        cut_support: 0,
+        cut_bu: 0,
+        cut_total: 0
+    };
+
+    displayYears.forEach((year) => {
+        node[`y${year}_sup`] = 0;
+        node[`y${year}_bu`] = 0;
+    });
+
+    return node;
+};
+
+const getReport09OrgUnitNo = (row: Record<string, unknown>): string => {
+    const { text } = buildRowAccessor(row);
+    const direct = text(
+        'OrgUnitID',
+        'orgunitid',
+        'OrgUnitNo',
+        'orgunitno',
+        'OrgUnitNO',
+        'UnitNo',
+        'unitno'
+    );
+
+    if (direct) return normalizeReport09OrgUnitKey(direct);
+
+    return '';
+};
+
+const getReport09RetirementMap = async (
+    pool: any,
+    effectiveYear: number,
+    structureDate: Date,
+    structureIsSecondment: number | null
+): Promise<Report09OrgYearMap> => {
+    const displayYears = buildReport09Years(effectiveYear);
+    const fromYear = displayYears[0];
+    const toYear = displayYears[displayYears.length - 1];
+
+    const infoMeta = await getTableMeta(pool, REPORT09_INFO_TABLE_CANDIDATES);
+    const positionMeta = await getTableMeta(pool, REPORT09_POSITION_TABLE_CANDIDATES);
+    if (!infoMeta || !positionMeta) return new Map();
+
+    const retireYearCol = pickColumnName(infoMeta.columns, REPORT09_RETIRE_YEAR_COL_CANDIDATES);
+    const infoPosCol = pickColumnName(infoMeta.columns, REPORT09_INFO_POSITION_COL_CANDIDATES);
+    const positionIdCol = pickColumnName(positionMeta.columns, REPORT09_POSITION_ID_COL_CANDIDATES);
+    const orgCol = pickColumnName(positionMeta.columns, REPORT09_ORG_COL_CANDIDATES);
+    const bsTypeCol = pickColumnName(positionMeta.columns, REPORT09_BS_TYPE_COL_CANDIDATES);
+    if (!retireYearCol || !infoPosCol || !positionIdCol || !orgCol || !bsTypeCol) return new Map();
+
+    const signPosCol = pickColumnName(positionMeta.columns, REPORT09_SIGN_POS_COL_CANDIDATES);
+    const employeeCol = pickColumnName(positionMeta.columns, REPORT09_EMPLOYEE_COL_CANDIDATES);
+
+    const signPosCondition = signPosCol
+        ? `AND TRY_CONVERT(int, pos.${escapeSqlIdentifier(signPosCol)}) = 100`
+        : '';
+    const countExpr = employeeCol
+        ? `COUNT(DISTINCT LTRIM(RTRIM(CAST(pos.${escapeSqlIdentifier(employeeCol)} AS nvarchar(64)))))`
+        : 'COUNT(1)';
+
+    const orgKeyExpr = structureIsSecondment === 0
+        ? `
+            CASE
+                WHEN ISNULL(unit.IsSecondment, 0) = 1
+                     AND rt.Reportto IS NOT NULL
+                     AND LTRIM(RTRIM(CAST(rt.Reportto AS nvarchar(32)))) <> ''
+                    THEN LTRIM(RTRIM(CAST(rt.Reportto AS nvarchar(32))))
+                ELSE LTRIM(RTRIM(CAST(pos.${escapeSqlIdentifier(orgCol)} AS nvarchar(32))))
+            END
+        `
+        : `LTRIM(RTRIM(CAST(pos.${escapeSqlIdentifier(orgCol)} AS nvarchar(32))))`;
+
+    const joinStructureForMapping = structureIsSecondment === 0
+        ? `
+        LEFT JOIN InterfaceUnit unit
+            ON LTRIM(RTRIM(CAST(unit.OrgUnitNo AS nvarchar(32)))) =
+               LTRIM(RTRIM(CAST(pos.${escapeSqlIdentifier(orgCol)} AS nvarchar(32))))
+           AND @EffectiveDate BETWEEN unit.BeginDate AND unit.EndDate
+        LEFT JOIN MP_Reportto rt
+            ON LTRIM(RTRIM(CAST(rt.OrgUnitNo AS nvarchar(32)))) =
+               LTRIM(RTRIM(CAST(pos.${escapeSqlIdentifier(orgCol)} AS nvarchar(32))))
+           AND @EffectiveDate BETWEEN rt.BeginDate AND rt.EndDate
+        `
+        : '';
+
+    const query = `
+        SELECT
+            ${orgKeyExpr} AS org_unit_id,
+            TRY_CONVERT(int, info.${escapeSqlIdentifier(retireYearCol)}) AS retire_year,
+            CASE WHEN TRY_CONVERT(int, pos.${escapeSqlIdentifier(bsTypeCol)}) = 2 THEN 2 ELSE 1 END AS bs_type,
+            ${countExpr} AS retire_count
+        FROM ${infoMeta.fullName} info
+        INNER JOIN ${positionMeta.fullName} pos
+            ON LTRIM(RTRIM(CAST(pos.${escapeSqlIdentifier(positionIdCol)} AS nvarchar(64)))) =
+               LTRIM(RTRIM(CAST(info.${escapeSqlIdentifier(infoPosCol)} AS nvarchar(64))))
+        ${joinStructureForMapping}
+        WHERE TRY_CONVERT(int, info.${escapeSqlIdentifier(retireYearCol)}) BETWEEN @FromYear AND @ToYear
+          AND TRY_CONVERT(int, pos.${escapeSqlIdentifier(bsTypeCol)}) IN (1, 2)
+          AND ${orgKeyExpr} <> ''
+          ${signPosCondition}
+        GROUP BY
+            ${orgKeyExpr},
+            TRY_CONVERT(int, info.${escapeSqlIdentifier(retireYearCol)}),
+            CASE WHEN TRY_CONVERT(int, pos.${escapeSqlIdentifier(bsTypeCol)}) = 2 THEN 2 ELSE 1 END
+    `;
+
+    const result = await pool.request()
+        .input('FromYear', sql.Int, fromYear)
+        .input('ToYear', sql.Int, toYear)
+        .input('EffectiveDate', sql.DateTime, structureDate)
+        .query(query);
+
+    const rows = Array.isArray(result.recordset) ? result.recordset as Array<Record<string, unknown>> : [];
+    const map: Report09OrgYearMap = new Map();
+
+    rows.forEach((row) => {
+        const orgUnitId = normalizeReport09OrgUnitKey(row.org_unit_id);
+        const retireYear = toNumberOrZero(row.retire_year);
+        const bsType = toNumberOrZero(row.bs_type) === 2 ? 2 : 1;
+        const count = toNumberOrZero(row.retire_count);
+        if (!orgUnitId || !retireYear || count <= 0) return;
+
+        if (!map.has(orgUnitId)) map.set(orgUnitId, new Map());
+        const perOrg = map.get(orgUnitId)!;
+        const current = perOrg.get(retireYear) || { support: 0, bu: 0 };
+
+        if (bsType === 2) current.support += count;
+        else current.bu += count;
+
+        perOrg.set(retireYear, current);
+    });
+
+    return map;
+};
+
+const getReport09OrgYearValue = (
+    sourceMap: Report09OrgYearMap,
+    orgUnitId: string,
+    year: number
+) => {
+    const byOrg = sourceMap.get(orgUnitId);
+    if (!byOrg) return { support: 0, bu: 0 };
+    return byOrg.get(year) || { support: 0, bu: 0 };
+};
+
+const buildReport09FallbackTree = (
+    sourceMap: Report09OrgYearMap,
+    displayYears: number[]
+) => {
+    const rows = Array.from(sourceMap.entries())
+        .map(([orgUnitId]) => {
+            const row: Record<string, unknown> = {
+                key: `org-${orgUnitId}`,
+                unit: orgUnitId,
+                ...createEmptyReport09Node(displayYears)
+            };
+
+            let cutSupport = 0;
+            let cutBu = 0;
+            displayYears.forEach((year) => {
+                const values = getReport09OrgYearValue(sourceMap, orgUnitId, year);
+                row[`y${year}_sup`] = values.support;
+                row[`y${year}_bu`] = values.bu;
+                cutSupport += values.support;
+                cutBu += values.bu;
+            });
+
+            row.cut_support = cutSupport;
+            row.cut_bu = cutBu;
+            row.cut_total = cutSupport + cutBu;
+            return row;
+        })
+        .sort((a, b) => toTrimText(a.unit).localeCompare(toTrimText(b.unit), 'th'));
+
+    const grandTotal: Record<string, unknown> = {
+        key: 'total',
+        unit: 'รวมทุกธุรกิจ',
+        ...createEmptyReport09Node(displayYears)
+    };
+
+    rows.forEach((row) => sumNode(grandTotal, row));
+    rows.push(grandTotal);
+    return rows;
+};
+
+const buildReport09Tree = (
+    flatData: any[],
+    sourceMap: Report09OrgYearMap,
+    displayYears: number[]
+) => {
+    const resultTree: any[] = [];
+    const group1Map = new Map<string, any>();
+    const group2Map = new Map<string, any>();
+    const group3Map = new Map<string, any>();
+    let keyCounter = 1;
+
+    flatData.forEach((raw) => {
+        const row = (raw && typeof raw === 'object') ? (raw as Record<string, unknown>) : {};
+        const bgName = toTrimText(row.GroupBGName);
+        if (!bgName) return;
+
+        const grandParent = toTrimText(row.GrandParent);
+        const grandParent2 = toTrimText(row.GrandParent2);
+        const orgUnitId = getReport09OrgUnitNo(row);
+
+        const leafData: Record<string, unknown> = {
+            key: `r-${keyCounter++}`,
+            unit: toTrimText(row.DisplayName) || toTrimText(row.UnitAbbr) || orgUnitId || '-',
+            ...createEmptyReport09Node(displayYears),
+            _isHiddenLegacy: row.IsBelongTo == 1 || row.IsBelongTo === true || row.IsBelongTo === '1'
+        };
+
+        let cutSupport = 0;
+        let cutBu = 0;
+        displayYears.forEach((year) => {
+            const values = getReport09OrgYearValue(sourceMap, orgUnitId, year);
+            leafData[`y${year}_sup`] = values.support;
+            leafData[`y${year}_bu`] = values.bu;
+            cutSupport += values.support;
+            cutBu += values.bu;
+        });
+
+        leafData.cut_support = cutSupport;
+        leafData.cut_bu = cutBu;
+        leafData.cut_total = cutSupport + cutBu;
+
+        if (!group1Map.has(bgName)) {
+            const bgNode = {
+                key: `bg-${keyCounter++}`,
+                unit: bgName,
+                ...createEmptyReport09Node(displayYears),
+                children: []
+            };
+            group1Map.set(bgName, bgNode);
+            resultTree.push(bgNode);
+        }
+
+        let targetNode = group1Map.get(bgName);
+
+        if (grandParent) {
+            const group2KeyId = `${bgName}-${grandParent}`;
+            if (!group2Map.has(group2KeyId)) {
+                const gpNode = {
+                    key: `gp-${keyCounter++}`,
+                    unit: grandParent,
+                    ...createEmptyReport09Node(displayYears),
+                    children: []
+                };
+                group2Map.set(group2KeyId, gpNode);
+                targetNode.children.push(gpNode);
+            }
+            targetNode = group2Map.get(group2KeyId);
+
+            if (grandParent2 && grandParent2 !== grandParent) {
+                const group3KeyId = `${bgName}-${grandParent}-${grandParent2}`;
+                if (!group3Map.has(group3KeyId)) {
+                    const gp2Node = {
+                        key: `gp2-${keyCounter++}`,
+                        unit: grandParent2,
+                        ...createEmptyReport09Node(displayYears),
+                        children: []
+                    };
+                    group3Map.set(group3KeyId, gp2Node);
+                    targetNode.children.push(gp2Node);
+                }
+                targetNode = group3Map.get(group3KeyId);
+            }
+        }
+
+        targetNode.children.push(leafData);
+    });
+
+    const sumTotalRecursive = (node: any) => {
+        if (!node.children || node.children.length === 0) return node;
+        node.children.forEach((child: any) => sumTotalRecursive(child));
+        node.children.forEach((child: any) => sumNode(node, child));
+        return node;
+    };
+    resultTree.forEach((bgNode) => sumTotalRecursive(bgNode));
+
+    const grandTotal = {
+        key: 'total',
+        unit: 'รวมทุกธุรกิจ',
+        ...createEmptyReport09Node(displayYears)
+    };
+    resultTree.forEach((node) => sumNode(grandTotal, node));
+    resultTree.push(grandTotal);
+
+    // Match Report01 legacy grouping behaviors:
+    // - hide specific "ขึ้นตรง" rows when flagged by IsBelongTo
+    // - promote single lead-child rows
+    // - keep gp/gp2 label styles and flatten one-gp groups
+    const cleanupTree = (node: any) => {
+        if (!node.children) return;
+
+        for (let i = node.children.length - 1; i >= 0; i--) {
+            const childNode = node.children[i];
+            if (!childNode.children) continue;
+
+            cleanupTree(childNode);
+
+            childNode.children = childNode.children.filter((grandChild: any) => {
+                const childName = String(childNode.unit || '').replace(/ /g, '');
+                const grandChildName = String(grandChild.unit || '').replace(/ /g, '');
+                const isLeadChild = grandChildName === `${childName}ขึ้นตรง`;
+                const isHidden = grandChild._isHiddenLegacy && isLeadChild;
+                return !isHidden;
+            });
+
+            if (
+                childNode.children.length === 1 &&
+                String(childNode.children[0].unit || '').replace(/ /g, '') === `${String(childNode.unit || '').replace(/ /g, '')}ขึ้นตรง`
+            ) {
+                node.children.splice(i, 1, childNode.children[0]);
+            } else if (childNode.children.length === 0) {
+                delete childNode.children;
+                if (childNode.key.startsWith('gp2-')) {
+                    childNode.unit = `> ${String(childNode.unit || '').trim()}`;
+                } else if (childNode.key.startsWith('gp-')) {
+                    childNode.unit = String(childNode.unit || '').trim();
+                }
+            } else {
+                if (childNode.key.startsWith('gp2-')) {
+                    childNode.unit = `> ${String(childNode.unit || '').trim()}`;
+                }
+
+                const prefix = childNode.key.startsWith('gp2-') ? '→ ' : '> ';
+                childNode.children.forEach((grandChild: any) => {
+                    const currentName = String(grandChild.unit || '').trim();
+                    const originalParentName = String(childNode.unit || '').replace('> ', '').trim();
+                    if (currentName.endsWith('ขึ้นตรง') && currentName !== `${originalParentName}ขึ้นตรง`) {
+                        grandChild.unit = prefix + currentName.replace('ขึ้นตรง', '');
+                    }
+                });
+            }
+        }
+    };
+    resultTree.forEach((bgNode) => cleanupTree(bgNode));
+
+    // Report01 rule: when a BG has only one gp- group, hide gp header and promote children.
+    resultTree.forEach((bgNode) => {
+        if (!bgNode.children) return;
+        const gpChildren = bgNode.children.filter((c: any) => c.key && c.key.startsWith('gp-'));
+        if (gpChildren.length === 1) {
+            const gpNode = gpChildren[0];
+            if (gpNode.children && gpNode.children.length > 0) {
+                const idx = bgNode.children.indexOf(gpNode);
+                bgNode.children.splice(idx, 1, ...gpNode.children);
+            }
+        }
+    });
+
+    return resultTree;
+};
+
+export const getReport09DataService = async (
+    effectiveYear: number,
+    employeeId: string,
+    userGroupNo: string
+) => {
+    try {
+        const safeEffectiveYear = toNumberOrZero(effectiveYear) || (new Date().getFullYear() + 543);
+        const effectiveYearAD = safeEffectiveYear > 2500 ? safeEffectiveYear - 543 : safeEffectiveYear;
+        const structureDate = new Date(`${effectiveYearAD}-01-01T00:00:00`);
+        const structureIsSecondment = 0;
+        const displayYears = buildReport09Years(safeEffectiveYear);
+        const pool = await poolPromise;
+
+        const [retirementMap, structureRows] = await Promise.all([
+            getReport09RetirementMap(pool, safeEffectiveYear, structureDate, structureIsSecondment),
+            (async () => {
+                try {
+                    const request = pool.request();
+                    request.input('Effectivedate', sql.DateTime, structureDate);
+                    request.input('EmployeeID', sql.VarChar(8), employeeId);
+                    request.input('UserGroupNo', sql.VarChar(2), userGroupNo || null);
+                    request.input('IsSecondment', sql.Int, structureIsSecondment);
+                    const result = await request.execute('mp_Report09Get');
+                    return Array.isArray(result.recordset) ? result.recordset : [];
+                } catch (spError) {
+                    // Temporary compatibility fallback until mp_Report09Get is deployed in every environment.
+                    console.warn('mp_Report09Get unavailable, fallback to mp_Report01Get:', spError);
+                    const fallbackRequest = pool.request();
+                    fallbackRequest.input('Effectivedate', sql.DateTime, structureDate);
+                    fallbackRequest.input('EmployeeID', sql.VarChar(8), employeeId);
+                    fallbackRequest.input('UserGroupNo', sql.VarChar(2), userGroupNo || null);
+                    const fallbackResult = await fallbackRequest.execute('mp_Report01Get');
+                    return Array.isArray(fallbackResult.recordset) ? fallbackResult.recordset : [];
+                }
+            })()
+        ]);
+
+        if (!structureRows.length) {
+            return buildReport09FallbackTree(retirementMap, displayYears);
+        }
+
+        const tree = buildReport09Tree(structureRows, retirementMap, displayYears);
+        if (!tree.length) {
+            return buildReport09FallbackTree(retirementMap, displayYears);
+        }
+
+        return tree;
+    } catch (error) {
+        console.error('Error in getReport09DataService:', error);
+        throw error;
+    }
+};
+
+const mapReport10LevelGroup = (unitLevelNo: string, levelName: string): '010' | '020_030' | '040' | '050' | 'OTHER' => {
+    const normalizedLevelNo = toTrimText(unitLevelNo).replace(/\D/g, '');
+    if (normalizedLevelNo === '010') return '010';
+    if (normalizedLevelNo === '020' || normalizedLevelNo === '030') return '020_030';
+    if (normalizedLevelNo === '040') return '040';
+    if (normalizedLevelNo === '050') return '050';
+
     if (levelName.includes('ปธบ') || levelName.includes('กผญ')) return '010';
     if (levelName.includes('รองกรรมการผู้จัดการใหญ่') || levelName.includes('ประธานเจ้าหน้าที่')) return '020_030';
     if (levelName.includes('ผู้ช่วยกรรมการผู้จัดการใหญ่')) return '040';
@@ -1422,44 +1890,91 @@ export const getReport10SummaryDataService = async (
 
 export const getReport10ExportDataService = async (
     effectiveDateStr: string,
-    employeeId: string,
-    userGroupNo: string
+    _employeeId: string,
+    _userGroupNo: string
 ) => {
     try {
         const pool = await poolPromise;
         const request = pool.request();
         const effectiveDate = new Date(effectiveDateStr);
 
-        request.input('Effectivedate', sql.DateTime, effectiveDate);
-        request.input('EmployeeID', sql.VarChar(8), employeeId);
-        request.input('UserGroupNO', sql.VarChar(2), userGroupNo || null);
+        request.input('EffectiveDate', sql.DateTime, effectiveDate);
 
-        const result = await request.execute('mp_Report10ExportExcel');
+        const result = await request.query(`
+            SELECT DISTINCT
+                InfoData.POSCODE,
+                InterfacePosition.OrgUnitID AS OrgUnitNo,
+                InterfaceUnit.UnitName,
+                InterfacePosition.OrgFlag,
+                InterfacePosition.OrgType,
+                InterfacePosition.PoolRSFlag,
+                InterfacePosition.JobBand,
+                InterfacePosition.LevelGroupNo,
+                InterfacePosition.SignPos,
+                InterfacePosition.StrgFlag,
+                InterfacePosition.BSType,
+                InterfacePosition.SpecFlag,
+                InterfacePosition.LineStaffFlag,
+                InterfacePosition.EmployeeID,
+                InfoData.CODE AS InfoEmployeeID,
+                InfoData.FULLNAMETH,
+                InfoData.POSNAME,
+                mp_JCode.JCODE,
+                InterfaceUnit.ParentOrgUnitNo,
+                UnitParent.UnitName AS ParentUnitName,
+                MP_UnitLevel.UnitLevelName,
+                RIGHT('000' + LTRIM(RTRIM(CAST(MP_UnitLevel.UnitLevelNo AS nvarchar(16)))), 3) AS UnitLevelNo
+            FROM InterfacePosition
+            INNER JOIN InfoData ON InfoData.POSCODE = InterfacePosition.PositionID
+            LEFT JOIN mp_JCode ON mp_JCode.levelgroup = InterfacePosition.LevelGroupNo
+            LEFT JOIN InterfaceUnit ON InterfaceUnit.OrgUnitNo = InterfacePosition.OrgUnitID
+            LEFT JOIN InterfaceUnit UnitParent ON UnitParent.OrgUnitNo = InterfaceUnit.ParentOrgUnitNo
+            LEFT JOIN MP_UnitLevel ON MP_UnitLevel.UnitLevelNo = InterfaceUnit.UnitLevel
+            WHERE @EffectiveDate BETWEEN TRY_CONVERT(date, InterfacePosition.BeginDate) AND TRY_CONVERT(date, InterfacePosition.EndDate)
+        `);
         const rows = Array.isArray(result.recordset) ? result.recordset : [];
 
         return rows.map((rawRow, index) => {
             const row = (rawRow && typeof rawRow === 'object') ? (rawRow as Record<string, unknown>) : {};
             const { num, text } = buildRowAccessor(row);
 
-            const levelName = text('LevelName', 'levelname');
-            const dashboardGroup = text('DashboardGroup', 'dashboardgroup');
+            const unitLevelNo = text('UnitLevelNo', 'unitlevelno');
+            const levelName = text('UnitLevelName', 'unitlevelname', 'LevelName', 'levelname');
             const orgType = num('OrgType', 'orgtype');
+            const poolRsFlag = num('PoolRSFlag', 'poolrsflag');
+            const strgFlag = num('StrgFlag', 'strgflag');
+            const bsType = num('BSType', 'bstype');
             const specFlag = num('SpecFlag', 'specflag');
-            const isSecondment = orgType === 2 || dashboardGroup.toLowerCase().includes('second');
-            const isSpecific = specFlag === 1 || dashboardGroup.toLowerCase().includes('spec');
+            const isSecondment = orgType === 2;
+            const isSpecific = specFlag === 1;
 
             return {
                 key: `r10e-${index + 1}`,
-                level_group: mapReport10LevelGroup(levelName),
+                level_group: mapReport10LevelGroup(unitLevelNo, levelName),
                 level_name: levelName,
-                position_name: text('PositionName', 'positionname'),
-                org_unit_id: text('OrgUnitID', 'orgunitid'),
-                position_id: text('PositionID', 'positionid'),
+                position_name: text('POSNAME', 'posname'),
+                position_short_name: text('UnitLevelName', 'unitlevelname'),
+                unit_name: text('UnitName', 'unitname'),
+                parent_unit_name: text('ParentUnitName', 'parentunitname'),
+                unit_level_no: unitLevelNo,
+                unit_level_name: levelName,
+                org_unit_id: text('OrgUnitNo', 'orgunitno', 'OrgUnitID', 'orgunitid'),
+                position_id: text('POSCODE', 'poscode'),
                 employee_id: text('EmployeeID', 'employeeid'),
-                full_name: text('FullName', 'fullname'),
-                dashboard_group: dashboardGroup,
+                info_employee_id: text('InfoEmployeeID', 'infoemployeeid'),
+                full_name: text('FULLNAMETH', 'fullnameth'),
+                job_band: text('JobBand', 'jobband'),
+                jg: text('JobBand', 'jobband'),
+                org_flag: num('OrgFlag', 'orgflag'),
                 org_type: orgType,
+                pool_rs_flag: poolRsFlag,
+                strg_flag: strgFlag,
+                bs_type: bsType,
                 spec_flag: specFlag,
+                frame_type: poolRsFlag === 1 ? 'pool' : (orgType === 2 ? 'Secondment' : 'ปตท'),
+                strategic: strgFlag === 1 ? 'Y' : 'N',
+                business_support: bsType === 1 ? 'Business' : (bsType === 2 ? 'Support' : '-'),
+                specific_rate: specFlag === 1 ? 'Y' : 'N',
                 group_type: isSecondment ? 'SECONDMENT' : (isSpecific ? 'SPEC' : 'PTT')
             };
         });

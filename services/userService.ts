@@ -11,7 +11,7 @@ export const getUserOtherService = async () => {
     }
 };
 
-export const insertUserOtherService = async (employeeId: string, fullName: string, createBy: string) => {
+export const insertUserOtherService = async (employeeId: string, fullName: string, email: string, createBy: string) => {
     try {
         const pool = await poolPromise;
         const request = new sql.Request(pool);
@@ -21,6 +21,7 @@ export const insertUserOtherService = async (employeeId: string, fullName: strin
 
         request.input('EmployeeID', sql.VarChar(50), employeeId);
         request.input('FullName', sql.VarChar(200), fullName);
+        request.input('Email', sql.VarChar(200), email);
         request.input('BeginDate', sql.DateTime, now);
         request.input('EndDate', sql.DateTime, endDate);
         request.input('CreateBy', sql.VarChar(50), createBy);
@@ -52,6 +53,33 @@ export const deleteUserOtherService = async (employeeId: string, updateBy: strin
         return { success: true };
     } catch (error) {
         console.error('Error executing mp_UserOtherDelete:', error);
+        throw error;
+    }
+};
+
+export const updateUserOtherService = async (employeeId: string, fullName: string, email: string, updateBy: string) => {
+    try {
+        const pool = await poolPromise;
+        const request = new sql.Request(pool);
+        const now = new Date();
+
+        request.input('EmployeeID', sql.VarChar(50), employeeId);
+        request.input('FullName', sql.VarChar(200), fullName);
+        request.input('Email', sql.VarChar(200), email);
+        request.input('UpdateBy', sql.VarChar(50), updateBy);
+        request.input('UpdateDate', sql.DateTime, now);
+
+        await request.query(`
+            UPDATE MP_UserOther
+            SET FullName = @FullName,
+                Email = @Email,
+                UpdateBy = @UpdateBy,
+                UpdateDate = @UpdateDate
+            WHERE EmployeeID = @EmployeeID
+        `);
+        return { success: true };
+    } catch (error) {
+        console.error('Error executing MP_UserOther update:', error);
         throw error;
     }
 };
@@ -121,6 +149,7 @@ export default {
     getUserOtherService,
     insertUserOtherService,
     deleteUserOtherService,
+    updateUserOtherService,
     getUserWithPassword,
     checkUserOther,
     syncUserFromAD,

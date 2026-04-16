@@ -7,6 +7,7 @@
         "start": "tsx index.ts",
         "dev": "tsx watch index.ts",
         "build": "tsc",
+        "test:pis": "tsx pis_fetch_probe.ts",
         "start:prod": "cross-env NODE_ENV=production node dist/index.js",
         "start:local": "cross-env NODE_ENV=local tsx index.ts",
         "start:test": "cross-env NODE_ENV=test tsx index.ts",

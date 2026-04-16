@@ -1,5 +1,5 @@
 import { Hono } from 'hono';
-import { getDashboardData, exportDashboardExcel, getReport1Data, getReport1ExcelData, getReport2Data, getReport3Data, getReport3FilterOptions, getReport4Data, getReport4FilterOptions, getReport5Data, getReport5FilterOptions, getReport6Data, getReport6FilterOptions, getReport7Data, getReport7FilterOptions, getReport8Data, getReport10Data, getReport10ExcelData } from '../controllers/reportController.js';
+import { getDashboardData, exportDashboardExcel, getReport1Data, getReport1ExcelData, getReport2Data, getReport3Data, getReport3FilterOptions, getReport4Data, getReport4FilterOptions, getReport5Data, getReport5FilterOptions, getReport6Data, getReport6FilterOptions, getReport7Data, getReport7FilterOptions, getReport8Data, getReport9Data, getReport10Data, getReport10ExcelData } from '../controllers/reportController.js';
 
 const router = new Hono();
 
@@ -19,6 +19,7 @@ router.get('/report6', getReport6Data);
 router.get('/report7/filters', getReport7FilterOptions);
 router.get('/report7', getReport7Data);
 router.get('/report8', getReport8Data);
+router.get('/report9', getReport9Data);
 router.get('/report10', getReport10Data);
 router.get('/report10/excel', getReport10ExcelData);
 

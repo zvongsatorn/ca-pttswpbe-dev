@@ -19,13 +19,27 @@ export const getUserOther = async (c: Context) => {
 export const insertUserOther = async (c: Context) => {
     try {
         const body = await c.req.json();
-        const { employeeId, fullName, createBy } = body;
+        const { employeeId, fullName, email, createBy } = body;
+        const normalizedEmployeeId = String(employeeId || '').trim();
+        const normalizedFullName = String(fullName || '').trim();
+        const normalizedEmail = String(email || '').trim().toLowerCase();
+        const normalizedCreateBy = String(createBy || '').trim();
 
-        if (!employeeId || !fullName || !createBy) {
+        if (!normalizedEmployeeId || !normalizedFullName || !normalizedEmail || !normalizedCreateBy) {
             return c.json({ success: false, message: 'Missing required parameters' }, 400);
         }
 
-        const result = await userService.insertUserOtherService(employeeId, fullName, createBy);
+        const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+        if (!emailPattern.test(normalizedEmail)) {
+            return c.json({ success: false, message: 'Invalid email format' }, 400);
+        }
+
+        const result = await userService.insertUserOtherService(
+            normalizedEmployeeId,
+            normalizedFullName,
+            normalizedEmail,
+            normalizedCreateBy
+        );
         
         // Follow legacy logic: if result[0].CheckUser == "1", it means user already exists
         if (result && result.length > 0 && result[0].CheckUser === "1") {
@@ -52,6 +66,39 @@ export const deleteUserOther = async (c: Context) => {
         return c.json({ success: true, message: 'ลบข้อมูลเรียบร้อย' });
     } catch (error: any) {
         console.error('Error in deleteUserOther controller:', error);
+        return c.json({ success: false, message: error.message }, 500);
+    }
+};
+
+export const updateUserOther = async (c: Context) => {
+    try {
+        const employeeId = c.req.param('employeeId');
+        const body = await c.req.json();
+        const { fullName, email, updateBy } = body;
+        
+        const normalizedFullName = String(fullName || '').trim();
+        const normalizedEmail = String(email || '').trim().toLowerCase();
+        const normalizedUpdateBy = String(updateBy || '').trim();
+
+        if (!employeeId || !normalizedFullName || !normalizedEmail || !normalizedUpdateBy) {
+            return c.json({ success: false, message: 'Missing required parameters' }, 400);
+        }
+
+        const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+        if (!emailPattern.test(normalizedEmail)) {
+            return c.json({ success: false, message: 'Invalid email format' }, 400);
+        }
+
+        await userService.updateUserOtherService(
+            employeeId,
+            normalizedFullName,
+            normalizedEmail,
+            normalizedUpdateBy
+        );
+
+        return c.json({ success: true, message: 'อัปเดตข้อมูลเรียบร้อย' });
+    } catch (error: any) {
+        console.error('Error in updateUserOther controller:', error);
         return c.json({ success: false, message: error.message }, 500);
     }
 };
