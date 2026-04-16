@@ -2,18 +2,19 @@ import { sql, poolPromise } from '../config/db.js';
 
 /**
  * Service to execute the mp_UserTracking stored procedure
- * @param effectiveDate Date string in 'YYYY-MM-DD' format
+ * @param effectiveDate Date value
  * @param userGroupNo User Group No (e.g. '04')
  * @param employeeId Employee ID
  */
-export const getTrackingUserLogService = async (effectiveDate: string, userGroupNo: string, employeeId: string) => {
+export const getTrackingUserLogService = async (effectiveDate: Date, userGroupNo: string, employeeId: string) => {
     try {
         const pool = await poolPromise;
         const request = new sql.Request(pool);
 
-        request.input('EffectiveDate', sql.DateTime, new Date(effectiveDate));
+        (request as sql.Request & { timeout: number }).timeout = 5 * 60 * 1000;
+        request.input('EffectiveDate', sql.DateTime, effectiveDate);
         request.input('UserGroupNo', sql.VarChar(2), userGroupNo);
-        request.input('EmployeeID', sql.VarChar(10), employeeId);
+        request.input('EmployeeID', sql.VarChar(20), employeeId);
 
         const result = await request.execute('mp_UserTracking');
         
@@ -30,18 +31,19 @@ export const getTrackingUserLogService = async (effectiveDate: string, userGroup
 
 /**
  * Service to execute the mp_UserTrackingUnit stored procedure
- * @param effectiveDate Date string in 'YYYY-MM-DD' format
+ * @param effectiveDate Date value
  * @param userGroupNo User Group No (e.g. '04')
  * @param employeeId Employee ID
  */
-export const getTrackingUnitLogService = async (effectiveDate: string, userGroupNo: string, employeeId: string) => {
+export const getTrackingUnitLogService = async (effectiveDate: Date, userGroupNo: string, employeeId: string) => {
     try {
         const pool = await poolPromise;
         const request = new sql.Request(pool);
 
-        request.input('EffectiveDate', sql.DateTime, new Date(effectiveDate));
+        (request as sql.Request & { timeout: number }).timeout = 5 * 60 * 1000;
+        request.input('EffectiveDate', sql.DateTime, effectiveDate);
         request.input('UserGroupNo', sql.VarChar(2), userGroupNo);
-        request.input('EmployeeID', sql.VarChar(10), employeeId);
+        request.input('EmployeeID', sql.VarChar(20), employeeId);
 
         const result = await request.execute('mp_UserTrackingUnit');
         

@@ -241,13 +241,24 @@ export const getReport1ExcelData = async (c: Context) => {
 
 export const getReport2Data = async (c: Context) => {
     try {
-        const fromDate = c.req.query('fromDate') || '';
-        const toDate = c.req.query('toDate') || '';
-        const employeeId = c.req.query('employeeId') || '';
-        const userGroupNo = c.req.query('userGroupNo') || '';
+        const fromDate = (c.req.query('fromDate') || c.req.query('fromdate') || '').trim();
+        const toDate = (c.req.query('toDate') || c.req.query('todate') || '').trim();
+        const employeeId = (c.req.query('employeeId') || '').trim();
+        const userGroupNo = (c.req.query('userGroupNo') || '').trim();
 
-        if (!fromDate || !toDate || !employeeId) {
-            return c.json({ status: 400, message: "Missing required parameters: fromDate, toDate, employeeId" }, 400);
+        if (!fromDate || !toDate || !employeeId || !userGroupNo) {
+            return c.json({ status: 400, message: "Missing required parameters: fromDate, toDate, employeeId, userGroupNo" }, 400);
+        }
+
+        const fromDateObj = new Date(fromDate);
+        const toDateObj = new Date(toDate);
+
+        if (Number.isNaN(fromDateObj.getTime()) || Number.isNaN(toDateObj.getTime())) {
+            return c.json({ status: 400, message: "Invalid date format. Expected YYYY-MM-DD." }, 400);
+        }
+
+        if (fromDateObj > toDateObj) {
+            return c.json({ status: 400, message: "fromDate must be less than or equal to toDate" }, 400);
         }
 
         const data = await getReport02DataService(fromDate, toDate, employeeId, userGroupNo);

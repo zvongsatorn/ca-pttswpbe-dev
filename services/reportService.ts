@@ -523,11 +523,7 @@ const getReport08PositionMap = async (
         ? `AND TRY_CONVERT(int, src.${escapeSqlIdentifier(signPosCol)}) = 100`
         : '';
 
-    const reportLevelList = [
-        ...REPORT08_PEOPLE_LEVELS.map((item) => item.levelGroupNo),
-        REPORT08_MAJOR_LEVEL,
-        REPORT08_MINOR_LEVEL
-    ];
+    const reportLevelList = REPORT08_PEOPLE_LEVELS.map((item) => item.levelGroupNo);
     const inList = reportLevelList.map((lv) => `'${escapeSqlString(lv)}'`).join(',');
 
     const query = `
@@ -1599,9 +1595,13 @@ function buildReport08Tree(
             ? toNumberOrZero(report01PeopleTotalRaw)
             : peopleTotalFromLevels;
         const expenseTotal = expenseValues.reduce((sum, value) => sum + value, 0);
-        const majorPoints = getReport08Metric(positionMap, orgUnitNo, REPORT08_MAJOR_LEVEL);
+        const majorPoints = toNumberOrZero(
+            readRowValue(rowObj, 'q_contact', 'Q_Contact', 'q_8', 'Q_8', 'L9908', 'l9908')
+        );
         const majorBudget = getReport08Metric(costMap, orgUnitNo, REPORT08_MAJOR_LEVEL);
-        const minorPoints = getReport08Metric(positionMap, orgUnitNo, REPORT08_MINOR_LEVEL);
+        const minorPoints = toNumberOrZero(
+            readRowValue(rowObj, 'q_subcontact', 'Q_SubContact', 'q_10', 'Q_10', 'L9910', 'l9910')
+        );
         const minorBudget = getReport08Metric(costMap, orgUnitNo, REPORT08_MINOR_LEVEL);
         const totalGrandExpense = expenseTotal + majorBudget + minorBudget;
 
