@@ -46,3 +46,17 @@ read_*.*
 decodeToken.ts
 backend.log
 *env.txt
+
+# Runtime-generated files (avoid accidental commit from local run)
+uploads/
+
+# Local scratch/probe files
+scratch.ts
+query_group3.ts
+plan.ts
+pis_*_all_data.csv
+pis_all_employee*.csv
+pis_prod_all.json
+
+# Office temp lock files
+.~lock.*

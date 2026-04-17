@@ -1,7 +1,11 @@
 import { Hono } from 'hono';
 import { getDashboardData, exportDashboardExcel, getReport1Data, getReport1ExcelData, getReport2Data, getReport3Data, getReport3FilterOptions, getReport4Data, getReport4FilterOptions, getReport5Data, getReport5FilterOptions, getReport6Data, getReport6FilterOptions, getReport7Data, getReport7FilterOptions, getReport8Data, getReport9Data, getReport10Data, getReport10ExcelData } from '../controllers/reportController.js';
+import { verifyToken } from '../middleware/authMiddleware.js';
+import { verifyReportMenuAccess } from '../middleware/reportPermissionMiddleware.js';
 
 const router = new Hono();
+
+router.use('*', verifyToken, verifyReportMenuAccess);
 
 router.get('/dashboard', getDashboardData);
 router.get('/dashboard/excel', exportDashboardExcel);
