@@ -1901,36 +1901,67 @@ export const getReport10ExportDataService = async (
         request.input('EffectiveDate', sql.DateTime, effectiveDate);
 
         const result = await request.query(`
-            SELECT DISTINCT
-                InfoData.POSCODE,
-                InterfacePosition.OrgUnitID AS OrgUnitNo,
+            ;WITH PositionDedup AS (
+                SELECT
+                    p.*,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY p.PositionID
+                        ORDER BY
+                            CAST(p.EndDate AS nvarchar(32)) DESC,
+                            CAST(p.BeginDate AS nvarchar(32)) DESC,
+                            CAST(p.OrgUnitID AS nvarchar(32)) DESC
+                    ) AS rn
+                FROM InterfacePosition p
+                WHERE @EffectiveDate BETWEEN TRY_CONVERT(date, p.BeginDate) AND TRY_CONVERT(date, p.EndDate)
+            ),
+            InfoDataDedup AS (
+                SELECT
+                    i.*,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY i.POSCODE
+                        ORDER BY
+                            CAST(i.CODE AS nvarchar(32)) DESC,
+                            CAST(i.FULLNAMETH AS nvarchar(300)) DESC
+                    ) AS rn
+                FROM InfoData i
+            ),
+            JCodeDedup AS (
+                SELECT
+                    levelgroup,
+                    MAX(JCODE) AS JCODE
+                FROM mp_JCode
+                GROUP BY levelgroup
+            )
+            SELECT
+                i.POSCODE,
+                p.OrgUnitID AS OrgUnitNo,
                 InterfaceUnit.UnitName,
-                InterfacePosition.OrgFlag,
-                InterfacePosition.OrgType,
-                InterfacePosition.PoolRSFlag,
-                InterfacePosition.JobBand,
-                InterfacePosition.LevelGroupNo,
-                InterfacePosition.SignPos,
-                InterfacePosition.StrgFlag,
-                InterfacePosition.BSType,
-                InterfacePosition.SpecFlag,
-                InterfacePosition.LineStaffFlag,
-                InterfacePosition.EmployeeID,
-                InfoData.CODE AS InfoEmployeeID,
-                InfoData.FULLNAMETH,
-                InfoData.POSNAME,
-                mp_JCode.JCODE,
+                p.OrgFlag,
+                p.OrgType,
+                p.PoolRSFlag,
+                p.JobBand,
+                p.LevelGroupNo,
+                p.SignPos,
+                p.StrgFlag,
+                p.BSType,
+                p.SpecFlag,
+                p.LineStaffFlag,
+                p.EmployeeID,
+                i.CODE AS InfoEmployeeID,
+                i.FULLNAMETH,
+                i.POSNAME,
+                JCodeDedup.JCODE,
                 InterfaceUnit.ParentOrgUnitNo,
                 UnitParent.UnitName AS ParentUnitName,
                 MP_UnitLevel.UnitLevelName,
                 RIGHT('000' + LTRIM(RTRIM(CAST(MP_UnitLevel.UnitLevelNo AS nvarchar(16)))), 3) AS UnitLevelNo
-            FROM InterfacePosition
-            INNER JOIN InfoData ON InfoData.POSCODE = InterfacePosition.PositionID
-            LEFT JOIN mp_JCode ON mp_JCode.levelgroup = InterfacePosition.LevelGroupNo
-            LEFT JOIN InterfaceUnit ON InterfaceUnit.OrgUnitNo = InterfacePosition.OrgUnitID
+            FROM PositionDedup p
+            INNER JOIN InfoDataDedup i ON i.POSCODE = p.PositionID AND i.rn = 1
+            LEFT JOIN JCodeDedup ON JCodeDedup.levelgroup = p.LevelGroupNo
+            LEFT JOIN InterfaceUnit ON InterfaceUnit.OrgUnitNo = p.OrgUnitID
             LEFT JOIN InterfaceUnit UnitParent ON UnitParent.OrgUnitNo = InterfaceUnit.ParentOrgUnitNo
             LEFT JOIN MP_UnitLevel ON MP_UnitLevel.UnitLevelNo = InterfaceUnit.UnitLevel
-            WHERE @EffectiveDate BETWEEN TRY_CONVERT(date, InterfacePosition.BeginDate) AND TRY_CONVERT(date, InterfacePosition.EndDate)
+            WHERE p.rn = 1
         `);
         const rows = Array.isArray(result.recordset) ? result.recordset : [];
 
