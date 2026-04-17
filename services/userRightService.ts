@@ -1,5 +1,14 @@
 import { sql, poolPromise } from '../config/db.js';
 
+const toSqlDateOnly = (value: Date | string): Date => {
+    const parsed = value instanceof Date ? value : new Date(String(value));
+    if (Number.isNaN(parsed.getTime())) {
+        const now = new Date();
+        return new Date(Date.UTC(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0, 0));
+    }
+    return new Date(Date.UTC(parsed.getFullYear(), parsed.getMonth(), parsed.getDate(), 0, 0, 0, 0));
+};
+
 class UserRightService {
     // 1. mp_OrgUnitInGroupGet (Reconstructed logic)
     async getOrgUnitInGroup(userGroupNo: string) {
@@ -63,8 +72,8 @@ class UserRightService {
             .input('UserGroupNo', sql.NVarChar, userGroupNo)
             .input('EmployeeID', sql.NVarChar, employeeId)
             .input('OrgUnitNo', sql.NVarChar, orgUnitNo)
-            .input('BeginDate', sql.Date, new Date())
-            .input('EndDate', sql.Date, new Date('9999-12-31'))
+            .input('BeginDate', sql.Date, toSqlDateOnly(new Date()))
+            .input('EndDate', sql.Date, toSqlDateOnly(new Date('9999-12-31')))
             .input('CreateBy', sql.NVarChar, createBy)
             .input('CreateDate', sql.DateTime, new Date())
             .execute('mp_UserInOrgUnitInsert');
@@ -82,7 +91,7 @@ class UserRightService {
             .input('UserGroupNo', sql.NVarChar, userGroupNo)
             .input('EmployeeID', sql.NVarChar, employeeId)
             .input('OrgUnitNo', sql.NVarChar, orgUnitNo)
-            .input('EndDate', sql.Date, yesterday)
+            .input('EndDate', sql.Date, toSqlDateOnly(yesterday))
             .input('UpdateBy', sql.NVarChar, updateBy)
             .input('UpdateDate', sql.DateTime, new Date())
             .execute('mp_UserInOrgUnitUpdate');
@@ -99,7 +108,7 @@ class UserRightService {
         await pool.request()
             .input('UserGroupNo', sql.NVarChar, userGroupNo)
             .input('EmployeeID', sql.NVarChar, employeeId)
-            .input('EndDate', sql.Date, yesterday)
+            .input('EndDate', sql.Date, toSqlDateOnly(yesterday))
             .input('UpdateBy', sql.NVarChar, updateBy)
             .input('UpdateDate', sql.DateTime, new Date())
             .execute('mp_UserInOrgUnitUpdateAll');
@@ -168,7 +177,7 @@ class UserRightService {
         const checkDate = new Date(parseInt(effectiveYear), parseInt(effectiveMonth) - 1, 1);
         
         const result = await pool.request()
-            .input('p_CheckDate', sql.DateTime, checkDate)
+            .input('p_CheckDate', sql.Date, toSqlDateOnly(checkDate))
             .execute('mp_BGGetByEffectivePeriod');
         return result.recordset;
     }
@@ -187,7 +196,7 @@ class UserRightService {
         const checkDate = new Date(parseInt(effectiveYear), parseInt(effectiveMonth) - 1, 1);
 
         const result = await pool.request()
-            .input('p_CheckDate', sql.DateTime, checkDate)
+            .input('p_CheckDate', sql.Date, toSqlDateOnly(checkDate))
             .execute('mp_UnitGetByEffectivePeriod');
         return result.recordset;
     }
@@ -219,7 +228,7 @@ class UserRightService {
         const checkDate = new Date(parseInt(effectiveYear), parseInt(effectiveMonth) - 1, 1);
         
         const result = await pool.request()
-            .input('EffectiveDate', sql.DateTime, checkDate)
+            .input('EffectiveDate', sql.Date, toSqlDateOnly(checkDate))
             .execute('mp_GetUnitLineCombo');
         return result.recordset;
     }

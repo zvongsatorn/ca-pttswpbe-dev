@@ -10,6 +10,9 @@ import {
     getBorrowTransactions,
     getReturnsByBorrow,
     getHRCenterData,
+    sendHRCenterToSap,
+    getHRCenterSapMinus,
+    downloadHRCenterSapFile,
     getMonitorHistory,
     getTransactionActionLog,
     getTransactionLogYear,
@@ -31,6 +34,9 @@ router.get('/approvers', getApproversFlow);
 router.post('/direct-approve', directApproveTransactions);
 router.post('/debug/structure-remarks', verifyToken, debugGenerateApprovedStructureRemarks);
 router.get('/hrcenter', getHRCenterData);
+router.post('/hrcenter/send-to-sap', sendHRCenterToSap);
+router.get('/hrcenter/sap-minus', getHRCenterSapMinus);
+router.get('/hrcenter/sap-file', downloadHRCenterSapFile);
 router.get('/monitor-history', getMonitorHistory);
 router.get('/action-log', getTransactionActionLog);
 router.get('/log-yearly', getTransactionLogYear);

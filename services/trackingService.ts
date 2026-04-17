@@ -1,5 +1,14 @@
 import { sql, poolPromise } from '../config/db.js';
 
+const toSqlDateOnly = (value: Date | string): Date => {
+    const parsed = value instanceof Date ? value : new Date(String(value));
+    if (Number.isNaN(parsed.getTime())) {
+        const now = new Date();
+        return new Date(Date.UTC(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0, 0));
+    }
+    return new Date(Date.UTC(parsed.getFullYear(), parsed.getMonth(), parsed.getDate(), 0, 0, 0, 0));
+};
+
 /**
  * Service to execute the mp_UserTracking stored procedure
  * @param effectiveDate Date value
@@ -12,7 +21,7 @@ export const getTrackingUserLogService = async (effectiveDate: Date, userGroupNo
         const request = new sql.Request(pool);
 
         (request as sql.Request & { timeout: number }).timeout = 5 * 60 * 1000;
-        request.input('EffectiveDate', sql.DateTime, effectiveDate);
+        request.input('EffectiveDate', sql.Date, toSqlDateOnly(effectiveDate));
         request.input('UserGroupNo', sql.VarChar(2), userGroupNo);
         request.input('EmployeeID', sql.VarChar(20), employeeId);
 
@@ -41,7 +50,7 @@ export const getTrackingUnitLogService = async (effectiveDate: Date, userGroupNo
         const request = new sql.Request(pool);
 
         (request as sql.Request & { timeout: number }).timeout = 5 * 60 * 1000;
-        request.input('EffectiveDate', sql.DateTime, effectiveDate);
+        request.input('EffectiveDate', sql.Date, toSqlDateOnly(effectiveDate));
         request.input('UserGroupNo', sql.VarChar(2), userGroupNo);
         request.input('EmployeeID', sql.VarChar(20), employeeId);
 

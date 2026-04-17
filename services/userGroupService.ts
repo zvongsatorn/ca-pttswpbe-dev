@@ -1,6 +1,45 @@
 import { sql, poolPromise } from '../config/db.js';
 
 class UserGroupService {
+    private normalizeGroupNo(value: string): string {
+        const raw = String(value ?? '').trim();
+        if (!raw) return '';
+        return /^\d+$/.test(raw) ? raw.padStart(2, '0') : raw;
+    }
+
+    private async addAllOrgUnitsForHrPolicy(userGroupNo: string, employeeID: string, createBy: string) {
+        if (this.normalizeGroupNo(userGroupNo) !== '04') return;
+
+        const pool = await poolPromise;
+        const now = new Date();
+        const beginDate = now.toISOString().split('T')[0].replace(/-/g, '');
+
+        await pool.request()
+            .input('UserGroupNo', sql.NVarChar, userGroupNo)
+            .input('EmployeeID', sql.NVarChar, employeeID)
+            .input('BeginDate', sql.NVarChar, beginDate)
+            .input('EndDate', sql.NVarChar, '99991231')
+            .input('CreateBy', sql.NVarChar, createBy)
+            .input('CreateDate', sql.DateTime, now)
+            .execute('mp_AddUserInAll');
+    }
+
+    private async removeAllOrgUnitsForHrPolicy(userGroupNo: string, employeeID: string, updateBy: string) {
+        if (this.normalizeGroupNo(userGroupNo) !== '04') return;
+
+        const pool = await poolPromise;
+        const yesterday = new Date();
+        yesterday.setDate(yesterday.getDate() - 1);
+
+        await pool.request()
+            .input('UserGroupNo', sql.NVarChar, userGroupNo)
+            .input('EmployeeID', sql.NVarChar, employeeID)
+            .input('EndDate', sql.Date, yesterday)
+            .input('UpdateBy', sql.NVarChar, updateBy)
+            .input('UpdateDate', sql.DateTime, new Date())
+            .execute('mp_UserInOrgUnitUpdateAll');
+    }
+
     private normalizeUserRows(rows: any[]): { employeeID: string; nameAll: string }[] {
         return (rows || [])
             .map((row: any) => {
@@ -173,6 +212,8 @@ class UserGroupService {
             .input('CreateDate', sql.DateTime, new Date())
             .execute('mp_UserInGroupInsert');
 
+        await this.addAllOrgUnitsForHrPolicy(userGroupNo, employeeID, createBy);
+
         return true;
     }
 
@@ -189,6 +230,8 @@ class UserGroupService {
             .input('UpdateBy', sql.NVarChar, updateBy)
             .input('UpdateDate', sql.DateTime, new Date())
             .execute('mp_UserInGroupUpdate');
+
+        await this.removeAllOrgUnitsForHrPolicy(userGroupNo, employeeID, updateBy);
     }
 
     async deleteLevelInGroup(userGroupNo: string, levelGroupNo: string, updateBy: string) {

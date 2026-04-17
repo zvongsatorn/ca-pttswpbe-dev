@@ -18,6 +18,12 @@ import {
     getSapMonitorLogService,
     DraftTransactionPayload
 } from '../services/transactionService.js';
+import {
+    sendHRCenterToSapService,
+    getHRCenterSapMinusService,
+    getHRCenterSapOutboundFileBufferService,
+    getHRCenterSapOutboundFileMetaService
+} from '../services/hrcenterSapService.js';
 import { validateTransactionCreationWindowService } from '../services/calendarService.js';
 import { writeFile, mkdir } from 'fs/promises';
 import { existsSync } from 'fs';
@@ -74,6 +80,18 @@ const parseEffectiveMonthYear = (
         month: month > 0 ? month : null,
         year
     };
+};
+
+const toEffectiveDateFromThaiMonthYear = (
+    effectiveMonthRaw: unknown,
+    effectiveYearRaw: unknown
+): Date | null => {
+    const { month, year } = parseEffectiveMonthYear(effectiveMonthRaw, effectiveYearRaw);
+    if (!month || !year) return null;
+    const adYear = year > 2400 ? year - 543 : year;
+    const effectiveDate = new Date(adYear, month - 1, 1, 0, 0, 0, 0);
+    if (Number.isNaN(effectiveDate.getTime())) return null;
+    return effectiveDate;
 };
 
 export const saveDraftTransaction = async (c: Context) => {
@@ -269,7 +287,7 @@ export const getDraftTransactions = async (c: Context) => {
         // Compute first day of the effective month
         const monthIndex = effectiveMonth ? THAI_MONTH_NAMES.indexOf(effectiveMonth) + 1 : new Date().getMonth() + 1;
         const yearAD = effectiveYear ? parseInt(effectiveYear) - 543 : new Date().getFullYear();
-        const effectiveDate = new Date(`${yearAD}-${monthIndex.toString().padStart(2, '0')}-01T00:00:00Z`);
+        const effectiveDate = new Date(yearAD, monthIndex - 1, 1, 0, 0, 0, 0);
 
         const data = await getDraftTransactionsService(employeeId, effectiveDate);
         
@@ -470,7 +488,7 @@ export const getHRCenterData = async (c: Context) => {
         const monthNames = ['มกราคม', 'กุมภาพันธ์', 'มีนาคม', 'เมษายน', 'พฤษภาคม', 'มิถุนายน', 'กรกฎาคม', 'สิงหาคม', 'กันยายน', 'ตุลาคม', 'พฤศจิกายน', 'ธันวาคม'];
         const monthIndex = monthNames.indexOf(effectiveMonth) + 1;
         const yearAD = parseInt(effectiveYear) - 543;
-        const effectiveDate = new Date(`${yearAD}-${monthIndex.toString().padStart(2, '0')}-01T00:00:00Z`);
+        const effectiveDate = new Date(yearAD, monthIndex - 1, 1, 0, 0, 0, 0);
 
         const data = await getHRCenterDataService(
             viewMode === 'department' ? 'department' : 'all',
@@ -488,6 +506,100 @@ export const getHRCenterData = async (c: Context) => {
         return c.json({
             status: 500,
             message: "Internal server error",
+            error: error.message
+        }, 500);
+    }
+};
+
+export const sendHRCenterToSap = async (c: Context) => {
+    try {
+        const body = await c.req.json().catch(() => ({} as Record<string, unknown>));
+        const effectiveMonth = body.effectiveMonth;
+        const effectiveYear = body.effectiveYear;
+        const employeeId = String(body.employeeId || '').trim() || 'SYSTEM';
+
+        const effectiveDate = toEffectiveDateFromThaiMonthYear(effectiveMonth, effectiveYear);
+        if (!effectiveDate) {
+            return c.json({
+                status: 400,
+                message: 'Invalid effectiveMonth/effectiveYear'
+            }, 400);
+        }
+
+        const orgUnitsRaw = Array.isArray(body.orgUnits) ? body.orgUnits : [];
+        const orgUnits = orgUnitsRaw
+            .map((item: unknown) => String(item || '').trim())
+            .filter((item: string) => item.length > 0);
+
+        const result = await sendHRCenterToSapService({
+            effectiveDate,
+            employeeId,
+            orgUnits
+        });
+
+        return c.json({
+            status: 200,
+            data: result
+        });
+    } catch (error: any) {
+        console.error('Error in sendHRCenterToSap controller:', error);
+        return c.json({
+            status: 500,
+            message: 'Internal server error',
+            error: error.message
+        }, 500);
+    }
+};
+
+export const getHRCenterSapMinus = async (c: Context) => {
+    try {
+        const effectiveMonth = c.req.query('effectiveMonth');
+        const effectiveYear = c.req.query('effectiveYear');
+        const effectiveDate = toEffectiveDateFromThaiMonthYear(effectiveMonth, effectiveYear);
+        if (!effectiveDate) {
+            return c.json({
+                status: 400,
+                message: 'Invalid effectiveMonth/effectiveYear'
+            }, 400);
+        }
+
+        const data = await getHRCenterSapMinusService(effectiveDate);
+        return c.json({
+            status: 200,
+            data
+        });
+    } catch (error: any) {
+        console.error('Error in getHRCenterSapMinus controller:', error);
+        return c.json({
+            status: 500,
+            message: 'Internal server error',
+            error: error.message
+        }, 500);
+    }
+};
+
+export const downloadHRCenterSapFile = async (c: Context) => {
+    try {
+        const meta = await getHRCenterSapOutboundFileMetaService();
+        if (!meta.exists) {
+            return c.json({
+                status: 404,
+                message: 'SAP outbound file not found'
+            }, 404);
+        }
+
+        const file = await getHRCenterSapOutboundFileBufferService();
+        const fileContent = Uint8Array.from(file.content);
+        return c.body(fileContent, 200, {
+            'Content-Type': 'text/plain; charset=utf-8',
+            'Content-Disposition': `attachment; filename="${file.fileName}"`,
+            'Cache-Control': 'no-store'
+        });
+    } catch (error: any) {
+        console.error('Error in downloadHRCenterSapFile controller:', error);
+        return c.json({
+            status: 500,
+            message: 'Internal server error',
             error: error.message
         }, 500);
     }

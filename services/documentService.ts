@@ -90,6 +90,23 @@ const firstNonEmptyText = (...values: unknown[]): string => {
     return '';
 };
 
+// mssql (tedious) serializes DateTime params with UTC clock by default.
+// Build a UTC Date from local components so SQL stores the same wall-clock value.
+const toSqlDateTimePreserveLocalClock = (date: Date): Date => {
+    if (!(date instanceof Date) || Number.isNaN(date.getTime())) {
+        return date;
+    }
+    return new Date(Date.UTC(
+        date.getFullYear(),
+        date.getMonth(),
+        date.getDate(),
+        date.getHours(),
+        date.getMinutes(),
+        date.getSeconds(),
+        date.getMilliseconds()
+    ));
+};
+
 const unitSnapshotCache = new Map<string, Map<string, UnitSnapshotRow>>();
 
 const toMonthSnapshotKey = (effectiveDateRaw: unknown): string => {
@@ -108,6 +125,58 @@ const parseEffectiveMonthDate = (effectiveDateRaw: unknown): Date => {
         return new Date(now.getFullYear(), now.getMonth(), 1, 0, 0, 0, 0);
     }
     return new Date(parsed.getFullYear(), parsed.getMonth(), 1, 0, 0, 0, 0);
+};
+
+const resolveDocumentEffectiveDateFromItems = async (
+    tx: sql.Transaction,
+    itemIds: string[],
+    fallback: Date
+): Promise<Date> => {
+    const uniqueItemIds = Array.from(new Set((itemIds || []).map((itemId) => String(itemId || '').trim()).filter(Boolean)));
+    const fallbackMonthStart = new Date(fallback.getFullYear(), fallback.getMonth(), 1, 0, 0, 0, 0);
+    if (!uniqueItemIds.length) {
+        return fallbackMonthStart;
+    }
+
+    const req = new sql.Request(tx);
+    const placeholders = uniqueItemIds.map((itemId, idx) => {
+        const param = `TransactionNo${idx}`;
+        req.input(param, sql.VarChar(10), itemId);
+        return `@${param}`;
+    });
+
+    const res = await req.query(`
+        SELECT TransactionNo, EffectiveDate
+        FROM MP_Transactions WITH (NOLOCK)
+        WHERE TransactionNo IN (${placeholders.join(',')})
+          AND EffectiveDate IS NOT NULL
+    `);
+
+    const rows = Array.isArray(res.recordset) ? res.recordset : [];
+    if (!rows.length) {
+        return fallbackMonthStart;
+    }
+
+    const monthKeys = new Set<string>();
+    let selectedDate: Date | null = null;
+
+    for (const row of rows) {
+        const parsed = new Date(row?.EffectiveDate);
+        if (Number.isNaN(parsed.getTime())) continue;
+
+        const monthStart = new Date(parsed.getFullYear(), parsed.getMonth(), 1, 0, 0, 0, 0);
+        monthKeys.add(`${monthStart.getFullYear()}-${String(monthStart.getMonth() + 1).padStart(2, '0')}`);
+
+        if (!selectedDate || monthStart.getTime() < selectedDate.getTime()) {
+            selectedDate = monthStart;
+        }
+    }
+
+    if (monthKeys.size > 1) {
+        console.warn('[submitDocumentService] Found mixed effective months in selected transactions. Using earliest month.');
+    }
+
+    return selectedDate || fallbackMonthStart;
 };
 
 const getUnitSnapshotMapByEffectiveDate = async (
@@ -408,15 +477,21 @@ export const submitDocumentService = async (payload: SubmitDocumentPayload, crea
             }
             
             const documentNo = `${prefix}${runningNumber.toString().padStart(4, '0')}`;
-            const effectiveDate = today;
+            const effectiveDate = await resolveDocumentEffectiveDateFromItems(
+                transaction,
+                payload.items.map((item) => item.itemId),
+                today
+            );
+            const sqlEffectiveDate = toSqlDateTimePreserveLocalClock(effectiveDate);
+            const sqlCreateDate = toSqlDateTimePreserveLocalClock(today);
 
             // 1. mp_DocumentInsert
             const docReq = new sql.Request(transaction);
             docReq.input('DocumentNo', sql.VarChar(13), documentNo);
-            docReq.input('EffectiveDate', sql.DateTime, effectiveDate);
+            docReq.input('EffectiveDate', sql.DateTime, sqlEffectiveDate);
             docReq.input('DocumentType', sql.Int, payload.documentType);
             docReq.input('CreateBy', sql.VarChar(20), createBy);
-            docReq.input('CreateDate', sql.DateTime, today);
+            docReq.input('CreateDate', sql.DateTime, sqlCreateDate);
             docReq.input('ParentDocumentNo', sql.VarChar(13), payload.parentDocumentNo || null);
             await docReq.execute('mp_DocumentInsert');
 
@@ -795,7 +870,9 @@ export const rejectDocumentService = async (documentNo: string, itemId: string, 
                 docUpdateReq.input('UpdateBy', sql.VarChar(20), updateBy);
                 docUpdateReq.input('UpdateDate', sql.DateTime, today);
 
-                if (!allRejectedRes.recordset || allRejectedRes.recordset.length === 0) {
+                const isAllRejected = !allRejectedRes.recordset || allRejectedRes.recordset.length === 0;
+
+                if (isAllRejected) {
                     // All rejected
                     docUpdateReq.input('DocumentStatus', sql.Int, 0); 
                 } else {
@@ -803,6 +880,25 @@ export const rejectDocumentService = async (documentNo: string, itemId: string, 
                 }
                 
                 await docUpdateReq.execute('mp_DocumentUpdateStatus');
+
+                // If document is finalized with mixed result (some approved, some rejected),
+                // ensure all approved transactions are moved to final status = 3.
+                if (!isAllRejected) {
+                    const approvedItemsReq = new sql.Request(transaction);
+                    approvedItemsReq.input('DocumentNo', sql.VarChar(13), documentNo);
+                    const approvedItemsRes = await approvedItemsReq.execute('mp_DocumentApprovedItemsGet');
+
+                    if (approvedItemsRes.recordset && approvedItemsRes.recordset.length > 0) {
+                        for (const row of approvedItemsRes.recordset) {
+                            const approvedTrReq = new sql.Request(transaction);
+                            approvedTrReq.input('TransactionNo', sql.VarChar(10), row.ItemID);
+                            approvedTrReq.input('Status', sql.Int, 3);
+                            approvedTrReq.input('UpdateBy', sql.VarChar(20), updateBy);
+                            approvedTrReq.input('UpdateDate', sql.DateTime, today);
+                            await approvedTrReq.execute('mp_TransactionsUpdateStatus');
+                        }
+                    }
+                }
             }
 
             await transaction.commit();
@@ -947,9 +1043,52 @@ export const rejectAllDocumentService = async (documentNo: string, remark: strin
             const itemsRes = await itemsReq.query('SELECT DISTINCT ItemID FROM MP_DocumentItems WHERE DocumentNo = @DocumentNo');
             
             if (itemsRes.recordset && itemsRes.recordset.length > 0) {
-                // 3. For each item, insert remark and update transaction status to 0
+                // 3. For each item:
+                //    - mark current/future approvers as rejected (to keep logs consistent with single-item reject)
+                //    - insert remark
+                //    - update transaction status to 0
                 for (const row of itemsRes.recordset) {
                     const itemId = row.ItemID;
+
+                    // Find the first pending/active seq (if exists) for this item
+                    const pendingSeqReq = new sql.Request(transaction);
+                    pendingSeqReq.input('DocumentNo', sql.VarChar(13), documentNo);
+                    pendingSeqReq.input('ItemID', sql.VarChar(10), itemId);
+                    pendingSeqReq.input('UpdateBy', sql.VarChar(20), updateBy);
+                    const pendingSeqRes = await pendingSeqReq.query(`
+                        SELECT TOP 1 Seqno
+                        FROM MP_DocumentItems WITH (NOLOCK)
+                        WHERE DocumentNo = @DocumentNo
+                          AND ItemID = @ItemID
+                          AND AuditStatus IN (0, 1)
+                        ORDER BY
+                          CASE
+                            WHEN AuditStatus = 1 AND EmployeeID = @UpdateBy THEN 0
+                            WHEN AuditStatus = 1 THEN 1
+                            ELSE 2
+                          END,
+                          Seqno ASC
+                    `);
+
+                    const pendingSeqno = Number(pendingSeqRes.recordset?.[0]?.Seqno);
+                    if (Number.isFinite(pendingSeqno) && pendingSeqno >= 0) {
+                        // Mark current seq as rejected
+                        const updateCurrentReq = new sql.Request(transaction);
+                        updateCurrentReq.input('DocumentNo', sql.VarChar(13), documentNo);
+                        updateCurrentReq.input('ItemID', sql.VarChar(10), itemId);
+                        updateCurrentReq.input('Seqno', sql.Int, pendingSeqno);
+                        updateCurrentReq.input('AuditStatus', sql.Int, -1);
+                        updateCurrentReq.input('AuditDate', sql.DateTime, today);
+                        await updateCurrentReq.execute('mp_DocumentItemsUpdateAuditStatus');
+
+                        // Mark future seq(s) as rejected
+                        const updateFutureReq = new sql.Request(transaction);
+                        updateFutureReq.input('DocumentNo', sql.VarChar(13), documentNo);
+                        updateFutureReq.input('ItemID', sql.VarChar(10), itemId);
+                        updateFutureReq.input('Seqno', sql.Int, pendingSeqno);
+                        updateFutureReq.input('AuditDate', sql.DateTime, today);
+                        await updateFutureReq.execute('mp_DocumentItemsFutureRejectUpdate');
+                    }
 
                     // Insert Remark per item
                     const rmReq = new sql.Request(transaction);

@@ -1,5 +1,14 @@
 import { sql, poolPromise } from '../config/db.js';
 
+const toSqlDateOnly = (value: Date | string): Date => {
+    const parsed = value instanceof Date ? value : new Date(String(value));
+    if (Number.isNaN(parsed.getTime())) {
+        const now = new Date();
+        return new Date(Date.UTC(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0, 0));
+    }
+    return new Date(Date.UTC(parsed.getFullYear(), parsed.getMonth(), parsed.getDate(), 0, 0, 0, 0));
+};
+
 export const getSecondmentPoolsService = async (orgUnitNo: string) => {
     try {
         const pool = await poolPromise;
@@ -71,11 +80,11 @@ export const getUnitComboService = async (month: string | number, year: string |
         const pool = await poolPromise;
         const request = new sql.Request(pool);
         
-        // Match legacy parsing: dd/MM/yyyy with 01 as day
-        const m = String(month).padStart(2, '0');
-        const checkDate = new Date(`${year}-${m}-01`);
+        const monthNo = Number.parseInt(String(month), 10);
+        const yearNo = Number.parseInt(String(year), 10);
+        const checkDate = new Date(yearNo, monthNo - 1, 1, 0, 0, 0, 0);
 
-        request.input('p_CheckDate', sql.DateTime, checkDate);
+        request.input('p_CheckDate', sql.Date, toSqlDateOnly(checkDate));
         const result = await request.execute('mp_UnitGetByEffectivePeriod');
         return result.recordset || [];
     } catch (error) {

@@ -1,5 +1,14 @@
 import { sql, poolPromise } from '../config/db.js';
 
+const toSqlDateOnly = (value: Date | string): Date => {
+    const parsed = value instanceof Date ? value : new Date(String(value));
+    if (Number.isNaN(parsed.getTime())) {
+        const now = new Date();
+        return new Date(Date.UTC(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0, 0));
+    }
+    return new Date(Date.UTC(parsed.getFullYear(), parsed.getMonth(), parsed.getDate(), 0, 0, 0, 0));
+};
+
 
 /**
  * Service to execute the mp_UserInUnitAndGroupByEmployeeID stored procedure
@@ -54,13 +63,12 @@ export const getLevelsByUnitService = async (checkDate: string, unit: string, us
         // declare @p_Unit as varchar(8) = '80000032'
         // request.input('p_CheckDate', sql.DateTime, new Date(checkDate));
         
-        // Convert 'YYYYMMDD01' format from frontend to valid 'YYYY-MM-DD' for Date constructor
-        const year = checkDate.substring(0, 4);
-        const month = checkDate.substring(4, 6);
-        const day = checkDate.substring(6, 8);
-        const formattedDate = `${year}-${month}-${day}`;
+        const year = Number.parseInt(checkDate.substring(0, 4), 10);
+        const month = Number.parseInt(checkDate.substring(4, 6), 10);
+        const day = Number.parseInt(checkDate.substring(6, 8), 10);
+        const checkDateValue = new Date(year, month - 1, day, 0, 0, 0, 0);
 
-        request.input('p_CheckDate', sql.DateTime, new Date(formattedDate));
+        request.input('p_CheckDate', sql.Date, toSqlDateOnly(checkDateValue));
         request.input('p_Unit', sql.VarChar(8), unit);
         request.input('p_UserGroupNo', sql.VarChar(2), userGroupNo);
 
@@ -94,7 +102,7 @@ export const getAllUnitsByEffectiveDateService = async (effectiveDate: string) =
         const pool = await poolPromise;
         const request = new sql.Request(pool);
 
-        request.input('EffectiveDate', sql.DateTime, new Date(effectiveDate));
+        request.input('EffectiveDate', sql.Date, toSqlDateOnly(effectiveDate));
 
         const result = await request.execute('mp_UnitGetByEffectiveDate');
 
