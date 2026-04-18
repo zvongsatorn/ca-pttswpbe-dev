@@ -17,6 +17,7 @@ import {
     updateUnitName,
     updateNote,
     getHistoryApprove,
+    getReusableMkdFiles,
     getFlowHistory,
     approveManDriver,
     getFile,
@@ -46,6 +47,9 @@ app.get('/history', getHistoryManDriver);
 
 // GET /api/mkd/history-approve
 app.get('/history-approve', getHistoryApprove);
+
+// GET /api/mkd/reusable-files
+app.get('/reusable-files', getReusableMkdFiles);
 
 // GET /api/mkd/inbox
 app.get('/inbox', getInboxManDriver);
@@ -141,4 +145,3 @@ app.post('/:id/copy', copyMKD);
 app.get('/history-copy', getMKDHistory);
 
 export default app;
-

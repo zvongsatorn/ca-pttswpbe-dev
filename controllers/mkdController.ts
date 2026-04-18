@@ -21,6 +21,7 @@ import {
     updateUnitNameService,
     updateNoteService,
     getHistoryManDriverApproveService,
+    getReusableMkdFilesService,
     getFlowHistoryService,
     approveManDriverService,
     getMKDDashboardService,
@@ -587,6 +588,24 @@ export const getHistoryApprove = async (c: Context) => {
     }
 };
 
+export const getReusableMkdFiles = async (c: Context) => {
+    try {
+        const effectiveYear = c.req.query('EffectiveYear') || '';
+        const employeeId = c.req.query('EmployeeID') || '';
+        const userGroupNo = normalizeUserGroupNo(c.req.query('UserGroupNo') || '');
+
+        if (!effectiveYear || !employeeId) {
+            return c.json({ success: false, message: 'Missing EffectiveYear or EmployeeID' }, 400);
+        }
+
+        const result = await getReusableMkdFilesService(effectiveYear, employeeId, userGroupNo);
+        return c.json({ success: true, data: result }, 200);
+    } catch (error: any) {
+        console.error('Error fetching reusable MKD files:', error);
+        return c.json({ success: false, message: 'Internal server error', error: error.message }, 500);
+    }
+};
+
 export const getInboxManDriver = async (c: Context) => {
     try {
         const employeeId = c.req.query('employeeId') || '';
@@ -637,6 +656,9 @@ export const approveManDriver = async (c: Context) => {
         const conclusionNo = body['conclusionNo'] as string || '';
         const mkdApproveCount = parseInt(body['mkdApproveCount'] as string) || 0;
         const file = body['file'] as any;
+        const existingFileUpload = String(body['existingFileUpload'] || '').trim();
+        const existingFileSourceManDriverId = String(body['existingFileSourceManDriverId'] || '').trim();
+        const existingFileName = String(body['existingFileName'] || '').trim();
         const updateBy = body['updateBy'] as string || 'SYSTEM';
 
         if (!id) return c.json({ message: 'Missing MKD ID' }, 400);
@@ -663,6 +685,46 @@ export const approveManDriver = async (c: Context) => {
             safeName = `${randomUUID()}${extension}`;
             const filePath = path.join(uploadDir, safeName);
             fs.writeFileSync(filePath, Buffer.from(fileBuffer));
+        } else if (existingFileUpload && existingFileSourceManDriverId) {
+            // Reuse an already uploaded file from another MKD in the same year/user scope.
+            const targetDetails = await getMKDDetailsService(id);
+            const sourceDetails = await getMKDDetailsService(existingFileSourceManDriverId);
+            const targetRequestNo = targetDetails?.header?.RequestNo || `ID_${id}`;
+            const sourceRequestNo = sourceDetails?.header?.RequestNo || `ID_${existingFileSourceManDriverId}`;
+            const targetYear = String(targetDetails?.header?.EffectiveYear || '').trim();
+            const sourceYear = String(sourceDetails?.header?.EffectiveYear || '').trim();
+            const sourceCreateBy = String(sourceDetails?.header?.CreateBy || '').trim();
+            const normalizedSourceCreateBy = sourceCreateBy.replace(/^0+/, '');
+            const normalizedUpdateBy = String(updateBy || '').trim().replace(/^0+/, '');
+
+            if (sourceYear && targetYear && sourceYear !== targetYear) {
+                return c.json({ success: false, message: 'Selected file must be from the same EffectiveYear' }, 400);
+            }
+
+            if (normalizedSourceCreateBy && normalizedUpdateBy && normalizedSourceCreateBy !== normalizedUpdateBy) {
+                return c.json({ success: false, message: 'Selected file must belong to the current user' }, 403);
+            }
+
+            const sourceFilePath = path.join(process.cwd(), 'uploads', 'mkd', sourceRequestNo, existingFileUpload);
+            if (!fs.existsSync(sourceFilePath)) {
+                return c.json({ success: false, message: 'Selected file not found' }, 400);
+            }
+
+            displayFileName = existingFileName || existingFileUpload;
+
+            if (sourceRequestNo === targetRequestNo) {
+                // Same folder: can reuse the same physical file id directly.
+                safeName = existingFileUpload;
+            } else {
+                const targetUploadDir = path.join(process.cwd(), 'uploads', 'mkd', targetRequestNo);
+                if (!fs.existsSync(targetUploadDir)) {
+                    fs.mkdirSync(targetUploadDir, { recursive: true });
+                }
+                const extension = path.extname(existingFileUpload).toLowerCase() || '.pdf';
+                safeName = `${randomUUID()}${extension}`;
+                const targetFilePath = path.join(targetUploadDir, safeName);
+                fs.copyFileSync(sourceFilePath, targetFilePath);
+            }
         }
 
         await approveManDriverService(
