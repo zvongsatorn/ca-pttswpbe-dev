@@ -638,6 +638,22 @@ const toTrimText = (value: unknown): string => {
     return String(value).trim();
 };
 
+const splitCsvValues = (value: string): string[] =>
+    toTrimText(value)
+        .split(',')
+        .map((item) => toTrimText(item))
+        .filter((item) => item.length > 0);
+
+const singleOrNull = (values: string[]): string | null => (values.length === 1 ? values[0] : null);
+
+const matchesSelectedSet = (selected: Set<string> | null, candidates: Array<unknown>): boolean => {
+    if (!selected || selected.size === 0) return true;
+    return candidates.some((candidate) => {
+        const normalized = toTrimText(candidate);
+        return normalized !== '' && selected.has(normalized);
+    });
+};
+
 const toDisplayDate = (value: unknown): string => {
     if (!value) return '';
     const d = new Date(String(value));
@@ -699,19 +715,51 @@ export const getReport04DataService = async (
     try {
         const pool = await poolPromise;
         const request = pool.request();
+        const selectedDivisionValues = splitCsvValues(division);
+        const selectedOrgUnitValues = splitCsvValues(orgUnitNo);
+        const selectedBgValues = splitCsvValues(bgNo);
 
         const effectiveDate = new Date(effectiveDateStr);
         request.input('EffectiveDate', sql.DateTime, effectiveDate);
         request.input('EmployeeID', sql.VarChar(8), employeeId);
         request.input('UserGroupNO', sql.VarChar(2), userGroupNo || null);
-        request.input('Division', sql.VarChar(8), division || null);
-        request.input('OrgUnitNo', sql.VarChar(8), orgUnitNo || null);
-        request.input('BGNo', sql.VarChar(3), bgNo || null);
+        request.input('Division', sql.VarChar(8), singleOrNull(selectedDivisionValues));
+        request.input('OrgUnitNo', sql.VarChar(8), singleOrNull(selectedOrgUnitValues));
+        request.input('BGNo', sql.VarChar(3), singleOrNull(selectedBgValues));
 
         const result = await request.execute('mp_ReportActualUnit');
         const rows = Array.isArray(result.recordset) ? result.recordset : [];
+        const selectedDivisionSet = selectedDivisionValues.length > 0 ? new Set(selectedDivisionValues) : null;
+        const selectedOrgUnitSet = selectedOrgUnitValues.length > 0 ? new Set(selectedOrgUnitValues) : null;
+        const selectedBgSet = selectedBgValues.length > 0 ? new Set(selectedBgValues) : null;
 
-        return rows.map((rawRow, index) => {
+        const filteredRows = rows.filter((rawRow) => {
+            const row = (rawRow && typeof rawRow === 'object') ? (rawRow as Record<string, unknown>) : {};
+            const { text } = buildRowAccessor(row);
+
+            const rowBg = text('BGNo', 'bg_no', 'bgno');
+            const rowDivision = text(
+                'ParentOrgUnitNo',
+                'line_of_work',
+                'GrandName2',
+                'GrandName',
+                'GrandParent',
+                'SecUnitDummy',
+                'Division',
+                'OrgUnitLine',
+                'LineCode',
+                'LineNo'
+            );
+            const rowOrgUnit = text('OrgUnitNo', 'org_unit_no', 'unit_code');
+
+            return (
+                matchesSelectedSet(selectedBgSet, [rowBg]) &&
+                matchesSelectedSet(selectedDivisionSet, [rowDivision]) &&
+                matchesSelectedSet(selectedOrgUnitSet, [rowOrgUnit])
+            );
+        });
+
+        return filteredRows.map((rawRow, index) => {
             const row = (rawRow && typeof rawRow === 'object') ? rawRow as Record<string, unknown> : {};
             const { num, text } = buildRowAccessor(row);
 
@@ -991,6 +1039,8 @@ export const getReport05DataService = async (
     try {
         const pool = await poolPromise;
         const request = pool.request();
+        const selectedDivisionValues = splitCsvValues(division);
+        const selectedOrgUnitValues = splitCsvValues(orgUnitNo);
 
         const fromDate = new Date(fromDateStr);
         const toDate = new Date(toDateStr);
@@ -999,20 +1049,48 @@ export const getReport05DataService = async (
         request.input('ToDate', sql.DateTime, toDate);
         request.input('EmployeeID', sql.VarChar(8), employeeId);
         request.input('UserGroupNO', sql.VarChar(2), userGroupNo || null);
-        request.input('OrgUnitNo', sql.VarChar(8), orgUnitNo || null);
-        request.input('Division', sql.VarChar(8), division || null);
+        request.input('OrgUnitNo', sql.VarChar(8), singleOrNull(selectedOrgUnitValues));
+        request.input('Division', sql.VarChar(8), singleOrNull(selectedDivisionValues));
 
         const result = await request.execute('mp_ReportActualManMonthly');
         const rows = Array.isArray(result.recordset) ? result.recordset : [];
+        const selectedDivisionSet = selectedDivisionValues.length > 0 ? new Set(selectedDivisionValues) : null;
+        const selectedOrgUnitSet = selectedOrgUnitValues.length > 0 ? new Set(selectedOrgUnitValues) : null;
+
+        const filteredRows = rows.filter((rawRow) => {
+            const row = (rawRow && typeof rawRow === 'object') ? (rawRow as Record<string, unknown>) : {};
+            const { text } = buildRowAccessor(row);
+
+            const rowDivision = text(
+                'ParentOrgUnitNo',
+                'line_of_work',
+                'GrandName2',
+                'GrandName',
+                'GrandParent',
+                'SecUnitDummy',
+                'Division',
+                'OrgUnitLine',
+                'LineCode',
+                'LineNo'
+            );
+            const rowOrgUnit = text('OrgUnitNo', 'org_unit_no', 'unit_code');
+
+            return (
+                matchesSelectedSet(selectedDivisionSet, [rowDivision]) &&
+                matchesSelectedSet(selectedOrgUnitSet, [rowOrgUnit])
+            );
+        });
 
         let lastUnitShort = '';
         let lastUnitCode = '';
         let lastUnitName = '';
+        let lastLineCode = '';
         let lastLineOfWork = '';
+        let lastBusinessCode = '';
         let lastBusinessUnit = '';
         let lastDataset = 'ปกติ';
 
-        return rows.map((rawRow, index) => {
+        return filteredRows.map((rawRow, index) => {
                 const row = (rawRow && typeof rawRow === 'object') ? (rawRow as Record<string, unknown>) : {};
                 const { num, text } = buildRowAccessor(row);
 
@@ -1036,8 +1114,10 @@ export const getReport05DataService = async (
                 const unitShortRaw = text('UnitAbbr', 'DisplayName', 'unit_short');
                 const unitCodeRaw = text('OrgUnitNo', 'unit_code');
                 const unitNameRaw = text('UnitName', 'unit_name', 'UnitAbbr', 'DisplayName');
-                const lineOfWorkRaw = text('ParentOrgUnitNo', 'line_of_work', 'GrandName2', 'GrandName', 'GrandParent', 'SecUnitDummy');
-                const businessUnitRaw = text('BGName', 'business_unit', 'BGNo');
+                const lineCodeRaw = text('ParentOrgUnitNo', 'line_of_work_code', 'parent_org_unit_no');
+                const lineOfWorkRaw = text('line_of_work', 'ParentOrgUnitNo', 'GrandName2', 'GrandName', 'GrandParent', 'SecUnitDummy');
+                const businessCodeRaw = text('BGNo', 'bg_no', 'business_unit_code');
+                const businessUnitRaw = text('business_unit', 'BGName', 'BGNo');
                 const operatorRaw = text('CreateByName', 'operator');
                 const datasetSource = row.typecal ?? row.TypeCal;
                 const hasDatasetSource = datasetSource !== undefined && datasetSource !== null && datasetSource !== '';
@@ -1045,7 +1125,9 @@ export const getReport05DataService = async (
                 const unit_short = unitShortRaw || lastUnitShort;
                 const unit_code = unitCodeRaw || lastUnitCode;
                 const unit_name = unitNameRaw || lastUnitName;
+                const line_of_work_code = lineCodeRaw || lastLineCode;
                 const line_of_work = lineOfWorkRaw || lastLineOfWork;
+                const business_unit_code = businessCodeRaw || lastBusinessCode;
                 const business_unit = businessUnitRaw || lastBusinessUnit;
                 const operator = operatorRaw;
                 const dataset = hasDatasetSource ? mapTypecalToDataset(datasetSource) : lastDataset;
@@ -1053,7 +1135,9 @@ export const getReport05DataService = async (
                 if (unitShortRaw) lastUnitShort = unitShortRaw;
                 if (unitCodeRaw) lastUnitCode = unitCodeRaw;
                 if (unitNameRaw) lastUnitName = unitNameRaw;
+                if (lineCodeRaw) lastLineCode = lineCodeRaw;
                 if (lineOfWorkRaw) lastLineOfWork = lineOfWorkRaw;
+                if (businessCodeRaw) lastBusinessCode = businessCodeRaw;
                 if (businessUnitRaw) lastBusinessUnit = businessUnitRaw;
                 if (hasDatasetSource) lastDataset = dataset;
 
@@ -1074,7 +1158,9 @@ export const getReport05DataService = async (
                     operator,
                     remark: text('remark', 'Remark', 'note'),
                     log: text('log', 'new_note', 'TransactionDesc'),
+                    line_of_work_code,
                     line_of_work,
+                    business_unit_code,
                     business_unit,
                     dataset
                 };
@@ -1195,6 +1281,11 @@ export const getReport07DataService = async (
     bgNo: string
 ) => {
     try {
+        const selectedDivisionValues = splitCsvValues(division);
+        const selectedBgValues = splitCsvValues(bgNo);
+        const selectedDivisionSet = selectedDivisionValues.length > 0 ? new Set(selectedDivisionValues) : null;
+        const selectedBgSet = selectedBgValues.length > 0 ? new Set(selectedBgValues) : null;
+
         const baseRows = await getReport06DataService(effectiveDateStr, employeeId, userGroupNo, division, bgNo);
         const effectiveDate = new Date(effectiveDateStr);
         const pool = await poolPromise;
@@ -1266,7 +1357,7 @@ export const getReport07DataService = async (
             landscapeMap.set(orgUnitNo, landscapeValue);
         });
 
-        return baseRows.map((rawRow) => {
+        const enrichedRows = baseRows.map((rawRow) => {
             const row = (rawRow && typeof rawRow === 'object') ? (rawRow as Record<string, unknown>) : {};
             const orgUnitNo = toTrimText(row.org_unit_no);
             const bgNoCode = toTrimText(row.bg_no);
@@ -1332,6 +1423,14 @@ export const getReport07DataService = async (
                 gap_total: round2(gapTotal)
             };
         });
+
+        return enrichedRows.filter((row) => {
+            const raw = row as Record<string, unknown>;
+            return (
+                matchesSelectedSet(selectedBgSet, [raw.bg_no]) &&
+                matchesSelectedSet(selectedDivisionSet, [raw.parent_org_unit_no])
+            );
+        });
     } catch (error) {
         console.error('Error in getReport07DataService:', error);
         throw error;
@@ -1352,6 +1451,10 @@ export const getReport08DataService = async (
         const fromDate = new Date(fromDateStr);
         const toDate = new Date(toDateStr);
         const structureDate = new Date(structureDateStr || toDateStr);
+        const selectedBgValues = splitCsvValues(bgNo || '');
+        const selectedDivisionValues = splitCsvValues(division || '');
+        const selectedBgCodeSet = selectedBgValues.length > 0 ? new Set(selectedBgValues) : null;
+        const selectedDivisionSet = selectedDivisionValues.length > 0 ? new Set(selectedDivisionValues) : null;
 
         const structureReq = pool.request();
         structureReq.input('Effectivedate', sql.DateTime, structureDate);
@@ -1361,8 +1464,33 @@ export const getReport08DataService = async (
         const structureRes = await structureReq.execute('mp_Report01Get');
         const flatRows = Array.isArray(structureRes.recordset) ? structureRes.recordset : [];
 
-        const selectedBgNo = toTrimText(bgNo);
-        const selectedDivision = toTrimText(division);
+        const bgNameByCode = new Map<string, string>();
+        if (selectedBgValues.length > 0) {
+            const bgReq = pool.request();
+            bgReq.input('EffectiveDate', sql.DateTime, structureDate);
+            const bgRes = await bgReq.query(`
+                SELECT BGNo, BGName
+                FROM MP_BG
+                WHERE @EffectiveDate BETWEEN BeginDate AND EndDate
+            `);
+            const bgRows = Array.isArray(bgRes.recordset) ? bgRes.recordset : [];
+            bgRows.forEach((raw) => {
+                const row = (raw && typeof raw === 'object') ? (raw as Record<string, unknown>) : {};
+                const code = toTrimText(row.BGNo);
+                const name = toTrimText(row.BGName);
+                if (!code || !name) return;
+                bgNameByCode.set(code, name);
+            });
+        }
+        const selectedBgNameSet = selectedBgValues.length > 0
+            ? new Set(
+                selectedBgValues
+                    .map((code) => bgNameByCode.get(code) || '')
+                    .map((name) => toTrimText(name))
+                    .filter((name) => name.length > 0)
+            )
+            : null;
+
         const getRowText = (row: Record<string, unknown>, ...aliases: string[]) => {
             const lowerMap = new Map<string, unknown>();
             Object.entries(row).forEach(([key, value]) => lowerMap.set(key.toLowerCase(), value));
@@ -1378,6 +1506,7 @@ export const getReport08DataService = async (
         const filteredRows = flatRows.filter((rawRow) => {
             const row = (rawRow && typeof rawRow === 'object') ? (rawRow as Record<string, unknown>) : {};
             const rowBgNo = getRowText(row, 'BGNo', 'bg_no', 'bgNo');
+            const rowBgName = getRowText(row, 'BGName', 'business_unit', 'Group1', 'group1');
             const rowDivision = getRowText(
                 row,
                 'SecUnitDummy',
@@ -1390,8 +1519,12 @@ export const getReport08DataService = async (
                 'OrgUnitNo'
             );
 
-            const matchBg = !selectedBgNo || rowBgNo === selectedBgNo;
-            const matchDivision = !selectedDivision || rowDivision === selectedDivision;
+            const rowBgNameFromCode = rowBgNo ? (bgNameByCode.get(rowBgNo) || '') : '';
+            const matchBg =
+                (!selectedBgCodeSet && !selectedBgNameSet) ||
+                matchesSelectedSet(selectedBgCodeSet, [rowBgNo]) ||
+                matchesSelectedSet(selectedBgNameSet, [rowBgName, rowBgNameFromCode]);
+            const matchDivision = matchesSelectedSet(selectedDivisionSet, [rowDivision]);
             return matchBg && matchDivision;
         });
 
