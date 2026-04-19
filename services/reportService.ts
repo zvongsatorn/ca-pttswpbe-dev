@@ -49,7 +49,6 @@ export const getDashboardDataService = async (
     employeeId: string,
     userGroupNo: string,
     isSecondment: number,
-    levelType: number,
     division: string
 ) => {
     try {
@@ -77,8 +76,6 @@ export const getDashboardDataService = async (
             request.input('IsSecondment', sql.Int, null);
         }
         
-        request.input('Leveltype', sql.Int, levelType);
-        
         // division is equivalent to OrgUnitNo
         if (division) {
              request.input('division', sql.VarChar(8), division);
@@ -101,7 +98,6 @@ export const getDashboardExcelDataService = async (
     employeeId: string,
     userGroupNo: string,
     isSecondment: number,
-    levelType: number,
     division: string
 ) => {
     try {
@@ -127,8 +123,6 @@ export const getDashboardExcelDataService = async (
         } else {
             request.input('IsSecondment', sql.Int, null);
         }
-        
-        request.input('Leveltype', sql.Int, levelType);
         
         if (division) {
              request.input('division', sql.VarChar(8), division);

@@ -13,7 +13,6 @@ export const getDashboardData = async (c: Context) => {
         // Map frontend ID to backend DB logic: dropdown index minus 1 (legacy: IsSecondment = IsSecondment.Value - 1)
         const isSecondment = isSecondmentId - 1; 
 
-        const levelType = parseInt(c.req.query('levelType') || '1', 10);
         const division = c.req.query('division') || '';
 
         if (!effectiveMonth || !effectiveYear || !employeeId) {
@@ -26,7 +25,6 @@ export const getDashboardData = async (c: Context) => {
             employeeId,
             userGroupNo,
             isSecondment,
-            levelType,
             division
         );
 
@@ -54,7 +52,6 @@ export const exportDashboardExcel = async (c: Context) => {
         const isSecondmentId = parseInt(c.req.query('isSecondment') || '0', 10);
         const isSecondment = isSecondmentId - 1; 
 
-        const levelType = parseInt(c.req.query('levelType') || '1', 10);
         const division = c.req.query('division') || '';
 
         if (!effectiveMonth || !effectiveYear || !employeeId) {
@@ -67,7 +64,6 @@ export const exportDashboardExcel = async (c: Context) => {
             employeeId,
             userGroupNo,
             isSecondment,
-            levelType,
             division
         );
 
