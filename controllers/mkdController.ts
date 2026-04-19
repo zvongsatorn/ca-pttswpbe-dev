@@ -30,6 +30,7 @@ import {
     exportListKeymanService,
     createMasterKeyMasterService,
     updateMasterKeyMasterService,
+    isMasterKeyInUseService,
     exportPositionService,
     getInboxManDriverService,
     getMyRequestsMKDService,
@@ -886,11 +887,25 @@ export const updateMasterKeyMaster = async (c: Context) => {
             return c.json({ message: 'Missing ID' }, 400);
         }
 
+        const isInUse = await isMasterKeyInUseService(id);
+        if (isInUse) {
+            return c.json({
+                success: false,
+                message: 'รายการนี้ถูกใช้งานแล้ว ไม่สามารถลบได้'
+            }, 400);
+        }
+
         await updateMasterKeyMasterService(id, updateBy);
         
         return c.json({ success: true, message: 'Master Key updated' }, 200);
     } catch (error: any) {
         console.error('Error updating Master Key:', error);
+        if (error?.message === 'ไม่พบข้อมูล Manpower Key Driver ที่ต้องการลบ') {
+            return c.json({
+                success: false,
+                message: error.message
+            }, 400);
+        }
         return c.json({ 
             success: false, 
             message: 'Internal server error while updating Master Key',

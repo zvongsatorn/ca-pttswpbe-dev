@@ -65,11 +65,28 @@ export const getDelayRecords = async (c: Context) => {
 export const getDelayEmployeeOptions = async (c: Context) => {
     try {
         const keyword = c.req.query('q') || '';
-        const data = await delayService.getEmployeeOptions(keyword);
+        const yearRaw = c.req.query('year');
+        const year = yearRaw ? parseIntOrNull(yearRaw) : null;
+        if (yearRaw && year === null) {
+            return c.json({ success: false, message: 'Invalid year parameter' }, 400);
+        }
+
+        const data = await delayService.getEmployeeOptions(keyword, year ?? undefined);
         return c.json({ success: true, data }, 200);
     } catch (error: unknown) {
         const message = error instanceof Error ? error.message : 'Unknown error';
         console.error('Error in getDelayEmployeeOptions controller:', error);
+        return c.json({ success: false, message }, 500);
+    }
+};
+
+export const getDelayRetireYearOptions = async (c: Context) => {
+    try {
+        const data = await delayService.getRetireYearOptions();
+        return c.json({ success: true, data }, 200);
+    } catch (error: unknown) {
+        const message = error instanceof Error ? error.message : 'Unknown error';
+        console.error('Error in getDelayRetireYearOptions controller:', error);
         return c.json({ success: false, message }, 500);
     }
 };

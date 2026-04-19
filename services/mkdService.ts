@@ -1135,6 +1135,24 @@ export const updateMasterKeyMasterService = async (keyManId: number | string, up
     }
 };
 
+export const isMasterKeyInUseService = async (keyManId: number | string) => {
+    try {
+        const pool = await poolPromise;
+        const result = await pool.request().execute('mp_MasterKeymanGet');
+        const key = String(keyManId);
+        const target = (result.recordset || []).find((item: any) => String(item.KeyManID) === key);
+
+        if (!target) {
+            throw new Error('ไม่พบข้อมูล Manpower Key Driver ที่ต้องการลบ');
+        }
+
+        return Number(target.chkuse || 0) > 0;
+    } catch (error) {
+        console.error('Error checking mp_MasterKeymanGet usage:', error);
+        throw error;
+    }
+};
+
 export const exportPositionService = async (
     effYear: string | null,
     effDate: string | null, // Expected YYYY-MM-DD from frontend

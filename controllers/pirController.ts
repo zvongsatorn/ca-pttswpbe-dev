@@ -38,12 +38,20 @@ export const insertPIR = async (c: Context) => {
     try {
         const body = await c.req.json();
         const { effectiveYear, year, rate, orgUnitNo, createBy, import: isImport } = body;
+        const effectiveYearNum = Number(effectiveYear);
+        const yearNum = Number(year);
+        const normalizedRate = rate === '' || rate === null || rate === undefined ? null : Number(rate);
 
-        if (!effectiveYear || !year || rate === undefined) {
+        if (!effectiveYear || !year || Number.isNaN(effectiveYearNum) || Number.isNaN(yearNum)) {
             return c.json({ message: 'Missing required parameters' }, 400);
         }
 
-        const result = await insertPIRService(effectiveYear, year, rate, orgUnitNo, createBy, isImport || 0);
+        if (yearNum > effectiveYearNum && (normalizedRate === null || Number.isNaN(normalizedRate))) {
+            return c.json({ success: false, message: 'Rate is required for year greater than effective year' }, 400);
+        }
+
+        const rateForInsert = normalizedRate === null || Number.isNaN(normalizedRate) ? 0 : normalizedRate;
+        const result = await insertPIRService(effectiveYear, year, rateForInsert, orgUnitNo, createBy, isImport || 0);
 
         // From legacy: if result has a 'result' column == 1, it means duplicate
         if (result && result.length > 0 && result[0].result === 1) {

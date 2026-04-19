@@ -31,9 +31,101 @@ interface EmployeeDirectoryItem {
     position: string;
 }
 
+type TableMeta = {
+    schemaName: string;
+    tableName: string;
+    fullName: string;
+    objectName: string;
+    columns: Map<string, string>;
+};
+
 type GenericRow = Record<string, unknown>;
 
+const INFO_TABLE_CANDIDATES = ['InfoData', 'infodata'];
+const POSITION_TABLE_CANDIDATES = ['InterfacePosition', 'interfaceposition'];
+const INFO_EMPLOYEE_COL_CANDIDATES = ['CODE', 'Code', 'EmployeeID', 'EmployeeId'];
+const INFO_NAME_COL_CANDIDATES = ['FULLNAMETH', 'FullNameTH', 'NameAll', 'Name'];
+const INFO_POSITION_NAME_COL_CANDIDATES = ['POSNAME', 'PosName', 'PositionName', 'Position'];
+const INFO_POSITION_COL_CANDIDATES = ['POSCODE', 'PosCode', 'PositionID', 'PositionCode'];
+const INFO_RETIRE_YEAR_COL_CANDIDATES = ['RETIREYEAR', 'RetireYear'];
+const POSITION_ID_COL_CANDIDATES = ['PositionID', 'POSCODE', 'PosCode', 'PositionCode'];
+const POSITION_SIGN_POS_COL_CANDIDATES = ['SignPos', 'SignPOS', 'SignPosition', 'SignPosFlag'];
+const POSITION_EMPLOYEE_COL_CANDIDATES = ['EmployeeID', 'EmployeeId', 'CODE', 'Code'];
+const POSITION_BEGIN_DATE_COL_CANDIDATES = ['BeginDate', 'StartDate', 'FromDate', 'EffectiveStartDate'];
+const POSITION_END_DATE_COL_CANDIDATES = ['EndDate', 'ToDate', 'EffectiveEndDate'];
+
+const escapeSqlIdentifier = (value: string): string => `[${value.replace(/]/g, ']]')}]`;
+const escapeSqlString = (value: string): string => value.replace(/'/g, "''");
+const toTrimText = (value: unknown): string => String(value || '').trim();
+
+const pickColumnName = (columns: Map<string, string>, candidates: string[]): string | null => {
+    for (const candidate of candidates) {
+        const found = columns.get(candidate.toLowerCase());
+        if (found) return found;
+    }
+    return null;
+};
+
 class DelayService {
+    private async getTableMeta(
+        pool: sql.ConnectionPool,
+        tableCandidates: string[]
+    ): Promise<TableMeta | null> {
+        if (!tableCandidates.length) return null;
+
+        const inList = tableCandidates.map((name) => `'${escapeSqlString(name.toLowerCase())}'`).join(',');
+        const tableRes = await pool.request().query(`
+            SELECT s.name AS schema_name, t.name AS table_name
+            FROM sys.tables t
+            INNER JOIN sys.schemas s ON s.schema_id = t.schema_id
+            WHERE LOWER(t.name) IN (${inList})
+        `);
+
+        const rows = Array.isArray(tableRes.recordset)
+            ? (tableRes.recordset as GenericRow[])
+            : [];
+        if (!rows.length) return null;
+
+        let selected: GenericRow | null = null;
+        for (const candidate of tableCandidates) {
+            selected = rows.find((row) => toTrimText(row.table_name).toLowerCase() === candidate.toLowerCase()) || null;
+            if (selected) break;
+        }
+        if (!selected) selected = rows[0];
+
+        const schemaName = toTrimText(selected.schema_name);
+        const tableName = toTrimText(selected.table_name);
+        if (!schemaName || !tableName) return null;
+
+        const objectName = `${schemaName}.${tableName}`;
+        const columnsRes = await pool.request()
+            .input('objectName', sql.NVarChar(300), objectName)
+            .query(`
+                SELECT c.name
+                FROM sys.columns c
+                WHERE c.object_id = OBJECT_ID(@objectName)
+            `);
+
+        const columnRows = Array.isArray(columnsRes.recordset)
+            ? (columnsRes.recordset as GenericRow[])
+            : [];
+
+        const columns = new Map<string, string>();
+        columnRows.forEach((row) => {
+            const colName = toTrimText(row.name);
+            if (!colName) return;
+            columns.set(colName.toLowerCase(), colName);
+        });
+
+        return {
+            schemaName,
+            tableName,
+            objectName,
+            fullName: `${escapeSqlIdentifier(schemaName)}.${escapeSqlIdentifier(tableName)}`,
+            columns
+        };
+    }
+
     private getFirstNonEmpty(row: GenericRow, keys: string[]): string {
         for (const key of keys) {
             const raw = row[key];
@@ -95,6 +187,229 @@ class DelayService {
         }
 
         return directory;
+    }
+
+    private async getEmployeeOptionsFromInfoData(retireYear?: number, keyword?: string): Promise<DelayEmployeeOption[]> {
+        const pool = await poolPromise;
+        const infoMeta = await this.getTableMeta(pool, INFO_TABLE_CANDIDATES);
+        const positionMeta = await this.getTableMeta(pool, POSITION_TABLE_CANDIDATES);
+
+        if (!infoMeta || !positionMeta) {
+            throw new Error('InfoData/InterfacePosition table not found');
+        }
+
+        const infoEmployeeCol = pickColumnName(infoMeta.columns, INFO_EMPLOYEE_COL_CANDIDATES);
+        const infoNameCol = pickColumnName(infoMeta.columns, INFO_NAME_COL_CANDIDATES);
+        const infoPositionNameCol = pickColumnName(infoMeta.columns, INFO_POSITION_NAME_COL_CANDIDATES);
+        const infoPositionCol = pickColumnName(infoMeta.columns, INFO_POSITION_COL_CANDIDATES);
+        const infoRetireYearCol = pickColumnName(infoMeta.columns, INFO_RETIRE_YEAR_COL_CANDIDATES);
+
+        const positionIdCol = pickColumnName(positionMeta.columns, POSITION_ID_COL_CANDIDATES);
+        const positionSignPosCol = pickColumnName(positionMeta.columns, POSITION_SIGN_POS_COL_CANDIDATES);
+        const positionEmployeeCol = pickColumnName(positionMeta.columns, POSITION_EMPLOYEE_COL_CANDIDATES);
+        const positionBeginDateCol = pickColumnName(positionMeta.columns, POSITION_BEGIN_DATE_COL_CANDIDATES);
+        const positionEndDateCol = pickColumnName(positionMeta.columns, POSITION_END_DATE_COL_CANDIDATES);
+
+        if (!infoEmployeeCol || !infoNameCol || !infoPositionNameCol || !infoPositionCol || !infoRetireYearCol || !positionIdCol || !positionSignPosCol) {
+            throw new Error('InfoData/InterfacePosition required columns not found');
+        }
+
+        const positionOrderFields: string[] = [];
+        if (positionEndDateCol) {
+            positionOrderFields.push(`TRY_CONVERT(date, p.${escapeSqlIdentifier(positionEndDateCol)}) DESC`);
+        }
+        if (positionBeginDateCol) {
+            positionOrderFields.push(`TRY_CONVERT(date, p.${escapeSqlIdentifier(positionBeginDateCol)}) DESC`);
+        }
+        positionOrderFields.push(`LTRIM(RTRIM(CAST(p.${escapeSqlIdentifier(positionIdCol)} AS nvarchar(64)))) DESC`);
+        const positionOrderBy = positionOrderFields.join(', ');
+
+        const keywordLike = `%${(keyword || '').trim()}%`;
+        const request = pool.request()
+            .input('RetireYear', sql.Int, typeof retireYear === 'number' && Number.isFinite(retireYear) ? retireYear : null)
+            .input('KeywordLike', sql.NVarChar(128), keywordLike);
+
+        const query = `
+            ;WITH PositionDedup AS (
+                SELECT
+                    LTRIM(RTRIM(CAST(p.${escapeSqlIdentifier(positionIdCol)} AS nvarchar(64)))) AS position_id,
+                    ${positionEmployeeCol ? `LTRIM(RTRIM(CAST(p.${escapeSqlIdentifier(positionEmployeeCol)} AS nvarchar(32))))` : "N''"} AS employee_id,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY LTRIM(RTRIM(CAST(p.${escapeSqlIdentifier(positionIdCol)} AS nvarchar(64))))
+                        ORDER BY ${positionOrderBy}
+                    ) AS rn
+                FROM ${positionMeta.fullName} p
+                WHERE TRY_CONVERT(int, p.${escapeSqlIdentifier(positionSignPosCol)}) = 100
+            ),
+            InfoDataDedup AS (
+                SELECT
+                    LTRIM(RTRIM(CAST(i.${escapeSqlIdentifier(infoEmployeeCol)} AS nvarchar(32)))) AS employee_id,
+                    LTRIM(RTRIM(COALESCE(CAST(i.${escapeSqlIdentifier(infoNameCol)} AS nvarchar(200)), N''))) AS employee_name,
+                    LTRIM(RTRIM(COALESCE(CAST(i.${escapeSqlIdentifier(infoPositionNameCol)} AS nvarchar(200)), N''))) AS pos_name,
+                    LTRIM(RTRIM(CAST(i.${escapeSqlIdentifier(infoPositionCol)} AS nvarchar(64)))) AS position_id,
+                    TRY_CONVERT(int, i.${escapeSqlIdentifier(infoRetireYearCol)}) AS retire_year,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY LTRIM(RTRIM(CAST(i.${escapeSqlIdentifier(infoPositionCol)} AS nvarchar(64))))
+                        ORDER BY TRY_CONVERT(int, i.${escapeSqlIdentifier(infoRetireYearCol)}) DESC,
+                                 LTRIM(RTRIM(CAST(i.${escapeSqlIdentifier(infoEmployeeCol)} AS nvarchar(32)))) DESC
+                    ) AS rn
+                FROM ${infoMeta.fullName} i
+                WHERE (@RetireYear IS NULL OR TRY_CONVERT(int, i.${escapeSqlIdentifier(infoRetireYearCol)}) = @RetireYear)
+            )
+            SELECT
+                src.employee_id,
+                MAX(src.employee_name) AS employee_name,
+                MAX(src.pos_name) AS pos_name
+            FROM (
+                SELECT
+                    COALESCE(NULLIF(i.employee_id, ''), NULLIF(p.employee_id, '')) AS employee_id,
+                    NULLIF(i.employee_name, '') AS employee_name,
+                    NULLIF(i.pos_name, '') AS pos_name
+                FROM PositionDedup p
+                INNER JOIN InfoDataDedup i ON i.position_id = p.position_id AND i.rn = 1
+                WHERE p.rn = 1
+            ) src
+            WHERE src.employee_id IS NOT NULL
+              AND src.employee_id <> ''
+              AND (
+                    @KeywordLike = '%%'
+                    OR src.employee_id LIKE @KeywordLike
+                    OR COALESCE(src.employee_name, '') LIKE @KeywordLike
+                    OR COALESCE(src.pos_name, '') LIKE @KeywordLike
+                  )
+            GROUP BY src.employee_id
+            ORDER BY src.employee_id ASC
+        `;
+
+        const result = await request.query(query);
+        const rows = Array.isArray(result.recordset) ? (result.recordset as GenericRow[]) : [];
+
+        return rows
+            .map((row) => {
+                const employeeId = this.getFirstNonEmpty(row, ['employee_id', 'EmployeeID']);
+                if (!employeeId) return null;
+
+                const name = this.getFirstNonEmpty(row, ['employee_name', 'EmployeeName']) || employeeId;
+                const position = this.getFirstNonEmpty(row, ['pos_name', 'PosName']);
+
+                return {
+                    value: employeeId,
+                    label: `${employeeId} - ${name}`,
+                    name,
+                    position
+                };
+            })
+            .filter((item): item is DelayEmployeeOption => item !== null);
+    }
+
+    async getRetireYearOptions(): Promise<number[]> {
+        const pool = await poolPromise;
+
+        try {
+            const infoMeta = await this.getTableMeta(pool, INFO_TABLE_CANDIDATES);
+            const positionMeta = await this.getTableMeta(pool, POSITION_TABLE_CANDIDATES);
+
+            if (infoMeta && positionMeta) {
+                const infoRetireYearCol = pickColumnName(infoMeta.columns, INFO_RETIRE_YEAR_COL_CANDIDATES);
+                const infoPositionCol = pickColumnName(infoMeta.columns, INFO_POSITION_COL_CANDIDATES);
+                const positionIdCol = pickColumnName(positionMeta.columns, POSITION_ID_COL_CANDIDATES);
+                const positionSignPosCol = pickColumnName(positionMeta.columns, POSITION_SIGN_POS_COL_CANDIDATES);
+
+                if (infoRetireYearCol && infoPositionCol && positionIdCol && positionSignPosCol) {
+                    const result = await pool.request().query(`
+                        SELECT DISTINCT
+                            TRY_CONVERT(int, i.${escapeSqlIdentifier(infoRetireYearCol)}) AS retire_year
+                        FROM ${infoMeta.fullName} i
+                        INNER JOIN ${positionMeta.fullName} p
+                            ON LTRIM(RTRIM(CAST(p.${escapeSqlIdentifier(positionIdCol)} AS nvarchar(64)))) =
+                               LTRIM(RTRIM(CAST(i.${escapeSqlIdentifier(infoPositionCol)} AS nvarchar(64))))
+                        WHERE TRY_CONVERT(int, p.${escapeSqlIdentifier(positionSignPosCol)}) = 100
+                          AND TRY_CONVERT(int, i.${escapeSqlIdentifier(infoRetireYearCol)}) IS NOT NULL
+                        ORDER BY TRY_CONVERT(int, i.${escapeSqlIdentifier(infoRetireYearCol)}) ASC
+                    `);
+
+                    const years = Array.isArray(result.recordset)
+                        ? (result.recordset as GenericRow[])
+                            .map((row) => Number.parseInt(String(row.retire_year), 10))
+                            .filter((year) => Number.isFinite(year))
+                        : [];
+
+                    if (years.length > 0) {
+                        return years;
+                    }
+                }
+            }
+        } catch (error) {
+            console.warn('[DelayService.getRetireYearOptions] InfoData/interfaceposition source unavailable, fallback to MP_Delay', error);
+        }
+
+        try {
+            const fallbackResult = await pool.request().query(`
+                SELECT DISTINCT
+                    TRY_CONVERT(int, DelayYear) AS retire_year
+                FROM MP_Delay
+                WHERE TRY_CONVERT(int, DelayYear) IS NOT NULL
+                ORDER BY TRY_CONVERT(int, DelayYear) ASC
+            `);
+
+            return Array.isArray(fallbackResult.recordset)
+                ? (fallbackResult.recordset as GenericRow[])
+                    .map((row) => Number.parseInt(String(row.retire_year), 10))
+                    .filter((year) => Number.isFinite(year))
+                : [];
+        } catch (error) {
+            console.warn('[DelayService.getRetireYearOptions] MP_Delay fallback failed', error);
+            return [];
+        }
+    }
+
+    private async getEmployeeRetireYear(employeeId: string): Promise<number | null> {
+        const normalizedEmployeeId = toTrimText(employeeId);
+        if (!normalizedEmployeeId) return null;
+
+        const pool = await poolPromise;
+        const infoMeta = await this.getTableMeta(pool, INFO_TABLE_CANDIDATES);
+        const positionMeta = await this.getTableMeta(pool, POSITION_TABLE_CANDIDATES);
+        if (!infoMeta || !positionMeta) return null;
+
+        const infoEmployeeCol = pickColumnName(infoMeta.columns, INFO_EMPLOYEE_COL_CANDIDATES);
+        const infoPositionCol = pickColumnName(infoMeta.columns, INFO_POSITION_COL_CANDIDATES);
+        const infoRetireYearCol = pickColumnName(infoMeta.columns, INFO_RETIRE_YEAR_COL_CANDIDATES);
+        const positionIdCol = pickColumnName(positionMeta.columns, POSITION_ID_COL_CANDIDATES);
+        const positionSignPosCol = pickColumnName(positionMeta.columns, POSITION_SIGN_POS_COL_CANDIDATES);
+        const positionEmployeeCol = pickColumnName(positionMeta.columns, POSITION_EMPLOYEE_COL_CANDIDATES);
+
+        if (!infoEmployeeCol || !infoPositionCol || !infoRetireYearCol || !positionIdCol || !positionSignPosCol) {
+            return null;
+        }
+
+        const positionEmpMatch = positionEmployeeCol
+            ? `
+                OR LTRIM(RTRIM(CAST(p.${escapeSqlIdentifier(positionEmployeeCol)} AS nvarchar(32)))) = @EmployeeID
+            `
+            : '';
+
+        const result = await pool.request()
+            .input('EmployeeID', sql.VarChar(32), normalizedEmployeeId)
+            .query(`
+                SELECT TOP 1
+                    TRY_CONVERT(int, i.${escapeSqlIdentifier(infoRetireYearCol)}) AS retire_year
+                FROM ${infoMeta.fullName} i
+                INNER JOIN ${positionMeta.fullName} p
+                    ON LTRIM(RTRIM(CAST(p.${escapeSqlIdentifier(positionIdCol)} AS nvarchar(64)))) =
+                       LTRIM(RTRIM(CAST(i.${escapeSqlIdentifier(infoPositionCol)} AS nvarchar(64))))
+                WHERE TRY_CONVERT(int, p.${escapeSqlIdentifier(positionSignPosCol)}) = 100
+                  AND (
+                    LTRIM(RTRIM(CAST(i.${escapeSqlIdentifier(infoEmployeeCol)} AS nvarchar(32)))) = @EmployeeID
+                    ${positionEmpMatch}
+                  )
+                  AND TRY_CONVERT(int, i.${escapeSqlIdentifier(infoRetireYearCol)}) IS NOT NULL
+                ORDER BY TRY_CONVERT(int, i.${escapeSqlIdentifier(infoRetireYearCol)}) DESC
+            `);
+
+        const retireYearRaw = result.recordset?.[0]?.retire_year;
+        const retireYear = Number.parseInt(String(retireYearRaw), 10);
+        return Number.isFinite(retireYear) ? retireYear : null;
     }
 
     private mapDelayRows(rows: GenericRow[], directory: Map<string, EmployeeDirectoryItem>): DelayRecord[] {
@@ -171,10 +486,16 @@ class DelayService {
         return this.mapDelayRows(rows, directory);
     }
 
-    async getEmployeeOptions(keyword?: string): Promise<DelayEmployeeOption[]> {
-        const directory = await this.getEmployeeDirectory();
+    async getEmployeeOptions(keyword?: string, retireYear?: number): Promise<DelayEmployeeOption[]> {
         const normalizedKeyword = (keyword || '').trim().toLowerCase();
 
+        try {
+            return await this.getEmployeeOptionsFromInfoData(retireYear, keyword);
+        } catch (error) {
+            console.warn('[DelayService.getEmployeeOptions] InfoData/interfaceposition source unavailable, fallback to employee directory', error);
+        }
+
+        const directory = await this.getEmployeeDirectory();
         const options = Array.from(directory.entries())
             .map(([employeeId, info]) => {
                 const name = info.name || employeeId;
@@ -196,6 +517,11 @@ class DelayService {
 
     async createDelayRecord(payload: DelayUpsertPayload): Promise<{ success: boolean; message?: string; data?: DelayRecord | null }> {
         const pool = await poolPromise;
+        const retireYear = await this.getEmployeeRetireYear(payload.employeeId);
+
+        if (retireYear !== null && payload.delayYear === retireYear) {
+            return { success: false, message: `ปีที่ทดต้องไม่เท่าปีเกษียณ (${retireYear})` };
+        }
 
         const duplicateCheck = await pool.request()
             .input('EmployeeID', sql.VarChar(8), payload.employeeId)
@@ -246,6 +572,11 @@ class DelayService {
 
     async updateDelayRecord(delayId: string, payload: DelayUpsertPayload): Promise<{ success: boolean; message?: string; data?: DelayRecord | null }> {
         const pool = await poolPromise;
+        const retireYear = await this.getEmployeeRetireYear(payload.employeeId);
+
+        if (retireYear !== null && payload.delayYear === retireYear) {
+            return { success: false, message: `ปีที่ทดต้องไม่เท่าปีเกษียณ (${retireYear})` };
+        }
 
         const duplicateCheck = await pool.request()
             .input('DelayID', sql.VarChar(18), delayId)
