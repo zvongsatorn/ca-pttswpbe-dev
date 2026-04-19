@@ -53,6 +53,10 @@ export const exportDashboardExcel = async (c: Context) => {
         const isSecondment = isSecondmentId - 1; 
 
         const division = c.req.query('division') || '';
+        const orgUnits = (c.req.query('orgUnits') || '')
+            .split(',')
+            .map(v => v.trim())
+            .filter(Boolean);
 
         if (!effectiveMonth || !effectiveYear || !employeeId) {
             return c.json({ status: 400, message: "Missing required parameters" }, 400);
@@ -64,7 +68,8 @@ export const exportDashboardExcel = async (c: Context) => {
             employeeId,
             userGroupNo,
             isSecondment,
-            division
+            division,
+            orgUnits
         );
 
         // Generate Excel using ExcelJS
@@ -72,6 +77,15 @@ export const exportDashboardExcel = async (c: Context) => {
         const worksheet = workbook.addWorksheet('Dashboard');
 
         if (data && data.length > 0) {
+            const toNumber = (value: unknown): number | null => {
+                if (value === null || value === undefined || value === '') return null;
+                if (typeof value === 'number') return Number.isFinite(value) ? value : null;
+                const normalized = String(value).replace(/,/g, '').trim();
+                if (!normalized) return null;
+                const parsed = Number(normalized);
+                return Number.isFinite(parsed) ? parsed : null;
+            };
+
             // Define columns based on keys of the first row
             const columns = Object.keys(data[0]).map(key => ({
                 header: key,
@@ -80,16 +94,88 @@ export const exportDashboardExcel = async (c: Context) => {
             }));
             worksheet.columns = columns;
 
-            // Style headers
-            worksheet.getRow(1).font = { bold: true };
-            worksheet.getRow(1).fill = {
+            const rows = data as Record<string, unknown>[];
+
+            // Detect numeric columns for alignment/formatting and total row.
+            const nonNumericKeys = new Set(['ชื่อย่อ', 'รหัสหน่วยงาน', 'ชื่อหน่วยงาน', 'UnitAbbr', 'OrgUnitNo', 'UnitName']);
+            const numericKeys = columns
+                .map(col => String(col.key))
+                .filter((key) => {
+                    if (nonNumericKeys.has(key)) return false;
+                    let sawNumber = false;
+                    for (const row of rows) {
+                        const parsed = toNumber(row[key]);
+                        if (parsed === null) {
+                            if (row[key] === null || row[key] === undefined || row[key] === '') continue;
+                            return false;
+                        }
+                        sawNumber = true;
+                    }
+                    return sawNumber;
+                });
+            const numericKeySet = new Set(numericKeys);
+
+            // Normalize numeric cells to numbers so Excel aligns/calculates correctly.
+            const normalizedRows = rows.map((row) => {
+                const nextRow: Record<string, unknown> = { ...row };
+                numericKeys.forEach((key) => {
+                    const parsed = toNumber(row[key]);
+                    if (parsed !== null) {
+                        nextRow[key] = parsed;
+                    }
+                });
+                return nextRow;
+            });
+
+            // Add rows
+            worksheet.addRows(normalizedRows);
+
+            if (numericKeys.length > 0) {
+                const totalRow: Record<string, string | number> = {};
+                columns.forEach((col) => {
+                    totalRow[String(col.key)] = '';
+                });
+                if (columns.length > 0) {
+                    const firstKey = String(columns[0].key);
+                    totalRow[firstKey] = 'รวม';
+                }
+
+                numericKeys.forEach((key) => {
+                    const sum = rows.reduce((acc, row) => acc + (toNumber(row[key]) ?? 0), 0);
+                    totalRow[key] = sum;
+                });
+
+                const addedRow = worksheet.addRow(totalRow);
+                addedRow.font = { bold: true };
+                addedRow.fill = {
+                    type: 'pattern',
+                    pattern: 'solid',
+                    fgColor: { argb: 'FFF3F4F6' }
+                };
+            }
+
+            // Column alignment: text left, numeric right.
+            columns.forEach((col, index) => {
+                const key = String(col.key);
+                const worksheetColumn = worksheet.getColumn(index + 1);
+
+                if (numericKeySet.has(key)) {
+                    worksheetColumn.alignment = { horizontal: 'right', vertical: 'middle' };
+                    worksheetColumn.numFmt = '#,##0';
+                } else {
+                    worksheetColumn.alignment = { horizontal: 'left', vertical: 'middle' };
+                }
+            });
+
+            // Style header after column styles so header keeps centered alignment.
+            const headerRow = worksheet.getRow(1);
+            headerRow.font = { bold: true };
+            headerRow.fill = {
                 type: 'pattern',
                 pattern: 'solid',
                 fgColor: { argb: 'FFE0E0E0' }
             };
-
-            // Add rows
-            worksheet.addRows(data);
+            headerRow.alignment = { horizontal: 'center', vertical: 'middle' };
         } else {
             worksheet.addRow(['No data found']);
         }

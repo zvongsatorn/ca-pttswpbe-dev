@@ -98,7 +98,8 @@ export const getDashboardExcelDataService = async (
     employeeId: string,
     userGroupNo: string,
     isSecondment: number,
-    division: string
+    division: string,
+    orgUnits: string[] = []
 ) => {
     try {
         const pool = await poolPromise;
@@ -131,8 +132,23 @@ export const getDashboardExcelDataService = async (
         }
 
         const result = await request.execute('mp_DashboardReport4_excel');
+        const rows = result.recordset || [];
 
-        return result.recordset;
+        if (!orgUnits.length) {
+            return rows;
+        }
+
+        const unitSet = new Set(orgUnits.map(v => String(v).trim()).filter(Boolean));
+        return rows.filter((row: Record<string, unknown>) => {
+            const orgUnitNo = String(
+                row['รหัสหน่วยงาน'] ??
+                row.OrgUnitNo ??
+                row.OrgUnitID ??
+                row.orgUnitNo ??
+                ''
+            ).trim();
+            return unitSet.has(orgUnitNo);
+        });
     } catch (error) {
         console.error('Error in getDashboardExcelDataService:', error);
         throw error;
