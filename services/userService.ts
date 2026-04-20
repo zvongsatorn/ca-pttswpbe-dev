@@ -86,11 +86,26 @@ export const updateUserOtherService = async (employeeId: string, fullName: strin
 
 export const getUserWithPassword = async (employeeId: string) => {
     try {
+        const normalizedEmployeeId = String(employeeId || '').trim();
+        if (!normalizedEmployeeId) return null;
+
         const pool = await poolPromise;
         const result = await pool.request()
-            .input('EmployeeID', sql.VarChar, employeeId)
+            .input('EmployeeID', sql.VarChar, normalizedEmployeeId)
             .query('SELECT * FROM MP_User WHERE EmployeeID = @EmployeeID');
-        return result.recordset[0];
+
+        if (result.recordset[0]) return result.recordset[0];
+
+        // Fallback for case-sensitive databases: compare using normalized lowercase.
+        const fallback = await pool.request()
+            .input('EmployeeID', sql.VarChar, normalizedEmployeeId)
+            .query(`
+                SELECT TOP 1 *
+                FROM MP_User
+                WHERE LTRIM(RTRIM(LOWER(EmployeeID))) = LTRIM(RTRIM(LOWER(@EmployeeID)))
+            `);
+
+        return fallback.recordset[0] || null;
     } catch (error) {
         console.error('Error in getUserWithPassword:', error);
         return null;
@@ -99,11 +114,25 @@ export const getUserWithPassword = async (employeeId: string) => {
 
 export const checkUserOther = async (employeeId: string) => {
     try {
+        const normalizedEmployeeId = String(employeeId || '').trim();
+        if (!normalizedEmployeeId) return null;
+
         const pool = await poolPromise;
         const result = await pool.request()
-            .input('EmployeeID', sql.VarChar, employeeId)
+            .input('EmployeeID', sql.VarChar, normalizedEmployeeId)
             .query('SELECT * FROM MP_UserOther WHERE EmployeeID = @EmployeeID');
-        return result.recordset[0];
+
+        if (result.recordset[0]) return result.recordset[0];
+
+        const fallback = await pool.request()
+            .input('EmployeeID', sql.VarChar, normalizedEmployeeId)
+            .query(`
+                SELECT TOP 1 *
+                FROM MP_UserOther
+                WHERE LTRIM(RTRIM(LOWER(EmployeeID))) = LTRIM(RTRIM(LOWER(@EmployeeID)))
+            `);
+
+        return fallback.recordset[0] || null;
     } catch (error) {
         console.error('Error in checkUserOther:', error);
         return null;

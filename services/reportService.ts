@@ -1052,8 +1052,15 @@ export const getReport05DataService = async (
         const selectedDivisionValues = splitCsvValues(division);
         const selectedOrgUnitValues = splitCsvValues(orgUnitNo);
 
-        const fromDate = new Date(fromDateStr);
-        const toDate = new Date(toDateStr);
+        const fromDateRaw = new Date(fromDateStr);
+        const toDateRaw = new Date(toDateStr);
+
+        if (Number.isNaN(fromDateRaw.getTime()) || Number.isNaN(toDateRaw.getTime())) {
+            throw new Error('Invalid report5 date range');
+        }
+
+        const fromDate = fromDateRaw;
+        const toDate = toDateRaw;
 
         request.input('FromDate', sql.DateTime, fromDate);
         request.input('ToDate', sql.DateTime, toDate);

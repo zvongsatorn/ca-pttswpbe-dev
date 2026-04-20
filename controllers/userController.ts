@@ -55,7 +55,7 @@ export const insertUserOther = async (c: Context) => {
 
 export const deleteUserOther = async (c: Context) => {
     try {
-        const employeeId = c.req.param('employeeId');
+        const employeeId = String(c.req.param('employeeId') || '').trim();
         const updateBy = c.req.query('updateBy') || '';
 
         if (!employeeId || !updateBy) {
@@ -72,7 +72,7 @@ export const deleteUserOther = async (c: Context) => {
 
 export const updateUserOther = async (c: Context) => {
     try {
-        const employeeId = c.req.param('employeeId');
+        const employeeId = String(c.req.param('employeeId') || '').trim();
         const body = await c.req.json();
         const { fullName, email, updateBy } = body;
         

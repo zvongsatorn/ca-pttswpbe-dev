@@ -34,6 +34,8 @@ export const getUnitsByRoleService = async (empId: string, roleId: string) => {
                 id: row.OrgUnitNo,
                 name: row.UnitName,
                 unitText: row.UnitText, // e.g. "OrgUnitNo UnitName (Abbr)"
+                parentOrgUnitNo: row.ParentOrgUnitNo ? String(row.ParentOrgUnitNo).trim() : null,
+                ParentOrgUnitNo: row.ParentOrgUnitNo ? String(row.ParentOrgUnitNo).trim() : null,
                 IsAssistant: row.IsAssistant ?? 0,
                 IsUnder: row.IsUnder ?? 0,
                 IsSecondment: row.IsSecondment ?? 0
@@ -125,6 +127,57 @@ export const getAllUnitsByEffectiveDateService = async (effectiveDate: string) =
         return [];
     } catch (error) {
         console.error('Error executing mp_UnitGetByEffectiveDate:', error);
+        throw error;
+    }
+};
+
+export interface TransferUnitsByReceiveParams {
+    effectiveDate: string;
+    division: string;
+    orgUnitReceive: string;
+    userGroupNo: string;
+    employeeId: string;
+    selectType?: number;
+}
+
+/**
+ * Service for transfer type 1 options (legacy parity with DataCombo/GetUnitComboByUnitReceive)
+ * Executes mp_UnitGetByLineAndUnitLvlAndEffectivePeriod using:
+ * - division (line org unit)
+ * - orgUnitReceive
+ * - user/group context
+ * - effective date
+ */
+export const getTransferUnitsByReceiveService = async (params: TransferUnitsByReceiveParams) => {
+    try {
+        const pool = await poolPromise;
+        const request = new sql.Request(pool);
+
+        request.input('EffectiveDate', sql.Date, toSqlDateOnly(params.effectiveDate));
+        request.input('division', sql.VarChar(8), params.division || null);
+        request.input('OrgUnitNo', sql.VarChar(8), params.orgUnitReceive || null);
+        request.input('UserGroupNO', sql.VarChar(2), params.userGroupNo);
+        request.input('EmployeeID', sql.VarChar(8), params.employeeId);
+        request.input('p_SelectType', sql.Int, Number.isFinite(params.selectType) ? Number(params.selectType) : 0);
+
+        const result = await request.execute('mp_UnitGetByLineAndUnitLvlAndEffectivePeriod');
+
+        if (result && result.recordset) {
+            return result.recordset.map(row => ({
+                id: row.OrgUnitNo,
+                name: row.UnitName || row.OrgUnitNo,
+                unitText: row.UnitText || `${row.OrgUnitNo} ${row.UnitName || ''}`.trim(),
+                parentOrgUnitNo: row.ParentOrgUnitNo ? String(row.ParentOrgUnitNo).trim() : null,
+                ParentOrgUnitNo: row.ParentOrgUnitNo ? String(row.ParentOrgUnitNo).trim() : null,
+                OrgUnitNo: row.OrgUnitNo,
+                UnitName: row.UnitName || row.OrgUnitNo,
+                UnitAbbr: row.UnitAbbr || row.OrgUnitNo,
+            }));
+        }
+
+        return [];
+    } catch (error) {
+        console.error('Error executing mp_UnitGetByLineAndUnitLvlAndEffectivePeriod:', error);
         throw error;
     }
 };

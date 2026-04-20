@@ -1,5 +1,6 @@
 import { Context } from 'hono';
 import bcrypt from 'bcrypt';
+import { createHash } from 'crypto';
 
 import jwt from 'jsonwebtoken';
 import configService from '../services/configService.js';
@@ -11,8 +12,8 @@ class AuthController {
     login = async (c: Context) => {
         try {
             const body = await c.req.json();
-            let EmployeeID: string = body.EmployeeID || body.employeeID;
-            const Password = body.Password || body.password;
+            let EmployeeID: string = String(body.EmployeeID || body.employeeID || '').trim();
+            const Password = String(body.Password || body.password || '');
 
             if (EmployeeID && /^\d+$/.test(EmployeeID)) {
                 EmployeeID = EmployeeID.padStart(8, '0');
@@ -22,22 +23,77 @@ class AuthController {
                 return c.json({ message: 'EmployeeID and Password are required' }, 400);
             }
 
-
-
-
-            // 1. Authenticate / Check Existence
+            // Admin mode: validate by existence in MP_User only.
             const userData: any = await userService.getUserWithPassword(EmployeeID);
-
             if (!userData) {
-                return c.json({ message: 'User not found' }, 404);
+                return c.json({ message: 'User not found in MP_User' }, 404);
             }
 
-            // 2. Validate Password
-            if (!userData.Password) {
+            const extractPassword = (record: Record<string, unknown>): string => {
+                const entries = Object.entries(record || {});
+                const scoreKey = (key: string): number => {
+                    const k = key.toLowerCase();
+                    if (k === 'password') return 100;
+                    if (k === 'passwordhash') return 95;
+                    if (k === 'userpassword') return 90;
+                    if (k === 'pwd') return 85;
+                    if (k.includes('password')) return 80;
+                    if (k.includes('pwd')) return 75;
+                    return 0;
+                };
+
+                const candidates = entries
+                    .map(([key, value]) => ({ key, value, score: scoreKey(key) }))
+                    .filter((item) => item.score > 0)
+                    .sort((a, b) => b.score - a.score);
+
+                for (const item of candidates) {
+                    const value = item.value;
+                    if (typeof value === 'string' && value.trim()) return value.trim();
+                    if (typeof value === 'number') return String(value);
+                    if (Buffer.isBuffer(value)) {
+                        const asUtf8 = value.toString('utf8').trim();
+                        if (asUtf8) return asUtf8;
+                    }
+                }
+
+                return '';
+            };
+
+            const storedPassword = extractPassword(userData as Record<string, unknown>);
+
+            if (!storedPassword) {
+                console.warn(
+                    `[Login] Password field not found/empty in MP_User for ${EmployeeID}. Available keys: ${Object.keys(userData || {}).join(', ')}`
+                );
                 return c.json({ message: 'User does not have a local password set' }, 401);
             }
 
-            const isPasswordValid = await bcrypt.compare(Password, userData.Password);
+            const verifyLegacyHash = (input: string, stored: string): boolean => {
+                const md5 = createHash('md5').update(input).digest('hex');
+                const sha1 = createHash('sha1').update(input).digest('hex');
+                const sha256 = createHash('sha256').update(input).digest('hex');
+                const md5b64 = createHash('md5').update(input).digest('base64');
+                const sha1b64 = createHash('sha1').update(input).digest('base64');
+                const sha256b64 = createHash('sha256').update(input).digest('base64');
+
+                const candidateSet = new Set<string>([
+                    input,
+                    md5, md5.toUpperCase(),
+                    sha1, sha1.toUpperCase(),
+                    sha256, sha256.toUpperCase(),
+                    md5b64, sha1b64, sha256b64,
+                    `{SHA}${sha1b64}`,
+                ]);
+
+                return candidateSet.has(stored);
+            };
+
+            let isPasswordValid = verifyLegacyHash(Password, storedPassword);
+            if (!isPasswordValid && /^\$2[aby]\$\d{2}\$/.test(storedPassword)) {
+                isPasswordValid = await bcrypt.compare(Password, storedPassword);
+            }
+
             if (!isPasswordValid) {
                 return c.json({ message: 'Invalid Admin credentials' }, 401);
             }

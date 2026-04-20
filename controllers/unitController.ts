@@ -1,5 +1,10 @@
 import { Context } from 'hono';
-import { getUnitsByRoleService, getLevelsByUnitService, getAllUnitsByEffectiveDateService } from '../services/unitService.js';
+import {
+    getUnitsByRoleService,
+    getLevelsByUnitService,
+    getAllUnitsByEffectiveDateService,
+    getTransferUnitsByReceiveService
+} from '../services/unitService.js';
 
 
 // Controller to handle fetching units by user ID and role
@@ -73,6 +78,53 @@ export const getAllUnitsByEffectiveDate = async (c: Context) => {
         return c.json({
             success: false,
             message: 'Internal server error while fetching units',
+            error: error.message
+        }, 500);
+    }
+};
+
+export const getTransferUnitsByReceive = async (c: Context) => {
+    try {
+        const effectiveDate = c.req.query('effectiveDate');
+        const division = c.req.query('division') || '';
+        const orgUnitReceive = c.req.query('orgUnitReceive') || '';
+        const userGroupNo = c.req.query('userGroupNo') || '';
+        const employeeId = c.req.query('employeeId') || '';
+        const selectTypeRaw = c.req.query('selectType') || '0';
+        const parsedSelectType = Number.parseInt(selectTypeRaw, 10);
+        const selectType = Number.isNaN(parsedSelectType) ? 0 : parsedSelectType;
+
+        if (!effectiveDate || !userGroupNo || !employeeId) {
+            return c.json({
+                message: 'Missing effectiveDate, userGroupNo, or employeeId parameter'
+            }, 400);
+        }
+
+        if (!division || !orgUnitReceive) {
+            return c.json({
+                success: true,
+                data: []
+            }, 200);
+        }
+
+        const result = await getTransferUnitsByReceiveService({
+            effectiveDate,
+            division,
+            orgUnitReceive,
+            userGroupNo,
+            employeeId,
+            selectType
+        });
+
+        return c.json({
+            success: true,
+            data: result
+        }, 200);
+    } catch (error: any) {
+        console.error('Error fetching transfer units by receive:', error);
+        return c.json({
+            success: false,
+            message: 'Internal server error while fetching transfer units',
             error: error.message
         }, 500);
     }

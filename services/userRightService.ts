@@ -19,23 +19,34 @@ class UserRightService {
             request.input('UserGroupNo', sql.NVarChar, userGroupNo !== 'all' ? userGroupNo : null);
             const result = await request.execute('mp_OrgUnitInGroupGet');
             
-            // Group by OrgUnitID for frontend expectations
-            const grouped = result.recordset.reduce((acc: any[], current: any) => {
-                let unit = acc.find(item => item.OrgUnitID === current.OrgUnitID);
-                if (!unit) {
-                    unit = { OrgUnitID: current.OrgUnitID, users: [] };
-                    acc.push(unit);
-                }
-                if (current.EmployeeID) {
-                    unit.users.push({
-                        EmployeeID: current.EmployeeID,
-                        NameAll: current.NameAll || current.EmployeeID
-                    });
-                }
-                return acc;
-            }, []);
+            // Group by OrgUnitID and dedupe users by EmployeeID (case-insensitive).
+            const groupedMap = new Map<string, { OrgUnitID: string; users: { EmployeeID: string; NameAll: string }[] }>();
+            const userIdSets = new Map<string, Set<string>>();
 
-            return grouped;
+            for (const current of result.recordset || []) {
+                const orgUnitId = String(current?.OrgUnitID ?? '').trim();
+                if (!orgUnitId) continue;
+
+                if (!groupedMap.has(orgUnitId)) {
+                    groupedMap.set(orgUnitId, { OrgUnitID: orgUnitId, users: [] });
+                    userIdSets.set(orgUnitId, new Set<string>());
+                }
+
+                const rawEmployeeId = String(current?.EmployeeID ?? '').trim();
+                if (!rawEmployeeId) continue;
+
+                const employeeKey = rawEmployeeId.toLowerCase();
+                const set = userIdSets.get(orgUnitId)!;
+                if (set.has(employeeKey)) continue;
+
+                set.add(employeeKey);
+                groupedMap.get(orgUnitId)!.users.push({
+                    EmployeeID: rawEmployeeId,
+                    NameAll: String(current?.NameAll ?? rawEmployeeId)
+                });
+            }
+
+            return Array.from(groupedMap.values());
         } catch (err) {
             console.error('Error in Service.getOrgUnitInGroup:', err);
             throw err;
