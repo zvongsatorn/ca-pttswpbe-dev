@@ -233,6 +233,28 @@ const getUnitSnapshotByEffectiveDate = async (
     }));
 };
 
+const getBgNameMapByEffectiveDate = async (
+    pool: typeof sql.ConnectionPool.prototype,
+    effectiveDate: Date
+): Promise<Map<string, string>> => {
+    const map = new Map<string, string>();
+    try {
+        const request = new sql.Request(pool);
+        request.input('p_CheckDate', sql.DateTime, effectiveDate);
+        const result = await request.execute('mp_BGGetByEffectivePeriod');
+        (result.recordset || []).forEach((row: any) => {
+            const bgNo = normalizeText(row?.BGNo);
+            const bgName = normalizeText(row?.BGName);
+            if (bgNo) {
+                map.set(bgNo, bgName || bgNo);
+            }
+        });
+    } catch (error) {
+        console.warn('[transactionService] Failed to resolve BG names by effective date:', error);
+    }
+    return map;
+};
+
 const getUnitDisplayLabel = (unit: UnitSnapshot | undefined): string => {
     if (!unit) return '';
     const abbr = normalizeText(unit.unitAbbr);
@@ -755,15 +777,24 @@ export const directApproveTransactionsService = async (transactionNos: string[],
 export const getBorrowTransactionsService = async (employeeId?: string) => {
     try {
         const pool = await poolPromise;
-        const req = new sql.Request(pool);
+        let result;
+        try {
+            const req = new sql.Request(pool);
+            if (employeeId) {
+                req.input('EmployeeID', sql.VarChar(20), employeeId);
+            }
+            result = await req.execute('mp_BorrowTransactionsGet');
+        } catch (error: any) {
+            const message = String(error?.message || '');
+            if (!message.includes('has no parameters and arguments were supplied')) {
+                throw error;
+            }
 
-        // Get all approved borrow transactions
-        if (employeeId) {
-            req.input('EmployeeID', sql.VarChar(20), employeeId);
-            // Don't filter by employee, show all approved borrows so any HR can return
+            // Fallback for DB where this SP has no input parameters
+            const reqNoParam = new sql.Request(pool);
+            result = await reqNoParam.execute('mp_BorrowTransactionsGet');
         }
 
-        const result = await req.execute('mp_BorrowTransactionsGet');
         if (!result.recordset?.length) return [];
 
         // Defensive dedupe: some DB joins (e.g. document item joins) can repeat the same borrow row.
@@ -848,11 +879,18 @@ export const getBorrowTransactionsService = async (employeeId?: string) => {
 
         // Resolve unit names
         const unitNameMap: Record<string, string> = {};
+        const unitBgMap: Record<string, string> = {};
+        const representativeEffDateRaw = records[0]?.EffectiveDate;
+        const representativeEffDateParsed = new Date(String(representativeEffDateRaw ?? ''));
+        const representativeEffDate = Number.isNaN(representativeEffDateParsed.getTime()) ? new Date() : representativeEffDateParsed;
+
+        const unitSnapshots = await getUnitSnapshotByEffectiveDate(pool, representativeEffDate);
+        const unitSnapshotMap = new Map(unitSnapshots.map((unit) => [unit.orgUnitNo, unit] as const));
+        const bgNameMap = await getBgNameMapByEffectiveDate(pool, representativeEffDate);
+
         for (const unitNo of unitNos) {
-            const effDateRaw = records[0]?.EffectiveDate;
-            const parsedEffDate = new Date(String(effDateRaw ?? ''));
-            const effDate = Number.isNaN(parsedEffDate.getTime()) ? new Date() : parsedEffDate;
-            unitNameMap[unitNo] = await getUnitName(pool, effDate, unitNo);
+            unitNameMap[unitNo] = await getUnitName(pool, representativeEffDate, unitNo);
+            unitBgMap[unitNo] = unitSnapshotMap.get(unitNo)?.bgNo || '';
         }
 
         // Resolve level group names
@@ -876,6 +914,16 @@ export const getBorrowTransactionsService = async (employeeId?: string) => {
             const returnedByPending = returnedAmountByBorrowTx.get(txNo) || 0;
             const totalReturned = Math.max(returnedByStatus, returnedByPending);
             const amount = toNumber(r.Amount);
+            const unitTransferBgNo = r.UnitTransfer ? (unitBgMap[r.UnitTransfer] || '') : '';
+            const unitReceiveBgNo = r.UnitReceive ? (unitBgMap[r.UnitReceive] || '') : '';
+            const businessUnitNo = String(
+                r.BusinessUnitNo ||
+                r.BusinessUnit ||
+                r.BGNo ||
+                unitTransferBgNo ||
+                unitReceiveBgNo ||
+                ''
+            ).trim();
 
             return {
                 ...r,
@@ -884,6 +932,14 @@ export const getBorrowTransactionsService = async (employeeId?: string) => {
                 LevelGroupFromName: r.LevelGroupFrom ? (levelGroupNameMap[r.LevelGroupFrom] || r.LevelGroupFrom) : '',
                 UnitTransferName: r.UnitTransfer ? (unitNameMap[r.UnitTransfer] || r.UnitTransfer) : '',
                 UnitReceiveName: r.UnitReceive ? (unitNameMap[r.UnitReceive] || r.UnitReceive) : '',
+                UnitTransferBGNo: unitTransferBgNo,
+                UnitTransferBGName: unitTransferBgNo ? (bgNameMap.get(unitTransferBgNo) || unitTransferBgNo) : '',
+                UnitReceiveBGNo: unitReceiveBgNo,
+                UnitReceiveBGName: unitReceiveBgNo ? (bgNameMap.get(unitReceiveBgNo) || unitReceiveBgNo) : '',
+                BusinessUnitNo: businessUnitNo,
+                BusinessUnitName: businessUnitNo ? (bgNameMap.get(businessUnitNo) || businessUnitNo) : '',
+                BGNo: businessUnitNo,
+                BGName: businessUnitNo ? (bgNameMap.get(businessUnitNo) || businessUnitNo) : '',
                 RemainingCount: Math.max(0, amount - totalReturned),
             };
         });
