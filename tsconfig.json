@@ -18,6 +18,7 @@
   ],
   "exclude": [
     "node_modules",
+    "research/**",
     "fixdb.ts",
     "tmp_sp.ts",
     "test*.ts",

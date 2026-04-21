@@ -44,8 +44,12 @@ app.use('/*', csrf({
         return false;
     }
 }));
-// Serve uploaded files statically
+// Serve uploaded files statically (supports both /uploads/* and legacy /api/uploads/* links)
 app.use('/uploads/*', serveStatic({ root: './' }));
+app.use('/api/uploads/*', serveStatic({
+    root: './',
+    rewriteRequestPath: (path) => path.replace(/^\/api/, '')
+}));
 
 // Routes
 import authRoutes from './routes/authRoutes.js';
