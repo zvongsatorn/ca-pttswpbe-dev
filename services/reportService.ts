@@ -893,9 +893,13 @@ export const getReport04DataService = async (
                 num('Vacant_8')
             ];
             const vacancyDiffLevels = frameStaffDiffLevels.map((value, i) => value - peopleNormalDiffLevels[i]);
-            const vacancyTotal = num('Vacant_Total') || (totalFrameTotal - totalPeopleNormal - num('Recruit_Amount', 'f_amount'));
-            const vacancyTotalDiff = totalFrameTotalDiff - totalPeopleNormalDiff;
             const recruitAmount = num('Recruit_Amount', 'f_amount');
+
+            // The DB's Vacant_Total is net of Recruit_Amount, while the visible
+            // vacancy level columns are not. Use the summed level vacancies here
+            // so the "รวม" column matches the displayed level breakdown.
+            const vacancyTotal = sumLevels(vacancyLevels);
+            const vacancyTotalDiff = sumLevels(vacancyDiffLevels);
 
             return {
                 key: `r4-${index + 1}`,
@@ -1012,7 +1016,7 @@ export const getReport04DataService = async (
                 vacancy_11_13: vacancyLevels[4],
                 vacancy_9_10: vacancyLevels[5],
                 vacancy_under_8: vacancyLevels[6],
-                vacancy_total: num('Vacant_Total', 'Blank_Amount', 'Vacancy_Total') || vacancyTotal,
+                vacancy_total: vacancyTotal,
 
                 vacancy_21_change: vacancyDiffLevels[0],
                 vacancy_18_20_change: vacancyDiffLevels[1],
@@ -1021,7 +1025,7 @@ export const getReport04DataService = async (
                 vacancy_11_13_change: vacancyDiffLevels[4],
                 vacancy_9_10_change: vacancyDiffLevels[5],
                 vacancy_under_8_change: vacancyDiffLevels[6],
-                vacancy_total_change: num('TBlank_Amount', 'TVacancy_Total') || vacancyTotalDiff,
+                vacancy_total_change: vacancyTotalDiff,
 
                 contact_out: num('Q_Contact', 'q_contact'),
                 contact_out_change: 0,
