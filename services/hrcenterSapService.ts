@@ -496,7 +496,7 @@ export const sendHRCenterToSapService = async (params: HRCenterSendToSapParams):
         if (resultCode === '1') {
             message = ftpEnabled
                 ? 'นำส่งเข้าบันทึกที่ระบบ SAP เสร็จสิ้น'
-                : 'สร้างไฟล์สำเร็จ (ไม่ส่ง FTP ตามค่า SendSapFTP)';
+                : 'สร้างไฟล์สำเร็จ (ไม่ส่ง FTP จากการตั้งค่าปิดไว้)';
         } else if (resultCode === '-1') {
             message = 'มีหน่วยงานที่ค่ากรอบติดลบ โปรดตรวจสอบก่อนนำส่งเข้าบันทึกที่ระบบ SAP';
         } else if (resultCode === '0') {
