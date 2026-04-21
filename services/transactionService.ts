@@ -216,6 +216,31 @@ const generateTransactionNo = async (
     return `${prefix}${String(runningNumber).padStart(4, '0')}`;
 };
 
+const generateDocumentNo = async (
+    transaction: sql.Transaction,
+    baseDate: Date
+): Promise<string> => {
+    const adYY = String(baseDate.getFullYear()).slice(-2);
+    const mm = String(baseDate.getMonth() + 1).padStart(2, '0');
+    const prefix = `DA${adYY}${mm}`;
+
+    const lastDocReq = new sql.Request(transaction);
+    lastDocReq.input('Prefix', sql.VarChar(10), prefix);
+    const lastDocRes = await lastDocReq.execute('mp_DocumentLastNoGet');
+
+    let runningNumber = 1;
+    if (lastDocRes.recordset && lastDocRes.recordset.length > 0 && lastDocRes.recordset[0].DocumentNo) {
+        const lastDocNo = String(lastDocRes.recordset[0].DocumentNo);
+        const lastRunningStr = lastDocNo.substring(prefix.length);
+        const parsed = Number.parseInt(lastRunningStr, 10);
+        if (Number.isFinite(parsed)) {
+            runningNumber = parsed + 1;
+        }
+    }
+
+    return `${prefix}${String(runningNumber).padStart(4, '0')}`;
+};
+
 const getUnitSnapshotByEffectiveDate = async (
     pool: typeof sql.ConnectionPool.prototype,
     effectiveDate: Date
@@ -747,14 +772,161 @@ export const directApproveTransactionsService = async (transactionNos: string[],
     try {
         const pool = await poolPromise;
         const today = new Date();
+        const safeUpdateBy = normalizeText(updateBy).substring(0, 20) || 'SYSTEM';
+        const normalizedTransactionNos = Array.from(
+            new Set(
+                (transactionNos || [])
+                    .map((txNo) => normalizeText(txNo).substring(0, 10))
+                    .filter(Boolean)
+            )
+        );
+
+        if (normalizedTransactionNos.length === 0) {
+            return { success: true, message: 'No transactions to approve.' };
+        }
+
         const transaction = new sql.Transaction(pool);
         await transaction.begin();
 
         try {
-            for (const txNo of transactionNos) {
+            const txLookupReq = new sql.Request(transaction);
+            const txNoPlaceholders = normalizedTransactionNos.map((txNo, idx) => {
+                const param = `TxNo${idx}`;
+                txLookupReq.input(param, sql.VarChar(10), txNo);
+                return `@${param}`;
+            });
+
+            const txLookupRes = await txLookupReq.query(`
+                SELECT
+                    t.TransactionNo,
+                    t.EffectiveDate,
+                    t.TransactionType,
+                    t.RefTransactionNo,
+                    CASE
+                        WHEN EXISTS (
+                            SELECT 1
+                            FROM MP_DocumentItems di WITH (NOLOCK)
+                            WHERE di.ItemID = t.TransactionNo
+                        ) THEN 1
+                        ELSE 0
+                    END AS HasDocument
+                FROM MP_Transactions t WITH (NOLOCK)
+                WHERE t.TransactionNo IN (${txNoPlaceholders.join(',')})
+            `);
+
+            const txRows: Array<{
+                TransactionNo: string;
+                EffectiveDate: Date | string | null;
+                TransactionType: number;
+                RefTransactionNo: string | null;
+                HasDocument: number;
+            }> = txLookupRes.recordset || [];
+
+            const returnRows = txRows.filter((row) => Number(row.TransactionType) === 7 && normalizeText(row.RefTransactionNo));
+            const parentDocByReturnTx = new Map<string, string>();
+            if (returnRows.length > 0) {
+                const returnParentReq = new sql.Request(transaction);
+                const returnPlaceholders = returnRows.map((row, idx) => {
+                    const param = `ReturnTx${idx}`;
+                    returnParentReq.input(param, sql.VarChar(10), normalizeText(row.TransactionNo).substring(0, 10));
+                    return `@${param}`;
+                });
+                const returnParentRes = await returnParentReq.query(`
+                    SELECT
+                        t.TransactionNo,
+                        dBorrow.DocumentNo AS ParentDocumentNo
+                    FROM MP_Transactions t WITH (NOLOCK)
+                    LEFT JOIN MP_DocumentItems diBorrow WITH (NOLOCK)
+                        ON diBorrow.ItemID = t.RefTransactionNo
+                    LEFT JOIN MP_Document dBorrow WITH (NOLOCK)
+                        ON dBorrow.DocumentNo = diBorrow.DocumentNo
+                    WHERE t.TransactionNo IN (${returnPlaceholders.join(',')})
+                `);
+                (returnParentRes.recordset || []).forEach((row: any) => {
+                    const txNo = normalizeText(row?.TransactionNo).substring(0, 10);
+                    const parentDocumentNo = normalizeText(row?.ParentDocumentNo).substring(0, 13);
+                    if (txNo && parentDocumentNo) {
+                        parentDocByReturnTx.set(txNo, parentDocumentNo);
+                    }
+                });
+            }
+
+            const rowsWithoutDocument = txRows.filter((row) => Number(row.HasDocument) !== 1);
+            if (rowsWithoutDocument.length > 0) {
+                let creatorFullname = safeUpdateBy;
+                let creatorEmail: string | null = null;
+                try {
+                    const creatorInfoReq = new sql.Request(transaction);
+                    creatorInfoReq.input('EmployeeID', sql.VarChar(20), safeUpdateBy);
+                    const creatorInfoRes = await creatorInfoReq.execute('mp_UserInfoGet');
+                    creatorFullname = normalizeText(creatorInfoRes.recordset?.[0]?.FullName) || safeUpdateBy;
+                    creatorEmail = normalizeText(creatorInfoRes.recordset?.[0]?.Email) || null;
+                } catch {
+                    creatorFullname = safeUpdateBy;
+                    creatorEmail = null;
+                }
+
+                const documentGroups = new Map<string, typeof rowsWithoutDocument>();
+                rowsWithoutDocument.forEach((row) => {
+                    const txNo = normalizeText(row.TransactionNo).substring(0, 10);
+                    if (!txNo) return;
+                    const parentDoc = Number(row.TransactionType) === 7 ? (parentDocByReturnTx.get(txNo) || '') : '';
+                    const groupKey = parentDoc || '__NO_PARENT__';
+                    const current = documentGroups.get(groupKey) || [];
+                    current.push(row);
+                    documentGroups.set(groupKey, current);
+                });
+
+                for (const [groupKey, groupedRows] of documentGroups.entries()) {
+                    if (!groupedRows.length) continue;
+
+                    const groupEffectiveDate = groupedRows.reduce<Date>((earliest, row) => {
+                        const parsed = new Date(String(row.EffectiveDate || ''));
+                        if (Number.isNaN(parsed.getTime())) return earliest;
+                        return parsed.getTime() < earliest.getTime() ? parsed : earliest;
+                    }, today);
+
+                    const documentNo = await generateDocumentNo(transaction, today);
+
+                    const docInsertReq = new sql.Request(transaction);
+                    docInsertReq.input('DocumentNo', sql.VarChar(13), documentNo);
+                    docInsertReq.input('EffectiveDate', sql.DateTime, groupEffectiveDate);
+                    docInsertReq.input('DocumentType', sql.Int, 1);
+                    docInsertReq.input('CreateBy', sql.VarChar(20), safeUpdateBy);
+                    docInsertReq.input('CreateDate', sql.DateTime, today);
+                    docInsertReq.input('ParentDocumentNo', sql.VarChar(13), groupKey === '__NO_PARENT__' ? null : groupKey);
+                    await docInsertReq.execute('mp_DocumentInsert');
+
+                    for (const row of groupedRows) {
+                        const itemId = normalizeText(row.TransactionNo).substring(0, 10);
+                        if (!itemId) continue;
+
+                        const creatorReq = new sql.Request(transaction);
+                        creatorReq.input('DocumentNo', sql.VarChar(13), documentNo);
+                        creatorReq.input('ItemID', sql.VarChar(10), itemId);
+                        creatorReq.input('Seqno', sql.Int, 0);
+                        creatorReq.input('EmployeeID', sql.VarChar(20), safeUpdateBy);
+                        creatorReq.input('Fullname', sql.NVarChar(200), creatorFullname);
+                        creatorReq.input('Email', sql.NVarChar(200), creatorEmail);
+                        creatorReq.input('UserGroupNo', sql.VarChar(2), null);
+                        creatorReq.input('AuditStatus', sql.Int, 2);
+                        creatorReq.input('UnitSide', sql.NVarChar(50), null);
+                        await creatorReq.execute('mp_DocumentItemsInsert');
+                    }
+
+                    const docUpdateReq = new sql.Request(transaction);
+                    docUpdateReq.input('DocumentNo', sql.VarChar(13), documentNo);
+                    docUpdateReq.input('DocumentStatus', sql.Int, 2);
+                    docUpdateReq.input('UpdateBy', sql.VarChar(20), safeUpdateBy);
+                    docUpdateReq.input('UpdateDate', sql.DateTime, today);
+                    await docUpdateReq.execute('mp_DocumentUpdateStatus');
+                }
+            }
+
+            for (const txNo of normalizedTransactionNos) {
                 const req = new sql.Request(transaction);
                 req.input('TransactionNo', sql.VarChar(10), txNo);
-                req.input('UpdateBy', sql.VarChar(20), updateBy);
+                req.input('UpdateBy', sql.VarChar(20), safeUpdateBy);
                 req.input('UpdateDate', sql.DateTime, today);
                 await req.execute('mp_TransactionsDirectApprove');
             }
