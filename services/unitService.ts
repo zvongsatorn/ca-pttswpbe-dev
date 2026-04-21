@@ -9,6 +9,107 @@ const toSqlDateOnly = (value: Date | string): Date => {
     return new Date(Date.UTC(parsed.getFullYear(), parsed.getMonth(), parsed.getDate(), 0, 0, 0, 0));
 };
 
+const normalizeUserGroupNo = (value: string): string => {
+    const trimmed = String(value || '').trim();
+    if (!trimmed) return '';
+    return /^\d+$/.test(trimmed) ? trimmed.padStart(2, '0') : trimmed.toUpperCase();
+};
+
+const isOtherUserGroup = (roleId: string): boolean => {
+    const normalized = normalizeUserGroupNo(roleId);
+    return normalized === '08' || normalized === '99' || normalized === 'OTHER';
+};
+
+const normalizeEmployeeCodeNoLeadingZero = (employeeId: string): string => {
+    const trimmed = String(employeeId || '').trim();
+    if (!trimmed) return '';
+    const withoutLeadingZero = trimmed.replace(/^0+/, '');
+    return withoutLeadingZero || '0';
+};
+
+const toTrimmedText = (value: unknown): string => String(value || '').trim();
+
+const resolveInfoDataTableFullName = async (pool: sql.ConnectionPool): Promise<string | null> => {
+    const result = await pool.request().query(`
+        SELECT TOP 1
+            QUOTENAME(s.name) + '.' + QUOTENAME(o.name) AS FullName
+        FROM sys.objects o
+        INNER JOIN sys.schemas s ON s.schema_id = o.schema_id
+        WHERE o.type IN ('U', 'V')
+          AND LOWER(o.name) = 'infodata'
+        ORDER BY CASE WHEN o.name = 'InfoData' THEN 0 ELSE 1 END
+    `);
+
+    const row = result.recordset?.[0];
+    const fullName = toTrimmedText(row?.FullName);
+    return fullName || null;
+};
+
+const getOtherUnitsFromInfoData = async (pool: sql.ConnectionPool, empId: string) => {
+    const employeeId = String(empId || '').trim();
+    if (!employeeId) return [];
+
+    const employeeCodeNoZero = normalizeEmployeeCodeNoLeadingZero(employeeId);
+    const infoDataTable = await resolveInfoDataTableFullName(pool);
+    if (!infoDataTable) {
+        console.warn('[getUnitsByRoleService] InfoData table not found for OTHER fallback');
+        return [];
+    }
+
+    const infoReq = new sql.Request(pool);
+    infoReq.input('EmployeeID', sql.VarChar(32), employeeId);
+    infoReq.input('EmployeeIDNoZero', sql.VarChar(32), employeeCodeNoZero);
+
+    const infoResult = await infoReq.query(`
+        SELECT DISTINCT
+            LTRIM(RTRIM(CAST(UNITCODE AS varchar(20)))) AS OrgUnitNo
+        FROM ${infoDataTable}
+        WHERE NULLIF(LTRIM(RTRIM(CAST(UNITCODE AS varchar(20)))), '') IS NOT NULL
+          AND LTRIM(RTRIM(CAST(CODE AS varchar(20)))) IN (@EmployeeID, @EmployeeIDNoZero)
+    `);
+
+    const orgUnitNos = Array.from(
+        new Set<string>(
+            (infoResult.recordset || [])
+                .map((row: any) => toTrimmedText(row?.OrgUnitNo))
+                .filter((code: string) => code !== '')
+        )
+    );
+
+    if (orgUnitNos.length === 0) {
+        return [];
+    }
+
+    const unitReq = new sql.Request(pool);
+    unitReq.input('EffectiveDate', sql.Date, toSqlDateOnly(new Date()));
+    const unitResult = await unitReq.execute('mp_UnitGetByEffectiveDate');
+
+    const unitMap = new Map<string, any>();
+    (unitResult.recordset || []).forEach((row: any) => {
+        const orgUnitNo = toTrimmedText(row?.OrgUnitNo);
+        if (!orgUnitNo) return;
+        unitMap.set(orgUnitNo, row);
+    });
+
+    return orgUnitNos.map((orgUnitNo) => {
+        const unit = unitMap.get(orgUnitNo);
+        const unitName = toTrimmedText(unit?.UnitName) || orgUnitNo;
+        const unitText = toTrimmedText(unit?.UnitText) || `${orgUnitNo} ${unitName}`.trim();
+        const parentOrgUnitNo = toTrimmedText(unit?.ParentOrgUnitNo) || null;
+
+        return {
+            id: orgUnitNo,
+            name: unitName,
+            unitText,
+            parentOrgUnitNo,
+            ParentOrgUnitNo: parentOrgUnitNo,
+            IsAssistant: 0,
+            IsUnder: 0,
+            IsSecondment: 0
+        };
+    });
+};
+
 
 /**
  * Service to execute the mp_UserInUnitAndGroupByEmployeeID stored procedure
@@ -19,6 +120,13 @@ const toSqlDateOnly = (value: Date | string): Date => {
 export const getUnitsByRoleService = async (empId: string, roleId: string) => {
     try {
         const pool = await poolPromise;
+        if (isOtherUserGroup(roleId)) {
+            const unitsFromInfoData = await getOtherUnitsFromInfoData(pool, empId);
+            if (unitsFromInfoData.length > 0) {
+                return unitsFromInfoData;
+            }
+        }
+
         const request = new sql.Request(pool);
 
         // Bind parameters matching the SP exactly: @EmployeeID, @UserGroupNo

@@ -36,13 +36,15 @@ type TableMeta = {
     tableName: string;
     fullName: string;
     objectName: string;
+    objectType: string;
+    parameterCount: number;
     columns: Map<string, string>;
 };
 
 type GenericRow = Record<string, unknown>;
 
 const INFO_TABLE_CANDIDATES = ['InfoData', 'infodata'];
-const POSITION_TABLE_CANDIDATES = ['InterfacePosition', 'interfaceposition'];
+const POSITION_TABLE_CANDIDATES = ['fn_InterfacePosition', 'InterfacePosition', 'interfaceposition'];
 const INFO_EMPLOYEE_COL_CANDIDATES = ['CODE', 'Code', 'EmployeeID', 'EmployeeId'];
 const INFO_NAME_COL_CANDIDATES = ['FULLNAMETH', 'FullNameTH', 'NameAll', 'Name'];
 const INFO_POSITION_NAME_COL_CANDIDATES = ['POSNAME', 'PosName', 'PositionName', 'Position'];
@@ -75,10 +77,22 @@ class DelayService {
 
         const inList = tableCandidates.map((name) => `'${escapeSqlString(name.toLowerCase())}'`).join(',');
         const tableRes = await pool.request().query(`
-            SELECT s.name AS schema_name, t.name AS table_name
-            FROM sys.tables t
-            INNER JOIN sys.schemas s ON s.schema_id = t.schema_id
-            WHERE LOWER(t.name) IN (${inList})
+            SELECT
+                o.object_id,
+                s.name AS schema_name,
+                o.name AS object_name,
+                o.type AS object_type,
+                ISNULL(params.parameter_count, 0) AS parameter_count
+            FROM sys.objects o
+            INNER JOIN sys.schemas s ON s.schema_id = o.schema_id
+            OUTER APPLY (
+                SELECT COUNT(1) AS parameter_count
+                FROM sys.parameters p
+                WHERE p.object_id = o.object_id
+                  AND p.parameter_id > 0
+            ) params
+            WHERE o.type IN ('U', 'IF', 'TF')
+              AND LOWER(o.name) IN (${inList})
         `);
 
         const rows = Array.isArray(tableRes.recordset)
@@ -88,22 +102,25 @@ class DelayService {
 
         let selected: GenericRow | null = null;
         for (const candidate of tableCandidates) {
-            selected = rows.find((row) => toTrimText(row.table_name).toLowerCase() === candidate.toLowerCase()) || null;
+            selected = rows.find((row) => toTrimText(row.object_name).toLowerCase() === candidate.toLowerCase()) || null;
             if (selected) break;
         }
         if (!selected) selected = rows[0];
 
         const schemaName = toTrimText(selected.schema_name);
-        const tableName = toTrimText(selected.table_name);
+        const tableName = toTrimText(selected.object_name);
+        const objectType = toTrimText(selected.object_type);
+        const objectId = Number(selected.object_id || 0);
+        const parameterCount = Number(selected.parameter_count || 0);
         if (!schemaName || !tableName) return null;
 
         const objectName = `${schemaName}.${tableName}`;
         const columnsRes = await pool.request()
-            .input('objectName', sql.NVarChar(300), objectName)
+            .input('objectId', sql.Int, objectId)
             .query(`
                 SELECT c.name
                 FROM sys.columns c
-                WHERE c.object_id = OBJECT_ID(@objectName)
+                WHERE c.object_id = @objectId
             `);
 
         const columnRows = Array.isArray(columnsRes.recordset)
@@ -122,8 +139,20 @@ class DelayService {
             tableName,
             objectName,
             fullName: `${escapeSqlIdentifier(schemaName)}.${escapeSqlIdentifier(tableName)}`,
+            objectType,
+            parameterCount: Number.isFinite(parameterCount) ? parameterCount : 0,
             columns
         };
+    }
+
+    private buildSqlSource(meta: TableMeta, effectiveDateParamName = '@EffectiveDate'): string {
+        if (meta.objectType === 'U') {
+            return meta.fullName;
+        }
+
+        const paramCount = Number.isFinite(meta.parameterCount) ? Math.max(0, meta.parameterCount) : 0;
+        const args = Array.from({ length: paramCount }, () => effectiveDateParamName).join(', ');
+        return `${meta.fullName}(${args})`;
     }
 
     private getFirstNonEmpty(row: GenericRow, keys: string[]): string {
@@ -195,8 +224,10 @@ class DelayService {
         const positionMeta = await this.getTableMeta(pool, POSITION_TABLE_CANDIDATES);
 
         if (!infoMeta || !positionMeta) {
-            throw new Error('InfoData/InterfacePosition table not found');
+            throw new Error('InfoData/fn_InterfacePosition source not found');
         }
+        const infoSource = this.buildSqlSource(infoMeta, '@EffectiveDate');
+        const positionSource = this.buildSqlSource(positionMeta, '@EffectiveDate');
 
         const infoEmployeeCol = pickColumnName(infoMeta.columns, INFO_EMPLOYEE_COL_CANDIDATES);
         const infoNameCol = pickColumnName(infoMeta.columns, INFO_NAME_COL_CANDIDATES);
@@ -211,7 +242,7 @@ class DelayService {
         const positionEndDateCol = pickColumnName(positionMeta.columns, POSITION_END_DATE_COL_CANDIDATES);
 
         if (!infoEmployeeCol || !infoNameCol || !infoPositionNameCol || !infoPositionCol || !infoRetireYearCol || !positionIdCol || !positionSignPosCol) {
-            throw new Error('InfoData/InterfacePosition required columns not found');
+            throw new Error('InfoData/fn_InterfacePosition required columns not found');
         }
 
         const positionOrderFields: string[] = [];
@@ -225,9 +256,11 @@ class DelayService {
         const positionOrderBy = positionOrderFields.join(', ');
 
         const keywordLike = `%${(keyword || '').trim()}%`;
+        const effectiveDate = new Date();
         const request = pool.request()
             .input('RetireYear', sql.Int, typeof retireYear === 'number' && Number.isFinite(retireYear) ? retireYear : null)
-            .input('KeywordLike', sql.NVarChar(128), keywordLike);
+            .input('KeywordLike', sql.NVarChar(128), keywordLike)
+            .input('EffectiveDate', sql.DateTime, effectiveDate);
 
         const query = `
             ;WITH PositionDedup AS (
@@ -238,7 +271,7 @@ class DelayService {
                         PARTITION BY LTRIM(RTRIM(CAST(p.${escapeSqlIdentifier(positionIdCol)} AS nvarchar(64))))
                         ORDER BY ${positionOrderBy}
                     ) AS rn
-                FROM ${positionMeta.fullName} p
+                FROM ${positionSource} p
                 WHERE TRY_CONVERT(int, p.${escapeSqlIdentifier(positionSignPosCol)}) = 100
             ),
             InfoDataDedup AS (
@@ -253,7 +286,7 @@ class DelayService {
                         ORDER BY TRY_CONVERT(int, i.${escapeSqlIdentifier(infoRetireYearCol)}) DESC,
                                  LTRIM(RTRIM(CAST(i.${escapeSqlIdentifier(infoEmployeeCol)} AS nvarchar(32)))) DESC
                     ) AS rn
-                FROM ${infoMeta.fullName} i
+                FROM ${infoSource} i
                 WHERE (@RetireYear IS NULL OR TRY_CONVERT(int, i.${escapeSqlIdentifier(infoRetireYearCol)}) = @RetireYear)
             )
             SELECT
@@ -310,17 +343,21 @@ class DelayService {
             const positionMeta = await this.getTableMeta(pool, POSITION_TABLE_CANDIDATES);
 
             if (infoMeta && positionMeta) {
+                const infoSource = this.buildSqlSource(infoMeta, '@EffectiveDate');
+                const positionSource = this.buildSqlSource(positionMeta, '@EffectiveDate');
                 const infoRetireYearCol = pickColumnName(infoMeta.columns, INFO_RETIRE_YEAR_COL_CANDIDATES);
                 const infoPositionCol = pickColumnName(infoMeta.columns, INFO_POSITION_COL_CANDIDATES);
                 const positionIdCol = pickColumnName(positionMeta.columns, POSITION_ID_COL_CANDIDATES);
                 const positionSignPosCol = pickColumnName(positionMeta.columns, POSITION_SIGN_POS_COL_CANDIDATES);
 
                 if (infoRetireYearCol && infoPositionCol && positionIdCol && positionSignPosCol) {
-                    const result = await pool.request().query(`
+                    const result = await pool.request()
+                        .input('EffectiveDate', sql.DateTime, new Date())
+                        .query(`
                         SELECT DISTINCT
                             TRY_CONVERT(int, i.${escapeSqlIdentifier(infoRetireYearCol)}) AS retire_year
-                        FROM ${infoMeta.fullName} i
-                        INNER JOIN ${positionMeta.fullName} p
+                        FROM ${infoSource} i
+                        INNER JOIN ${positionSource} p
                             ON LTRIM(RTRIM(CAST(p.${escapeSqlIdentifier(positionIdCol)} AS nvarchar(64)))) =
                                LTRIM(RTRIM(CAST(i.${escapeSqlIdentifier(infoPositionCol)} AS nvarchar(64))))
                         WHERE TRY_CONVERT(int, p.${escapeSqlIdentifier(positionSignPosCol)}) = 100
@@ -371,6 +408,8 @@ class DelayService {
         const infoMeta = await this.getTableMeta(pool, INFO_TABLE_CANDIDATES);
         const positionMeta = await this.getTableMeta(pool, POSITION_TABLE_CANDIDATES);
         if (!infoMeta || !positionMeta) return null;
+        const infoSource = this.buildSqlSource(infoMeta, '@EffectiveDate');
+        const positionSource = this.buildSqlSource(positionMeta, '@EffectiveDate');
 
         const infoEmployeeCol = pickColumnName(infoMeta.columns, INFO_EMPLOYEE_COL_CANDIDATES);
         const infoPositionCol = pickColumnName(infoMeta.columns, INFO_POSITION_COL_CANDIDATES);
@@ -391,11 +430,12 @@ class DelayService {
 
         const result = await pool.request()
             .input('EmployeeID', sql.VarChar(32), normalizedEmployeeId)
+            .input('EffectiveDate', sql.DateTime, new Date())
             .query(`
                 SELECT TOP 1
                     TRY_CONVERT(int, i.${escapeSqlIdentifier(infoRetireYearCol)}) AS retire_year
-                FROM ${infoMeta.fullName} i
-                INNER JOIN ${positionMeta.fullName} p
+                FROM ${infoSource} i
+                INNER JOIN ${positionSource} p
                     ON LTRIM(RTRIM(CAST(p.${escapeSqlIdentifier(positionIdCol)} AS nvarchar(64)))) =
                        LTRIM(RTRIM(CAST(i.${escapeSqlIdentifier(infoPositionCol)} AS nvarchar(64))))
                 WHERE TRY_CONVERT(int, p.${escapeSqlIdentifier(positionSignPosCol)}) = 100

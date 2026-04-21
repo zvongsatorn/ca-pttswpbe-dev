@@ -8,6 +8,8 @@ const execFileAsync = promisify(execFile);
 
 const OUTBOUND_DIR_NAME = 'Outbound';
 const OUTBOUND_FILE_NAME = 'Input_ZHROMI040.txt';
+const OUTBOUND_DIR_ENV_KEYS = ['HRCENTER_SAP_OUTBOUND_DIR', 'SAP_OUTBOUND_DIR'] as const;
+const OUTBOUND_DIR_DEFAULT_SEGMENTS = ['uploads', OUTBOUND_DIR_NAME] as const;
 const GO_LIVE_DATE = new Date(Date.UTC(2020, 1, 1, 0, 0, 0, 0)); // 01/02/2020
 
 type DbRow = Record<string, unknown>;
@@ -76,14 +78,21 @@ const isConfigTrue = (value: string): boolean => {
     return v === 'true' || v === '1' || v === 'y' || v === 'yes';
 };
 
-const getOutboundDir = (): string => path.join(process.cwd(), OUTBOUND_DIR_NAME);
+const resolveOutboundDir = (): string => {
+    for (const key of OUTBOUND_DIR_ENV_KEYS) {
+        const configured = String(process.env[key] ?? '').trim();
+        if (!configured) continue;
+        return path.isAbsolute(configured) ? configured : path.resolve(process.cwd(), configured);
+    }
+    return path.join(process.cwd(), ...OUTBOUND_DIR_DEFAULT_SEGMENTS);
+};
+
+const getOutboundDir = (): string => resolveOutboundDir();
 export const getHRCenterSapOutboundFilePath = (): string => path.join(getOutboundDir(), OUTBOUND_FILE_NAME);
 
 const ensureOutboundDirectory = async (): Promise<void> => {
     const dir = getOutboundDir();
-    if (!fs.existsSync(dir)) {
-        await fs.promises.mkdir(dir, { recursive: true });
-    }
+    await fs.promises.mkdir(dir, { recursive: true });
 };
 
 const createOrgUnitTable = (orgUnits: string[]): sql.Table => {
@@ -462,6 +471,10 @@ export const sendHRCenterToSapService = async (params: HRCenterSendToSapParams):
             await fs.promises.writeFile(outboundFilePath, textfile, { encoding: 'utf8' });
             fileReady = true;
         } catch (error) {
+            console.error('[HRCenter SAP] Failed to write outbound file', {
+                outboundFilePath: getHRCenterSapOutboundFilePath(),
+                error
+            });
             resultCode = '0';
             message = 'เขียนไฟล์ที่จะนำส่งระบบ SAP ไม่สำเร็จ โปรดติดต่อ Admin';
         }

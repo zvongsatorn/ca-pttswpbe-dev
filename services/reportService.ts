@@ -8,6 +8,8 @@ type TableMeta = {
     tableName: string;
     fullName: string;
     objectName: string;
+    objectType: string;
+    parameterCount: number;
     columns: Map<string, string>;
 };
 
@@ -34,7 +36,10 @@ const REPORT08_EFFECTIVE_COL_CANDIDATES = ['EffectiveDate', 'CheckDate', 'DataDa
 const REPORT08_AMOUNT_COL_CANDIDATES = ['CostEmployee', 'CostAmount', 'Amount', 'BudgetAmount', 'ExpenseAmount', 'TotalAmount', 'TotalCost', 'Cost', 'Value'];
 
 const REPORT09_INFO_TABLE_CANDIDATES = ['infodata', 'InfoData'];
-const REPORT09_POSITION_TABLE_CANDIDATES = ['InterfacePosition', 'interfaceposition'];
+const REPORT08_POSITION_TABLE_CANDIDATES = ['fn_InterfacePosition', 'InterfacePosition', 'interfaceposition'];
+const REPORT09_POSITION_TABLE_CANDIDATES = ['fn_InterfacePosition', 'InterfacePosition', 'interfaceposition'];
+const REPORT09_UNIT_TABLE_CANDIDATES = ['fn_InterfaceUnit', 'InterfaceUnit', 'interfaceunit'];
+const REPORT09_REPORTTO_TABLE_CANDIDATES = ['fn_InterfaceReportto', 'MP_Reportto', 'MP_ReportTo'];
 const REPORT09_RETIRE_YEAR_COL_CANDIDATES = ['RETIREYEAR', 'RetireYear'];
 const REPORT09_INFO_POSITION_COL_CANDIDATES = ['POSCODE', 'PositionID', 'PositionCode', 'PosCode'];
 const REPORT09_POSITION_ID_COL_CANDIDATES = ['PositionID', 'POSCODE', 'PositionCode', 'PosCode'];
@@ -407,17 +412,29 @@ const getTableMeta = async (
 
     const inList = tableCandidates.map((name) => `'${escapeSqlString(name.toLowerCase())}'`).join(',');
     const tableRes = await pool.request().query(`
-        SELECT s.name AS schema_name, t.name AS table_name
-        FROM sys.tables t
-        INNER JOIN sys.schemas s ON s.schema_id = t.schema_id
-        WHERE LOWER(t.name) IN (${inList})
+        SELECT
+            o.object_id,
+            s.name AS schema_name,
+            o.name AS object_name,
+            o.type AS object_type,
+            ISNULL(params.parameter_count, 0) AS parameter_count
+        FROM sys.objects o
+        INNER JOIN sys.schemas s ON s.schema_id = o.schema_id
+        OUTER APPLY (
+            SELECT COUNT(1) AS parameter_count
+            FROM sys.parameters p
+            WHERE p.object_id = o.object_id
+              AND p.parameter_id > 0
+        ) params
+        WHERE o.type IN ('U', 'IF', 'TF')
+          AND LOWER(o.name) IN (${inList})
     `);
 
     const rows = Array.isArray(tableRes.recordset) ? tableRes.recordset as Array<Record<string, unknown>> : [];
     if (!rows.length) return null;
 
     const rankTable = (row: Record<string, unknown>, candidate: string) => {
-        const tableName = String(row.table_name || '').toLowerCase();
+        const tableName = String(row.object_name || '').toLowerCase();
         const schemaName = String(row.schema_name || '').toLowerCase();
         const tableExact = tableName === candidate.toLowerCase() ? 0 : 1;
         const schemaRank = schemaName === 'dbo' ? 0 : 1;
@@ -427,7 +444,7 @@ const getTableMeta = async (
     let selected: Record<string, unknown> | null = null;
     for (const candidate of tableCandidates) {
         const matched = rows
-            .filter((row) => String(row.table_name || '').toLowerCase() === candidate.toLowerCase())
+            .filter((row) => String(row.object_name || '').toLowerCase() === candidate.toLowerCase())
             .sort((a, b) => rankTable(a, candidate) - rankTable(b, candidate));
         if (matched.length > 0) {
             selected = matched[0];
@@ -438,16 +455,19 @@ const getTableMeta = async (
     if (!selected) selected = rows[0];
 
     const schemaName = String(selected.schema_name || '').trim();
-    const tableName = String(selected.table_name || '').trim();
+    const tableName = String(selected.object_name || '').trim();
+    const objectType = String(selected.object_type || '').trim();
+    const objectId = Number(selected.object_id || 0);
+    const parameterCount = Number(selected.parameter_count || 0);
     if (!schemaName || !tableName) return null;
 
     const objectName = `${schemaName}.${tableName}`;
     const columnsRes = await pool.request()
-        .input('objectName', sql.NVarChar(300), objectName)
+        .input('objectId', sql.Int, objectId)
         .query(`
             SELECT c.name
             FROM sys.columns c
-            WHERE c.object_id = OBJECT_ID(@objectName)
+            WHERE c.object_id = @objectId
         `);
 
     const columnRows = Array.isArray(columnsRes.recordset) ? columnsRes.recordset as Array<Record<string, unknown>> : [];
@@ -463,8 +483,20 @@ const getTableMeta = async (
         tableName,
         objectName,
         fullName: `${escapeSqlIdentifier(schemaName)}.${escapeSqlIdentifier(tableName)}`,
+        objectType,
+        parameterCount: Number.isFinite(parameterCount) ? parameterCount : 0,
         columns
     };
+};
+
+const buildSqlSource = (meta: TableMeta, effectiveDateParamName = '@EffectiveDate'): string => {
+    if (meta.objectType === 'U') {
+        return meta.fullName;
+    }
+
+    const paramCount = Number.isFinite(meta.parameterCount) ? Math.max(0, meta.parameterCount) : 0;
+    const args = Array.from({ length: paramCount }, () => effectiveDateParamName).join(', ');
+    return `${meta.fullName}(${args})`;
 };
 
 const normalizeReport08RowsToMap = (rows: Array<Record<string, unknown>>): Report08LevelMap => {
@@ -537,8 +569,9 @@ const getReport08PositionMap = async (
     pool: any,
     effectiveDate: Date
 ): Promise<Report08LevelMap> => {
-    const tableMeta = await getTableMeta(pool, ['InterfacePosition', 'interfaceposition']);
+    const tableMeta = await getTableMeta(pool, REPORT08_POSITION_TABLE_CANDIDATES);
     if (!tableMeta) return new Map();
+    const tableSource = buildSqlSource(tableMeta, '@EffectiveDate');
 
     const orgCol = pickColumnName(tableMeta.columns, REPORT08_ORG_COL_CANDIDATES);
     const levelCol = pickColumnName(tableMeta.columns, REPORT08_LEVEL_COL_CANDIDATES);
@@ -565,7 +598,7 @@ const getReport08PositionMap = async (
             CAST(src.${escapeSqlIdentifier(orgCol)} AS nvarchar(32)) AS org_unit_no,
             CAST(src.${escapeSqlIdentifier(levelCol)} AS nvarchar(16)) AS level_group_no,
             COUNT(1) AS metric_value
-        FROM ${tableMeta.fullName} src
+        FROM ${tableSource} src
         WHERE CAST(src.${escapeSqlIdentifier(levelCol)} AS nvarchar(16)) IN (${inList})
         ${dateCondition}
         ${employeeCondition}
@@ -1613,6 +1646,16 @@ const getReport09RetirementMap = async (
     const infoMeta = await getTableMeta(pool, REPORT09_INFO_TABLE_CANDIDATES);
     const positionMeta = await getTableMeta(pool, REPORT09_POSITION_TABLE_CANDIDATES);
     if (!infoMeta || !positionMeta) return new Map();
+    const infoSource = buildSqlSource(infoMeta, '@EffectiveDate');
+    const positionSource = buildSqlSource(positionMeta, '@EffectiveDate');
+
+    let unitMeta: TableMeta | null = null;
+    let reporttoMeta: TableMeta | null = null;
+    if (structureIsSecondment === 0) {
+        unitMeta = await getTableMeta(pool, REPORT09_UNIT_TABLE_CANDIDATES);
+        reporttoMeta = await getTableMeta(pool, REPORT09_REPORTTO_TABLE_CANDIDATES);
+    }
+    const useStructureMapping = structureIsSecondment === 0 && !!unitMeta && !!reporttoMeta;
 
     const retireYearCol = pickColumnName(infoMeta.columns, REPORT09_RETIRE_YEAR_COL_CANDIDATES);
     const infoPosCol = pickColumnName(infoMeta.columns, REPORT09_INFO_POSITION_COL_CANDIDATES);
@@ -1631,7 +1674,7 @@ const getReport09RetirementMap = async (
         ? `COUNT(DISTINCT LTRIM(RTRIM(CAST(pos.${escapeSqlIdentifier(employeeCol)} AS nvarchar(64)))))`
         : 'COUNT(1)';
 
-    const orgKeyExpr = structureIsSecondment === 0
+    const orgKeyExpr = useStructureMapping
         ? `
             CASE
                 WHEN ISNULL(unit.IsSecondment, 0) = 1
@@ -1643,13 +1686,13 @@ const getReport09RetirementMap = async (
         `
         : `LTRIM(RTRIM(CAST(pos.${escapeSqlIdentifier(orgCol)} AS nvarchar(32))))`;
 
-    const joinStructureForMapping = structureIsSecondment === 0
+    const joinStructureForMapping = useStructureMapping
         ? `
-        LEFT JOIN InterfaceUnit unit
+        LEFT JOIN ${buildSqlSource(unitMeta!, '@EffectiveDate')} unit
             ON LTRIM(RTRIM(CAST(unit.OrgUnitNo AS nvarchar(32)))) =
                LTRIM(RTRIM(CAST(pos.${escapeSqlIdentifier(orgCol)} AS nvarchar(32))))
            AND @EffectiveDate BETWEEN unit.BeginDate AND unit.EndDate
-        LEFT JOIN MP_Reportto rt
+        LEFT JOIN ${buildSqlSource(reporttoMeta!, '@EffectiveDate')} rt
             ON LTRIM(RTRIM(CAST(rt.OrgUnitNo AS nvarchar(32)))) =
                LTRIM(RTRIM(CAST(pos.${escapeSqlIdentifier(orgCol)} AS nvarchar(32))))
            AND @EffectiveDate BETWEEN rt.BeginDate AND rt.EndDate
@@ -1662,8 +1705,8 @@ const getReport09RetirementMap = async (
             TRY_CONVERT(int, info.${escapeSqlIdentifier(retireYearCol)}) AS retire_year,
             CASE WHEN TRY_CONVERT(int, pos.${escapeSqlIdentifier(bsTypeCol)}) = 2 THEN 2 ELSE 1 END AS bs_type,
             ${countExpr} AS retire_count
-        FROM ${infoMeta.fullName} info
-        INNER JOIN ${positionMeta.fullName} pos
+        FROM ${infoSource} info
+        INNER JOIN ${positionSource} pos
             ON LTRIM(RTRIM(CAST(pos.${escapeSqlIdentifier(positionIdCol)} AS nvarchar(64)))) =
                LTRIM(RTRIM(CAST(info.${escapeSqlIdentifier(infoPosCol)} AS nvarchar(64))))
         ${joinStructureForMapping}
@@ -2047,6 +2090,17 @@ export const getReport10ExportDataService = async (
         const pool = await poolPromise;
         const request = pool.request();
         const effectiveDate = new Date(effectiveDateStr);
+        const positionMeta = await getTableMeta(pool, REPORT09_POSITION_TABLE_CANDIDATES);
+        const unitMeta = await getTableMeta(pool, REPORT09_UNIT_TABLE_CANDIDATES);
+        const infoMeta = await getTableMeta(pool, REPORT09_INFO_TABLE_CANDIDATES);
+
+        if (!positionMeta || !unitMeta || !infoMeta) {
+            throw new Error('Report10 export source not found (InfoData/fn_InterfacePosition/fn_InterfaceUnit)');
+        }
+
+        const positionSource = buildSqlSource(positionMeta, '@EffectiveDate');
+        const unitSource = buildSqlSource(unitMeta, '@EffectiveDate');
+        const infoSource = buildSqlSource(infoMeta, '@EffectiveDate');
 
         request.input('EffectiveDate', sql.DateTime, effectiveDate);
 
@@ -2061,7 +2115,7 @@ export const getReport10ExportDataService = async (
                             CAST(p.BeginDate AS nvarchar(32)) DESC,
                             CAST(p.OrgUnitID AS nvarchar(32)) DESC
                     ) AS rn
-                FROM InterfacePosition p
+                FROM ${positionSource} p
                 WHERE @EffectiveDate BETWEEN TRY_CONVERT(date, p.BeginDate) AND TRY_CONVERT(date, p.EndDate)
             ),
             InfoDataDedup AS (
@@ -2073,7 +2127,7 @@ export const getReport10ExportDataService = async (
                             CAST(i.CODE AS nvarchar(32)) DESC,
                             CAST(i.FULLNAMETH AS nvarchar(300)) DESC
                     ) AS rn
-                FROM InfoData i
+                FROM ${infoSource} i
             ),
             JCodeDedup AS (
                 SELECT
@@ -2108,8 +2162,8 @@ export const getReport10ExportDataService = async (
             FROM PositionDedup p
             INNER JOIN InfoDataDedup i ON i.POSCODE = p.PositionID AND i.rn = 1
             LEFT JOIN JCodeDedup ON JCodeDedup.levelgroup = p.LevelGroupNo
-            LEFT JOIN InterfaceUnit ON InterfaceUnit.OrgUnitNo = p.OrgUnitID
-            LEFT JOIN InterfaceUnit UnitParent ON UnitParent.OrgUnitNo = InterfaceUnit.ParentOrgUnitNo
+            LEFT JOIN ${unitSource} InterfaceUnit ON InterfaceUnit.OrgUnitNo = p.OrgUnitID
+            LEFT JOIN ${unitSource} UnitParent ON UnitParent.OrgUnitNo = InterfaceUnit.ParentOrgUnitNo
             LEFT JOIN MP_UnitLevel ON MP_UnitLevel.UnitLevelNo = InterfaceUnit.UnitLevel
             WHERE p.rn = 1
         `);
