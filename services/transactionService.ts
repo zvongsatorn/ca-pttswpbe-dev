@@ -1150,11 +1150,26 @@ export const getHRCenterDataService = async (
         const pool = await poolPromise;
         let result;
         if (viewMode === 'department') {
-            const req = new sql.Request(pool);
-            req.input('EffectiveDate', sql.Date, toSqlDateOnly(effectiveDate));
-            req.input('EmployeeID', sql.VarChar(10), employeeId);
-            req.input('UserGroupNO', sql.VarChar(2), userGroupNo);
-            result = await req.execute('mp_HRCenter_OrgUnit_GetTrans');
+            try {
+                const req = new sql.Request(pool);
+                req.input('EffectiveDate', sql.Date, toSqlDateOnly(effectiveDate));
+                req.input('EmployeeID', sql.VarChar(10), employeeId);
+                req.input('UserGroupNO', sql.VarChar(2), userGroupNo);
+                // Legacy HRCenter "เฉพาะที่เปลี่ยนแปลง" view used the org-unit summary proc below.
+                // Using transaction-level proc here causes the same org unit to appear multiple times.
+                result = await req.execute('mp_HRCenter_OrgUnit_GetDataByEffDate_ByChild');
+            } catch (error: any) {
+                const message = String(error?.message || '').toLowerCase();
+                if (!message.includes('could not find stored procedure')) {
+                    throw error;
+                }
+
+                const fallbackReq = new sql.Request(pool);
+                fallbackReq.input('EffectiveDate', sql.Date, toSqlDateOnly(effectiveDate));
+                fallbackReq.input('EmployeeID', sql.VarChar(10), employeeId);
+                fallbackReq.input('UserGroupNO', sql.VarChar(2), userGroupNo);
+                result = await fallbackReq.execute('mp_HRCenter_OrgUnit_GetTrans');
+            }
         } else {
             try {
                 const req = new sql.Request(pool);
