@@ -444,11 +444,11 @@ const buildMkdLegacyMessage = (params: {
 
     let intro = '';
     if (scenario === 'NEXT') {
-        intro = `ขออนุมัติ Mandriver Power เลขที่ ${fullRequestNo} ส่งมาจาก คุณ${senderName} รอให้ตรวจสอบ`;
+        intro = `ขออนุมัติ Manpower Key Driver เลขที่ ${fullRequestNo} ส่งมาจาก คุณ${senderName} รอให้ตรวจสอบ`;
     } else if (scenario === 'REJECT') {
-        intro = `รายการ Mandriver Power เลขที่ ${fullRequestNo} ไม่เห็นชอบ โดยคุณ${senderName} รอให้ตรวจสอบ`;
+        intro = `รายการ Manpower Key Driver เลขที่ ${fullRequestNo} ไม่เห็นชอบ โดยคุณ${senderName} รอให้ตรวจสอบ`;
     } else {
-        intro = `Mandriver Power เลขที่ ${fullRequestNo} ผ่านการเห็นชอบแล้ว รอให้ตรวจสอบ`;
+        intro = `Manpower Key Driver เลขที่ ${fullRequestNo} ผ่านการเห็นชอบแล้ว รอให้ตรวจสอบ`;
     }
 
     return {

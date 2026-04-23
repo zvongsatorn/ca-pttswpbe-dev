@@ -7,6 +7,10 @@ const buildMkdMailRefNo = (manDriverId: string | number): string => {
     return `MKD${String(manDriverId || '')}`.slice(0, 20);
 };
 
+const normalizeMkdText = (text: string): string => {
+    return text.replace(/Mandriver Power/gi, 'Manpower Key Driver');
+};
+
 const sendMailWithLog = async (params: {
     recipient: string | null;
     requestedRecipient?: string | null;
@@ -1218,6 +1222,12 @@ export const getInboxManDriverService = async (employeeId: string) => {
         let records: any[] = result.recordset ? Array.from(result.recordset) : [];
         // Self-Exclusion: Exclude any record where the user themselves created it
         records = records.filter(item => item.CreateBy !== employeeId && item.EmpName !== employeeId);
+        records = records.map((item) => ({
+            ...item,
+            Detail1: typeof item.Detail1 === 'string' ? normalizeMkdText(item.Detail1) : item.Detail1,
+            Detail2: typeof item.Detail2 === 'string' ? normalizeMkdText(item.Detail2) : item.Detail2,
+            FullDetail: typeof item.FullDetail === 'string' ? normalizeMkdText(item.FullDetail) : item.FullDetail
+        }));
         
         return records;
     } catch (error) {

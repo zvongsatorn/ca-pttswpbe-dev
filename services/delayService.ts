@@ -16,6 +16,8 @@ export interface DelayEmployeeOption {
     label: string;
     name: string;
     position: string;
+    buSupport: string;
+    unitName: string;
 }
 
 interface DelayUpsertPayload {
@@ -46,15 +48,23 @@ type GenericRow = Record<string, unknown>;
 const INFO_TABLE_CANDIDATES = ['InfoData', 'infodata'];
 const POSITION_TABLE_CANDIDATES = ['fn_InterfacePosition', 'InterfacePosition', 'interfaceposition'];
 const INFO_EMPLOYEE_COL_CANDIDATES = ['CODE', 'Code', 'EmployeeID', 'EmployeeId'];
+const INFO_FULL_NAME_COL_CANDIDATES = ['FULLNAMETH', 'FullNameTH'];
 const INFO_NAME_COL_CANDIDATES = ['FULLNAMETH', 'FullNameTH', 'NameAll', 'Name'];
 const INFO_POSITION_NAME_COL_CANDIDATES = ['POSNAME', 'PosName', 'PositionName', 'Position'];
 const INFO_POSITION_COL_CANDIDATES = ['POSCODE', 'PosCode', 'PositionID', 'PositionCode'];
 const INFO_RETIRE_YEAR_COL_CANDIDATES = ['RETIREYEAR', 'RetireYear'];
 const POSITION_ID_COL_CANDIDATES = ['PositionID', 'POSCODE', 'PosCode', 'PositionCode'];
 const POSITION_SIGN_POS_COL_CANDIDATES = ['SignPos', 'SignPOS', 'SignPosition', 'SignPosFlag'];
+const POSITION_SECONDMENT_TEXT_COL_CANDIDATES = ['Secondment_text', 'Secondment_Text', 'SecondmentText', 'secondment_text'];
+const POSITION_BS_TYPE_COL_CANDIDATES = ['BSType', 'BsType', 'BS_Type', 'TypeBS'];
+const POSITION_ORG_COL_CANDIDATES = ['OrgUnitID', 'OrgUnitId', 'OrgUnitNo', 'OrgUnitNO', 'OrgUnit', 'UnitNo', 'UnitCode', 'OrgNo'];
 const POSITION_EMPLOYEE_COL_CANDIDATES = ['EmployeeID', 'EmployeeId', 'CODE', 'Code'];
 const POSITION_BEGIN_DATE_COL_CANDIDATES = ['BeginDate', 'StartDate', 'FromDate', 'EffectiveStartDate'];
 const POSITION_END_DATE_COL_CANDIDATES = ['EndDate', 'ToDate', 'EffectiveEndDate'];
+const UNIT_TABLE_CANDIDATES = ['fn_InterfaceUnit', 'InterfaceUnit', 'interfaceunit'];
+const UNIT_ORG_COL_CANDIDATES = ['OrgUnitNo', 'OrgUnitNO', 'OrgUnitID', 'OrgUnitId', 'OrgNo', 'UnitNo', 'UnitCode'];
+const UNIT_NAME_COL_CANDIDATES = ['UnitName', 'OrgUnitName', 'Name'];
+const NON_COUNT_DELAY_YEAR = 9999;
 
 const escapeSqlIdentifier = (value: string): string => `[${value.replace(/]/g, ']]')}]`;
 const escapeSqlString = (value: string): string => value.replace(/'/g, "''");
@@ -222,12 +232,14 @@ class DelayService {
         const pool = await poolPromise;
         const infoMeta = await this.getTableMeta(pool, INFO_TABLE_CANDIDATES);
         const positionMeta = await this.getTableMeta(pool, POSITION_TABLE_CANDIDATES);
+        const unitMeta = await this.getTableMeta(pool, UNIT_TABLE_CANDIDATES);
 
         if (!infoMeta || !positionMeta) {
             throw new Error('InfoData/fn_InterfacePosition source not found');
         }
         const infoSource = this.buildSqlSource(infoMeta, '@EffectiveDate');
         const positionSource = this.buildSqlSource(positionMeta, '@EffectiveDate');
+        const unitSource = unitMeta ? this.buildSqlSource(unitMeta, '@EffectiveDate') : '';
 
         const infoEmployeeCol = pickColumnName(infoMeta.columns, INFO_EMPLOYEE_COL_CANDIDATES);
         const infoNameCol = pickColumnName(infoMeta.columns, INFO_NAME_COL_CANDIDATES);
@@ -237,9 +249,14 @@ class DelayService {
 
         const positionIdCol = pickColumnName(positionMeta.columns, POSITION_ID_COL_CANDIDATES);
         const positionSignPosCol = pickColumnName(positionMeta.columns, POSITION_SIGN_POS_COL_CANDIDATES);
+        const positionSecondmentTextCol = pickColumnName(positionMeta.columns, POSITION_SECONDMENT_TEXT_COL_CANDIDATES);
+        const positionBsTypeCol = pickColumnName(positionMeta.columns, POSITION_BS_TYPE_COL_CANDIDATES);
+        const positionOrgCol = pickColumnName(positionMeta.columns, POSITION_ORG_COL_CANDIDATES);
         const positionEmployeeCol = pickColumnName(positionMeta.columns, POSITION_EMPLOYEE_COL_CANDIDATES);
         const positionBeginDateCol = pickColumnName(positionMeta.columns, POSITION_BEGIN_DATE_COL_CANDIDATES);
         const positionEndDateCol = pickColumnName(positionMeta.columns, POSITION_END_DATE_COL_CANDIDATES);
+        const unitOrgCol = unitMeta ? pickColumnName(unitMeta.columns, UNIT_ORG_COL_CANDIDATES) : null;
+        const unitNameCol = unitMeta ? pickColumnName(unitMeta.columns, UNIT_NAME_COL_CANDIDATES) : null;
 
         if (!infoEmployeeCol || !infoNameCol || !infoPositionNameCol || !infoPositionCol || !infoRetireYearCol || !positionIdCol || !positionSignPosCol) {
             throw new Error('InfoData/fn_InterfacePosition required columns not found');
@@ -257,6 +274,22 @@ class DelayService {
 
         const keywordLike = `%${(keyword || '').trim()}%`;
         const effectiveDate = new Date();
+        const positionSecondmentCondition = positionSecondmentTextCol
+            ? `AND UPPER(LTRIM(RTRIM(CAST(p.${escapeSqlIdentifier(positionSecondmentTextCol)} AS nvarchar(64))))) = 'EMPLOYEE'`
+            : '';
+        const positionBsTypeCondition = positionBsTypeCol
+            ? `AND TRY_CONVERT(int, p.${escapeSqlIdentifier(positionBsTypeCol)}) IN (1, 2)`
+            : '';
+        const unitJoinClause = unitMeta && unitSource && positionOrgCol && unitOrgCol && unitNameCol
+            ? `
+                LEFT JOIN ${unitSource} u
+                    ON LTRIM(RTRIM(CAST(u.${escapeSqlIdentifier(unitOrgCol)} AS nvarchar(32)))) =
+                       LTRIM(RTRIM(CAST(p.org_unit_id AS nvarchar(32))))
+            `
+            : '';
+        const unitNameSelectExpr = unitMeta && positionOrgCol && unitNameCol
+            ? `NULLIF(LTRIM(RTRIM(CAST(u.${escapeSqlIdentifier(unitNameCol)} AS nvarchar(200)))), '')`
+            : "N''";
         const request = pool.request()
             .input('RetireYear', sql.Int, typeof retireYear === 'number' && Number.isFinite(retireYear) ? retireYear : null)
             .input('KeywordLike', sql.NVarChar(128), keywordLike)
@@ -267,12 +300,16 @@ class DelayService {
                 SELECT
                     LTRIM(RTRIM(CAST(p.${escapeSqlIdentifier(positionIdCol)} AS nvarchar(64)))) AS position_id,
                     ${positionEmployeeCol ? `LTRIM(RTRIM(CAST(p.${escapeSqlIdentifier(positionEmployeeCol)} AS nvarchar(32))))` : "N''"} AS employee_id,
+                    ${positionBsTypeCol ? `TRY_CONVERT(int, p.${escapeSqlIdentifier(positionBsTypeCol)})` : 'NULL'} AS bs_type,
+                    ${positionOrgCol ? `LTRIM(RTRIM(CAST(p.${escapeSqlIdentifier(positionOrgCol)} AS nvarchar(32))))` : "N''"} AS org_unit_id,
                     ROW_NUMBER() OVER (
                         PARTITION BY LTRIM(RTRIM(CAST(p.${escapeSqlIdentifier(positionIdCol)} AS nvarchar(64))))
                         ORDER BY ${positionOrderBy}
                     ) AS rn
                 FROM ${positionSource} p
                 WHERE TRY_CONVERT(int, p.${escapeSqlIdentifier(positionSignPosCol)}) = 100
+                  ${positionSecondmentCondition}
+                  ${positionBsTypeCondition}
             ),
             InfoDataDedup AS (
                 SELECT
@@ -292,14 +329,23 @@ class DelayService {
             SELECT
                 src.employee_id,
                 MAX(src.employee_name) AS employee_name,
-                MAX(src.pos_name) AS pos_name
+                MAX(src.pos_name) AS pos_name,
+                MAX(src.unit_name) AS unit_name,
+                CASE
+                    WHEN MAX(CASE WHEN src.bs_type = 2 THEN 2 ELSE 0 END) = 2 THEN 'Support'
+                    WHEN MAX(CASE WHEN src.bs_type = 1 THEN 1 ELSE 0 END) = 1 THEN 'Business'
+                    ELSE ''
+                END AS bu_support
             FROM (
                 SELECT
                     COALESCE(NULLIF(i.employee_id, ''), NULLIF(p.employee_id, '')) AS employee_id,
                     NULLIF(i.employee_name, '') AS employee_name,
-                    NULLIF(i.pos_name, '') AS pos_name
+                    NULLIF(i.pos_name, '') AS pos_name,
+                    ${unitNameSelectExpr} AS unit_name,
+                    p.bs_type AS bs_type
                 FROM PositionDedup p
                 INNER JOIN InfoDataDedup i ON i.position_id = p.position_id AND i.rn = 1
+                ${unitJoinClause}
                 WHERE p.rn = 1
             ) src
             WHERE src.employee_id IS NOT NULL
@@ -324,12 +370,16 @@ class DelayService {
 
                 const name = this.getFirstNonEmpty(row, ['employee_name', 'EmployeeName']) || employeeId;
                 const position = this.getFirstNonEmpty(row, ['pos_name', 'PosName']);
+                const buSupport = this.getFirstNonEmpty(row, ['bu_support', 'BUSupport']);
+                const unitName = this.getFirstNonEmpty(row, ['unit_name', 'UnitName']);
 
                 return {
                     value: employeeId,
                     label: `${employeeId} - ${name}`,
                     name,
-                    position
+                    position,
+                    buSupport: buSupport || '-',
+                    unitName: unitName || '-'
                 };
             })
             .filter((item): item is DelayEmployeeOption => item !== null);
@@ -349,6 +399,10 @@ class DelayService {
                 const infoPositionCol = pickColumnName(infoMeta.columns, INFO_POSITION_COL_CANDIDATES);
                 const positionIdCol = pickColumnName(positionMeta.columns, POSITION_ID_COL_CANDIDATES);
                 const positionSignPosCol = pickColumnName(positionMeta.columns, POSITION_SIGN_POS_COL_CANDIDATES);
+                const positionSecondmentTextCol = pickColumnName(positionMeta.columns, POSITION_SECONDMENT_TEXT_COL_CANDIDATES);
+                const positionSecondmentCondition = positionSecondmentTextCol
+                    ? `AND UPPER(LTRIM(RTRIM(CAST(p.${escapeSqlIdentifier(positionSecondmentTextCol)} AS nvarchar(64))))) = 'EMPLOYEE'`
+                    : '';
 
                 if (infoRetireYearCol && infoPositionCol && positionIdCol && positionSignPosCol) {
                     const result = await pool.request()
@@ -361,6 +415,7 @@ class DelayService {
                             ON LTRIM(RTRIM(CAST(p.${escapeSqlIdentifier(positionIdCol)} AS nvarchar(64)))) =
                                LTRIM(RTRIM(CAST(i.${escapeSqlIdentifier(infoPositionCol)} AS nvarchar(64))))
                         WHERE TRY_CONVERT(int, p.${escapeSqlIdentifier(positionSignPosCol)}) = 100
+                          ${positionSecondmentCondition}
                           AND TRY_CONVERT(int, i.${escapeSqlIdentifier(infoRetireYearCol)}) IS NOT NULL
                         ORDER BY TRY_CONVERT(int, i.${escapeSqlIdentifier(infoRetireYearCol)}) ASC
                     `);
@@ -386,6 +441,7 @@ class DelayService {
                     TRY_CONVERT(int, DelayYear) AS retire_year
                 FROM MP_Delay
                 WHERE TRY_CONVERT(int, DelayYear) IS NOT NULL
+                  AND TRY_CONVERT(int, DelayYear) <> ${NON_COUNT_DELAY_YEAR}
                 ORDER BY TRY_CONVERT(int, DelayYear) ASC
             `);
 
@@ -416,6 +472,7 @@ class DelayService {
         const infoRetireYearCol = pickColumnName(infoMeta.columns, INFO_RETIRE_YEAR_COL_CANDIDATES);
         const positionIdCol = pickColumnName(positionMeta.columns, POSITION_ID_COL_CANDIDATES);
         const positionSignPosCol = pickColumnName(positionMeta.columns, POSITION_SIGN_POS_COL_CANDIDATES);
+        const positionSecondmentTextCol = pickColumnName(positionMeta.columns, POSITION_SECONDMENT_TEXT_COL_CANDIDATES);
         const positionEmployeeCol = pickColumnName(positionMeta.columns, POSITION_EMPLOYEE_COL_CANDIDATES);
 
         if (!infoEmployeeCol || !infoPositionCol || !infoRetireYearCol || !positionIdCol || !positionSignPosCol) {
@@ -426,6 +483,9 @@ class DelayService {
             ? `
                 OR LTRIM(RTRIM(CAST(p.${escapeSqlIdentifier(positionEmployeeCol)} AS nvarchar(32)))) = @EmployeeID
             `
+            : '';
+        const positionSecondmentCondition = positionSecondmentTextCol
+            ? `AND UPPER(LTRIM(RTRIM(CAST(p.${escapeSqlIdentifier(positionSecondmentTextCol)} AS nvarchar(64))))) = 'EMPLOYEE'`
             : '';
 
         const result = await pool.request()
@@ -439,6 +499,7 @@ class DelayService {
                     ON LTRIM(RTRIM(CAST(p.${escapeSqlIdentifier(positionIdCol)} AS nvarchar(64)))) =
                        LTRIM(RTRIM(CAST(i.${escapeSqlIdentifier(infoPositionCol)} AS nvarchar(64))))
                 WHERE TRY_CONVERT(int, p.${escapeSqlIdentifier(positionSignPosCol)}) = 100
+                  ${positionSecondmentCondition}
                   AND (
                     LTRIM(RTRIM(CAST(i.${escapeSqlIdentifier(infoEmployeeCol)} AS nvarchar(32)))) = @EmployeeID
                     ${positionEmpMatch}
@@ -452,7 +513,68 @@ class DelayService {
         return Number.isFinite(retireYear) ? retireYear : null;
     }
 
-    private mapDelayRows(rows: GenericRow[], directory: Map<string, EmployeeDirectoryItem>): DelayRecord[] {
+    private async getEmployeeNameMapFromInfoData(employeeIds: string[]): Promise<Map<string, string>> {
+        const uniqueIds = Array.from(new Set(employeeIds.map((id) => toTrimText(id)).filter(Boolean)));
+        const nameMap = new Map<string, string>();
+        if (!uniqueIds.length) return nameMap;
+        try {
+            const pool = await poolPromise;
+            const infoMeta = await this.getTableMeta(pool, INFO_TABLE_CANDIDATES);
+            if (!infoMeta) return nameMap;
+
+            const infoSource = this.buildSqlSource(infoMeta, '@EffectiveDate');
+            const infoEmployeeCol = pickColumnName(infoMeta.columns, INFO_EMPLOYEE_COL_CANDIDATES);
+            const infoFullNameCol =
+                pickColumnName(infoMeta.columns, INFO_FULL_NAME_COL_CANDIDATES) ||
+                pickColumnName(infoMeta.columns, INFO_NAME_COL_CANDIDATES);
+
+            if (!infoEmployeeCol || !infoFullNameCol) return nameMap;
+
+            const request = pool.request()
+                .input('EmployeeIdsCsv', sql.NVarChar(sql.MAX), uniqueIds.join(','))
+                .input('EffectiveDate', sql.DateTime, new Date());
+
+            const result = await request.query(`
+                ;WITH target_ids AS (
+                    SELECT DISTINCT LTRIM(RTRIM(value)) AS employee_id
+                    FROM STRING_SPLIT(@EmployeeIdsCsv, ',')
+                    WHERE LTRIM(RTRIM(value)) <> ''
+                )
+                SELECT
+                    src.employee_id,
+                    MAX(src.employee_name) AS employee_name
+                FROM (
+                    SELECT
+                        LTRIM(RTRIM(CAST(i.${escapeSqlIdentifier(infoEmployeeCol)} AS nvarchar(32)))) AS employee_id,
+                        LTRIM(RTRIM(COALESCE(CAST(i.${escapeSqlIdentifier(infoFullNameCol)} AS nvarchar(200)), N''))) AS employee_name
+                    FROM ${infoSource} i
+                    INNER JOIN target_ids t
+                        ON t.employee_id = LTRIM(RTRIM(CAST(i.${escapeSqlIdentifier(infoEmployeeCol)} AS nvarchar(32))))
+                ) src
+                WHERE src.employee_id <> ''
+                  AND src.employee_name <> ''
+                GROUP BY src.employee_id
+            `);
+
+            const rows = Array.isArray(result.recordset) ? (result.recordset as GenericRow[]) : [];
+            rows.forEach((row) => {
+                const employeeId = this.getFirstNonEmpty(row, ['employee_id', 'EmployeeID']);
+                const employeeName = this.getFirstNonEmpty(row, ['employee_name', 'EmployeeName']);
+                if (!employeeId || !employeeName) return;
+                nameMap.set(employeeId, employeeName);
+            });
+        } catch (error) {
+            console.warn('[DelayService.getEmployeeNameMapFromInfoData] fallback to employee directory name', error);
+        }
+
+        return nameMap;
+    }
+
+    private mapDelayRows(
+        rows: GenericRow[],
+        directory: Map<string, EmployeeDirectoryItem>,
+        infoNameMap: Map<string, string> = new Map()
+    ): DelayRecord[] {
         return rows.map((row) => {
             const delayId = this.getFirstNonEmpty(row, ['DelayID']);
             const employeeId = this.getFirstNonEmpty(row, ['EmployeeID']);
@@ -468,7 +590,7 @@ class DelayService {
                 key: delayId,
                 DelayID: delayId,
                 EmployeeID: employeeId,
-                EmployeeName: employeeInfo?.name || employeeId,
+                EmployeeName: infoNameMap.get(employeeId) || employeeInfo?.name || employeeId,
                 PosName: posName,
                 DelayYear: this.getFirstNonEmpty(row, ['DelayYear']),
                 DelayStatus: Number.isNaN(delayStatus) ? 0 : delayStatus
@@ -494,8 +616,12 @@ class DelayService {
         const rows = Array.isArray(result.recordset) ? (result.recordset as GenericRow[]) : [];
         if (rows.length === 0) return null;
 
-        const directory = await this.getEmployeeDirectory();
-        return this.mapDelayRows(rows, directory)[0] || null;
+        const employeeIds = rows.map((row) => this.getFirstNonEmpty(row, ['EmployeeID']));
+        const [directory, infoNameMap] = await Promise.all([
+            this.getEmployeeDirectory(),
+            this.getEmployeeNameMapFromInfoData(employeeIds)
+        ]);
+        return this.mapDelayRows(rows, directory, infoNameMap)[0] || null;
     }
 
     async getDelayData(delayYear?: number): Promise<DelayRecord[]> {
@@ -522,8 +648,12 @@ class DelayService {
 
         const result = await request.query(query);
         const rows = Array.isArray(result.recordset) ? (result.recordset as GenericRow[]) : [];
-        const directory = await this.getEmployeeDirectory();
-        return this.mapDelayRows(rows, directory);
+        const employeeIds = rows.map((row) => this.getFirstNonEmpty(row, ['EmployeeID']));
+        const [directory, infoNameMap] = await Promise.all([
+            this.getEmployeeDirectory(),
+            this.getEmployeeNameMapFromInfoData(employeeIds)
+        ]);
+        return this.mapDelayRows(rows, directory, infoNameMap);
     }
 
     async getEmployeeOptions(keyword?: string, retireYear?: number): Promise<DelayEmployeeOption[]> {
@@ -543,7 +673,9 @@ class DelayService {
                     value: employeeId,
                     label: `${employeeId} - ${name}`,
                     name,
-                    position: info.position || ''
+                    position: info.position || '',
+                    buSupport: '-',
+                    unitName: '-'
                 };
             })
             .filter((item) => {

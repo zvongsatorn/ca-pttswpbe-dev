@@ -1,7 +1,10 @@
 import { sql, poolPromise } from '../config/db.js';
+import { calculateReport7ShapeGapMetrics } from '../config/report7FormulaConfig.js';
+import { getReport7FormulaConfigByEffectiveDateService } from './landscapeFormulaService.js';
 
 type Report08LevelMap = Map<string, Map<string, number>>;
 type Report09OrgYearMap = Map<string, Map<number, { support: number; bu: number }>>;
+type Report09YearRateMap = Map<number, { support: { rate: number; base: number }; bu: { rate: number; base: number } }>;
 
 type TableMeta = {
     schemaName: string;
@@ -35,13 +38,17 @@ const REPORT08_AMOUNT_COL_CANDIDATES = ['CostEmployee', 'CostAmount', 'Amount', 
 
 const REPORT09_INFO_TABLE_CANDIDATES = ['infodata', 'InfoData'];
 const REPORT09_POSITION_TABLE_CANDIDATES = ['InterfacePosition', 'interfaceposition'];
+const REPORT09_INFO_EMPLOYEE_COL_CANDIDATES = ['CODE', 'Code', 'EmployeeID', 'EmployeeId'];
+const REPORT09_INFO_SECONDMENT_TEXT_COL_CANDIDATES = ['Secondment_text', 'Secondment_Text', 'SecondmentText', 'secondment_text'];
 const REPORT09_RETIRE_YEAR_COL_CANDIDATES = ['RETIREYEAR', 'RetireYear'];
 const REPORT09_INFO_POSITION_COL_CANDIDATES = ['POSCODE', 'PositionID', 'PositionCode', 'PosCode'];
 const REPORT09_POSITION_ID_COL_CANDIDATES = ['PositionID', 'POSCODE', 'PositionCode', 'PosCode'];
 const REPORT09_ORG_COL_CANDIDATES = ['OrgUnitID', 'OrgUnitId', 'OrgUnitNo', 'OrgUnitNO', 'OrgUnit', 'UnitNo', 'UnitCode', 'OrgNo'];
+const REPORT09_LEVEL_COL_CANDIDATES = ['LevelGroupNo', 'LevelGroupNO', 'LevelNo', 'GroupNo', 'PositionLevel'];
 const REPORT09_BS_TYPE_COL_CANDIDATES = ['BSType', 'BsType', 'BS_Type', 'TypeBS'];
 const REPORT09_SIGN_POS_COL_CANDIDATES = ['SignPos', 'SignPOS', 'SignPosition', 'SignPosFlag'];
 const REPORT09_EMPLOYEE_COL_CANDIDATES = ['EmployeeID', 'EmployeeId', 'EmpID', 'EmpId', 'EmployeeNo'];
+const REPORT09_NON_COUNT_DELAY_YEAR = 9999;
 
 export const getDashboardDataService = async (
     effectiveMonth: string,
@@ -1287,11 +1294,6 @@ export const getReport06DataService = async (
     }
 };
 
-const safeRatio = (numerator: number, denominator: number): number => {
-    if (!Number.isFinite(denominator) || denominator === 0) return 0;
-    return numerator / denominator;
-};
-
 const round2 = (value: number): number => Math.round((value + Number.EPSILON) * 100) / 100;
 
 export const getReport07DataService = async (
@@ -1308,6 +1310,7 @@ export const getReport07DataService = async (
         const selectedBgSet = selectedBgValues.length > 0 ? new Set(selectedBgValues) : null;
 
         const baseRows = await getReport06DataService(effectiveDateStr, employeeId, userGroupNo, division, bgNo);
+        const formulaConfig = await getReport7FormulaConfigByEffectiveDateService(effectiveDateStr);
         const effectiveDate = new Date(effectiveDateStr);
         const pool = await poolPromise;
 
@@ -1396,29 +1399,18 @@ export const getReport07DataService = async (
             const mpSr = landscape?.sr ?? 0;
             const mpJr = landscape?.jr ?? 0;
             const mpTotal = mpVp + mpDm + mpSr + mpJr;
-
-            // Formula from "To be" draft:
-            // shape_vp = vp
-            // shape_dm = (dm/(dm+sr+jr)) * (q_5+q_6+q_7)
-            // shape_sr = (sr/(sr+jr+mp_total)) * (q_7+q_total)
-            // shape_jr = (jr/(jr+mp_total+shape_vp)) * (q_6+q_total+contract_out)
-            const shapeVp = mpVp;
-            const shapeDm = safeRatio(mpDm, mpDm + mpSr + mpJr) * (q5 + q6 + q7);
-            const shapeSr = safeRatio(mpSr, mpSr + mpJr + mpTotal) * (q7 + qTotal);
-            const shapeJr = safeRatio(mpJr, mpJr + mpTotal + shapeVp) * (q6 + qTotal + contractOut);
-            const shapeTotal = shapeVp + shapeDm + shapeSr + shapeJr;
-
-            // %Gap formula from draft:
-            // gap_vp = (q_4-shape_vp)/shape_vp
-            // gap_dm = (0-shape_dm)/shape_dm
-            // gap_sr = (q_5-shape_sr)/shape_sr
-            // gap_jr = (0-shape_jr)/shape_jr
-            // gap_total = (q_6-shape_total)/shape_total
-            const gapVp = safeRatio(q4 - shapeVp, shapeVp);
-            const gapDm = safeRatio(0 - shapeDm, shapeDm);
-            const gapSr = safeRatio(q5 - shapeSr, shapeSr);
-            const gapJr = safeRatio(0 - shapeJr, shapeJr);
-            const gapTotal = safeRatio(q6 - shapeTotal, shapeTotal);
+            const calculated = calculateReport7ShapeGapMetrics({
+                q_4: q4,
+                q_5: q5,
+                q_6: q6,
+                q_7: q7,
+                q_total: qTotal,
+                contract_out: contractOut,
+                mp_vp: mpVp,
+                mp_dm: mpDm,
+                mp_sr: mpSr,
+                mp_jr: mpJr
+            }, formulaConfig || undefined);
 
             return {
                 ...row,
@@ -1432,16 +1424,16 @@ export const getReport07DataService = async (
                 mp_sr: round2(mpSr),
                 mp_jr: round2(mpJr),
                 mp_total: round2(mpTotal),
-                shape_vp: round2(shapeVp),
-                shape_dm: round2(shapeDm),
-                shape_sr: round2(shapeSr),
-                shape_jr: round2(shapeJr),
-                shape_total: round2(shapeTotal),
-                gap_vp: round2(gapVp),
-                gap_dm: round2(gapDm),
-                gap_sr: round2(gapSr),
-                gap_jr: round2(gapJr),
-                gap_total: round2(gapTotal)
+                shape_vp: round2(calculated.shape_vp),
+                shape_dm: round2(calculated.shape_dm),
+                shape_sr: round2(calculated.shape_sr),
+                shape_jr: round2(calculated.shape_jr),
+                shape_total: round2(calculated.shape_total),
+                gap_vp: round2(calculated.gap_vp),
+                gap_dm: round2(calculated.gap_dm),
+                gap_sr: round2(calculated.gap_sr),
+                gap_jr: round2(calculated.gap_jr),
+                gap_total: round2(calculated.gap_total)
             };
         });
 
@@ -1604,6 +1596,79 @@ const getReport09OrgUnitNo = (row: Record<string, unknown>): string => {
     return '';
 };
 
+const getReport09RetirementLevelFilter = async (
+    pool: any,
+    effectiveYear: number
+): Promise<{ selectedLevelGroupNo: string; allowedLevelGroupNos: string[] }> => {
+    try {
+        const effectiveYearAD = effectiveYear > 2500 ? effectiveYear - 543 : effectiveYear;
+        const effectiveYearBE = effectiveYearAD + 543;
+
+        const selectedResult = await pool.request()
+            .input('EffectiveYearAD', sql.Int, effectiveYearAD)
+            .input('EffectiveYearBE', sql.Int, effectiveYearBE)
+            .query(`
+                SELECT TOP (1)
+                    LTRIM(RTRIM(CAST(LevelGroupNo AS nvarchar(16)))) AS LevelGroupNo
+                FROM MP_BUSupportRateRemark
+                WHERE EffectiveYear IN (@EffectiveYearAD, @EffectiveYearBE)
+                  AND NULLIF(LTRIM(RTRIM(CAST(LevelGroupNo AS nvarchar(16)))), '') IS NOT NULL
+                ORDER BY
+                    CASE WHEN EffectiveYear = @EffectiveYearAD THEN 0 ELSE 1 END,
+                    TRY_CONVERT(bigint, BUSupportRateRemarkID) DESC
+            `);
+
+        const selectedLevelGroupNo = toTrimText(selectedResult.recordset?.[0]?.LevelGroupNo);
+        if (!selectedLevelGroupNo) {
+            return { selectedLevelGroupNo: '', allowedLevelGroupNos: [] };
+        }
+
+        const levelsResult = await pool.request()
+            .input('SelectedLevelGroupNo', sql.VarChar(16), selectedLevelGroupNo)
+            .query(`
+                ;WITH Selected AS (
+                    SELECT TOP (1)
+                        TRY_CONVERT(int, LevelDelayOrder) AS SelectedOrder
+                    FROM MP_LevelGroup
+                    WHERE LTRIM(RTRIM(CAST(LevelGroupNo AS nvarchar(16)))) = @SelectedLevelGroupNo
+                      AND ISNULL(TRY_CONVERT(int, LevelDelayActive), 0) = 1
+                )
+                SELECT
+                    LTRIM(RTRIM(CAST(lg.LevelGroupNo AS nvarchar(16)))) AS LevelGroupNo
+                FROM MP_LevelGroup lg
+                CROSS JOIN Selected s
+                WHERE s.SelectedOrder IS NOT NULL
+                  AND ISNULL(TRY_CONVERT(int, lg.LevelDelayActive), 0) = 1
+                  AND TRY_CONVERT(int, lg.LevelDelayOrder) <= s.SelectedOrder
+                ORDER BY
+                    TRY_CONVERT(int, lg.LevelDelayOrder) DESC,
+                    LTRIM(RTRIM(CAST(lg.LevelGroupNo AS nvarchar(16))))
+            `);
+
+        const levelRows = Array.isArray(levelsResult.recordset)
+            ? levelsResult.recordset as Array<Record<string, unknown>>
+            : [];
+        const allowedLevelGroupNos: string[] = Array.from(
+            new Set(
+                levelRows
+                    .map((row: Record<string, unknown>) => toTrimText(row.LevelGroupNo))
+                    .filter((value): value is string => Boolean(value))
+            )
+        );
+
+        if (!allowedLevelGroupNos.length) {
+            return {
+                selectedLevelGroupNo,
+                allowedLevelGroupNos: [selectedLevelGroupNo]
+            };
+        }
+
+        return { selectedLevelGroupNo, allowedLevelGroupNos };
+    } catch {
+        return { selectedLevelGroupNo: '', allowedLevelGroupNos: [] };
+    }
+};
+
 const getReport09RetirementMap = async (
     pool: any,
     effectiveYear: number,
@@ -1619,9 +1684,12 @@ const getReport09RetirementMap = async (
     if (!infoMeta || !positionMeta) return new Map();
 
     const retireYearCol = pickColumnName(infoMeta.columns, REPORT09_RETIRE_YEAR_COL_CANDIDATES);
+    const infoEmployeeCol = pickColumnName(infoMeta.columns, REPORT09_INFO_EMPLOYEE_COL_CANDIDATES);
+    const infoSecondmentTextCol = pickColumnName(infoMeta.columns, REPORT09_INFO_SECONDMENT_TEXT_COL_CANDIDATES);
     const infoPosCol = pickColumnName(infoMeta.columns, REPORT09_INFO_POSITION_COL_CANDIDATES);
     const positionIdCol = pickColumnName(positionMeta.columns, REPORT09_POSITION_ID_COL_CANDIDATES);
     const orgCol = pickColumnName(positionMeta.columns, REPORT09_ORG_COL_CANDIDATES);
+    const levelCol = pickColumnName(positionMeta.columns, REPORT09_LEVEL_COL_CANDIDATES);
     const bsTypeCol = pickColumnName(positionMeta.columns, REPORT09_BS_TYPE_COL_CANDIDATES);
     if (!retireYearCol || !infoPosCol || !positionIdCol || !orgCol || !bsTypeCol) return new Map();
 
@@ -1631,8 +1699,16 @@ const getReport09RetirementMap = async (
     const signPosCondition = signPosCol
         ? `AND TRY_CONVERT(int, pos.${escapeSqlIdentifier(signPosCol)}) = 100`
         : '';
-    const countExpr = employeeCol
-        ? `COUNT(DISTINCT LTRIM(RTRIM(CAST(pos.${escapeSqlIdentifier(employeeCol)} AS nvarchar(64)))))`
+    const infoSecondmentCondition = infoSecondmentTextCol
+        ? `AND UPPER(LTRIM(RTRIM(CAST(info.${escapeSqlIdentifier(infoSecondmentTextCol)} AS nvarchar(64))))) = 'EMPLOYEE'`
+        : '';
+    const countDistinctEmployeeExpr = infoEmployeeCol
+        ? `LTRIM(RTRIM(CAST(info.${escapeSqlIdentifier(infoEmployeeCol)} AS nvarchar(64))))`
+        : employeeCol
+            ? `LTRIM(RTRIM(CAST(pos.${escapeSqlIdentifier(employeeCol)} AS nvarchar(64))))`
+            : '';
+    const countExpr = countDistinctEmployeeExpr
+        ? `COUNT(DISTINCT ${countDistinctEmployeeExpr})`
         : 'COUNT(1)';
 
     const orgKeyExpr = structureIsSecondment === 0
@@ -1658,24 +1734,74 @@ const getReport09RetirementMap = async (
         `
         : '';
 
+    const sourceEmployeeExpr = infoEmployeeCol
+        ? `LTRIM(RTRIM(CAST(info.${escapeSqlIdentifier(infoEmployeeCol)} AS nvarchar(32))))`
+        : employeeCol
+            ? `LTRIM(RTRIM(CAST(pos.${escapeSqlIdentifier(employeeCol)} AS nvarchar(32))))`
+            : '';
+
+    const effectiveRetireYearExpr = sourceEmployeeExpr
+        ? `
+            CASE
+                WHEN delay.delay_year = ${REPORT09_NON_COUNT_DELAY_YEAR}
+                    THEN TRY_CONVERT(int, info.${escapeSqlIdentifier(retireYearCol)})
+                WHEN delay.delay_year IS NOT NULL
+                    THEN delay.delay_year
+                ELSE TRY_CONVERT(int, info.${escapeSqlIdentifier(retireYearCol)})
+            END
+        `
+        : `TRY_CONVERT(int, info.${escapeSqlIdentifier(retireYearCol)})`;
+
+    const joinDelayForOverride = sourceEmployeeExpr
+        ? `
+        LEFT JOIN (
+            SELECT employee_id, delay_year
+            FROM (
+                SELECT
+                    LTRIM(RTRIM(CAST(EmployeeID AS nvarchar(32)))) AS employee_id,
+                    TRY_CONVERT(int, DelayYear) AS delay_year,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY LTRIM(RTRIM(CAST(EmployeeID AS nvarchar(32))))
+                        ORDER BY COALESCE(UpdateDate, CreateDate) DESC,
+                                 TRY_CONVERT(bigint, DelayID) DESC
+                    ) AS rn
+                FROM MP_Delay
+                WHERE ISNULL(DelayStatus, 1) = 1
+                  AND LTRIM(RTRIM(CAST(EmployeeID AS nvarchar(32)))) <> ''
+                  AND TRY_CONVERT(int, DelayYear) IS NOT NULL
+            ) d
+            WHERE d.rn = 1
+        ) delay
+            ON delay.employee_id = ${sourceEmployeeExpr}
+        `
+        : '';
+
+    const { allowedLevelGroupNos } = await getReport09RetirementLevelFilter(pool, effectiveYear);
+    const levelFilterCondition = levelCol && allowedLevelGroupNos.length > 0
+        ? `AND LTRIM(RTRIM(CAST(pos.${escapeSqlIdentifier(levelCol)} AS nvarchar(16)))) IN (${allowedLevelGroupNos.map((value) => `'${escapeSqlString(value)}'`).join(',')})`
+        : '';
+
     const query = `
         SELECT
             ${orgKeyExpr} AS org_unit_id,
-            TRY_CONVERT(int, info.${escapeSqlIdentifier(retireYearCol)}) AS retire_year,
+            ${effectiveRetireYearExpr} AS retire_year,
             CASE WHEN TRY_CONVERT(int, pos.${escapeSqlIdentifier(bsTypeCol)}) = 2 THEN 2 ELSE 1 END AS bs_type,
             ${countExpr} AS retire_count
         FROM ${infoMeta.fullName} info
         INNER JOIN ${positionMeta.fullName} pos
             ON LTRIM(RTRIM(CAST(pos.${escapeSqlIdentifier(positionIdCol)} AS nvarchar(64)))) =
                LTRIM(RTRIM(CAST(info.${escapeSqlIdentifier(infoPosCol)} AS nvarchar(64))))
+        ${joinDelayForOverride}
         ${joinStructureForMapping}
-        WHERE TRY_CONVERT(int, info.${escapeSqlIdentifier(retireYearCol)}) BETWEEN @FromYear AND @ToYear
+        WHERE ${effectiveRetireYearExpr} BETWEEN @FromYear AND @ToYear
           AND TRY_CONVERT(int, pos.${escapeSqlIdentifier(bsTypeCol)}) IN (1, 2)
           AND ${orgKeyExpr} <> ''
+          ${infoSecondmentCondition}
+          ${levelFilterCondition}
           ${signPosCondition}
         GROUP BY
             ${orgKeyExpr},
-            TRY_CONVERT(int, info.${escapeSqlIdentifier(retireYearCol)}),
+            ${effectiveRetireYearExpr},
             CASE WHEN TRY_CONVERT(int, pos.${escapeSqlIdentifier(bsTypeCol)}) = 2 THEN 2 ELSE 1 END
     `;
 
@@ -1718,28 +1844,148 @@ const getReport09OrgYearValue = (
     return byOrg.get(year) || { support: 0, bu: 0 };
 };
 
+const createDefaultReport09YearRateMap = (displayYears: number[]): Report09YearRateMap => {
+    const map: Report09YearRateMap = new Map();
+    displayYears.forEach((year) => {
+        map.set(year, {
+            support: { rate: 1, base: 1 },
+            bu: { rate: 1, base: 1 }
+        });
+    });
+    return map;
+};
+
+const normalizeReport09RatePart = (value: unknown): number => {
+    const parsed = Math.trunc(toNumberOrZero(value));
+    return parsed > 0 ? parsed : 1;
+};
+
+const getReport09YearRateMap = async (
+    pool: any,
+    effectiveYear: number,
+    displayYears: number[]
+): Promise<Report09YearRateMap> => {
+    const yearRateMap = createDefaultReport09YearRateMap(displayYears);
+    try {
+        const effectiveYearAD = effectiveYear > 2500 ? effectiveYear - 543 : effectiveYear;
+        const effectiveYearBE = effectiveYearAD + 543;
+        const displayYearSet = new Set(displayYears);
+        const queryYearList = Array.from(
+            new Set(
+                displayYears.flatMap((year) => {
+                    const yearAD = year > 2500 ? year - 543 : year;
+                    const yearBE = yearAD + 543;
+                    return [yearAD, yearBE];
+                })
+            )
+        );
+
+        if (!queryYearList.length) return yearRateMap;
+
+        const result = await pool.request()
+            .input('EffectiveYearAD', sql.Int, effectiveYearAD)
+            .input('EffectiveYearBE', sql.Int, effectiveYearBE)
+            .query(`
+                SELECT
+                    TRY_CONVERT(int, [Year]) AS [Year],
+                    TRY_CONVERT(int, TypeRate) AS TypeRate,
+                    TRY_CONVERT(int, Rate) AS Rate,
+                    TRY_CONVERT(int, Base) AS Base
+                FROM MP_BUSupportRate
+                WHERE EffectiveYear IN (@EffectiveYearAD, @EffectiveYearBE)
+                  AND TRY_CONVERT(int, [Year]) IN (${queryYearList.join(',')})
+                  AND ISNULL(TRY_CONVERT(int, BUSupportRateStatus), 1) = 1
+            `);
+
+        const rows = Array.isArray(result.recordset) ? result.recordset as Array<Record<string, unknown>> : [];
+        rows.forEach((row) => {
+            const rawYear = toNumberOrZero(row.Year);
+            if (!rawYear) return;
+            const yearBE = rawYear > 2500 ? rawYear : rawYear + 543;
+            if (!displayYearSet.has(yearBE)) return;
+
+            const typeRate = toNumberOrZero(row.TypeRate) === 2 ? 'support' : 'bu';
+            const rate = normalizeReport09RatePart(row.Rate);
+            const base = normalizeReport09RatePart(row.Base);
+
+            const current = yearRateMap.get(yearBE) || {
+                support: { rate: 1, base: 1 },
+                bu: { rate: 1, base: 1 }
+            };
+            current[typeRate] = { rate, base };
+            yearRateMap.set(yearBE, current);
+        });
+
+        return yearRateMap;
+    } catch {
+        return yearRateMap;
+    }
+};
+
+const calcReport09Cut = (retireCount: number, carryIn: number, rate: number, base: number) => {
+    const safeRetire = toNumberOrZero(retireCount);
+    const safeCarry = toNumberOrZero(carryIn);
+    const safeRate = normalizeReport09RatePart(rate);
+    const safeBase = normalizeReport09RatePart(base);
+
+    const total = safeRetire + safeCarry;
+    const cut = Math.floor(total / safeRate) * safeBase;
+    const carryOut = total % safeRate;
+
+    return { cut, carryOut };
+};
+
+const calcReport09CutTotalsByOrg = (
+    sourceMap: Report09OrgYearMap,
+    orgUnitId: string,
+    displayYears: number[],
+    yearRateMap: Report09YearRateMap
+) => {
+    let cutSupport = 0;
+    let cutBu = 0;
+    let carrySupport = 0;
+    let carryBu = 0;
+
+    displayYears.forEach((year) => {
+        const values = getReport09OrgYearValue(sourceMap, orgUnitId, year);
+        const ratio = yearRateMap.get(year) || {
+            support: { rate: 1, base: 1 },
+            bu: { rate: 1, base: 1 }
+        };
+
+        const supportCut = calcReport09Cut(values.support, carrySupport, ratio.support.rate, ratio.support.base);
+        cutSupport += supportCut.cut;
+        carrySupport = supportCut.carryOut;
+
+        const buCut = calcReport09Cut(values.bu, carryBu, ratio.bu.rate, ratio.bu.base);
+        cutBu += buCut.cut;
+        carryBu = buCut.carryOut;
+    });
+
+    return { cutSupport, cutBu };
+};
+
 const buildReport09FallbackTree = (
     sourceMap: Report09OrgYearMap,
-    displayYears: number[]
+    displayYears: number[],
+    yearRateMap: Report09YearRateMap
 ) => {
     const rows = Array.from(sourceMap.entries())
         .map(([orgUnitId]) => {
             const row: Record<string, unknown> = {
                 key: `org-${orgUnitId}`,
                 unit: orgUnitId,
+                unit_name: orgUnitId,
                 ...createEmptyReport09Node(displayYears)
             };
 
-            let cutSupport = 0;
-            let cutBu = 0;
             displayYears.forEach((year) => {
                 const values = getReport09OrgYearValue(sourceMap, orgUnitId, year);
                 row[`y${year}_sup`] = values.support;
                 row[`y${year}_bu`] = values.bu;
-                cutSupport += values.support;
-                cutBu += values.bu;
             });
 
+            const { cutSupport, cutBu } = calcReport09CutTotalsByOrg(sourceMap, orgUnitId, displayYears, yearRateMap);
             row.cut_support = cutSupport;
             row.cut_bu = cutBu;
             row.cut_total = cutSupport + cutBu;
@@ -1750,6 +1996,7 @@ const buildReport09FallbackTree = (
     const grandTotal: Record<string, unknown> = {
         key: 'total',
         unit: 'รวมทุกธุรกิจ',
+        unit_name: 'รวมทุกธุรกิจ',
         ...createEmptyReport09Node(displayYears)
     };
 
@@ -1761,13 +2008,48 @@ const buildReport09FallbackTree = (
 const buildReport09Tree = (
     flatData: any[],
     sourceMap: Report09OrgYearMap,
-    displayYears: number[]
+    displayYears: number[],
+    yearRateMap: Report09YearRateMap
 ) => {
     const resultTree: any[] = [];
     const group1Map = new Map<string, any>();
     const group2Map = new Map<string, any>();
     const group3Map = new Map<string, any>();
+    const unitNameByLabel = new Map<string, string>();
     let keyCounter = 1;
+
+    const normalizeUnitLabel = (value: unknown) => String(value ?? '')
+        .replace(/^>\s*/, '')
+        .replace(/^→\s*/, '')
+        .replace(/ขึ้นตรง$/, '')
+        .trim();
+
+    flatData.forEach((raw) => {
+        const row = (raw && typeof raw === 'object') ? (raw as Record<string, unknown>) : {};
+        const unitName = toTrimText(row.UnitName || row.unit_name || row.unitname);
+        if (!unitName) return;
+
+        const rawAbbr = toTrimText(row.UnitAbbr || row.unit_abbr || row.unitabbr);
+        const rawDisplay = toTrimText(row.DisplayName || row.display_name || row.displayname);
+        const candidates = [
+            rawAbbr,
+            rawDisplay,
+            normalizeUnitLabel(rawAbbr),
+            normalizeUnitLabel(rawDisplay)
+        ].filter(Boolean);
+
+        candidates.forEach((label) => {
+            if (!unitNameByLabel.has(label)) {
+                unitNameByLabel.set(label, unitName);
+            }
+        });
+    });
+
+    const resolveUnitName = (label: unknown) => {
+        const raw = toTrimText(label);
+        if (!raw) return '';
+        return unitNameByLabel.get(raw) || unitNameByLabel.get(normalizeUnitLabel(raw)) || '';
+    };
 
     flatData.forEach((raw) => {
         const row = (raw && typeof raw === 'object') ? (raw as Record<string, unknown>) : {};
@@ -1778,23 +2060,26 @@ const buildReport09Tree = (
         const grandParent2 = toTrimText(row.GrandParent2);
         const orgUnitId = getReport09OrgUnitNo(row);
 
+        const leafLabel = toTrimText(row.DisplayName) || toTrimText(row.UnitAbbr) || orgUnitId || '-';
+        const leafUnitName = toTrimText(row.UnitName || row.unit_name || row.unitname)
+            || resolveUnitName(leafLabel)
+            || leafLabel;
+
         const leafData: Record<string, unknown> = {
             key: `r-${keyCounter++}`,
-            unit: toTrimText(row.DisplayName) || toTrimText(row.UnitAbbr) || orgUnitId || '-',
+            unit: leafLabel,
+            unit_name: leafUnitName,
             ...createEmptyReport09Node(displayYears),
             _isHiddenLegacy: row.IsBelongTo == 1 || row.IsBelongTo === true || row.IsBelongTo === '1'
         };
 
-        let cutSupport = 0;
-        let cutBu = 0;
         displayYears.forEach((year) => {
             const values = getReport09OrgYearValue(sourceMap, orgUnitId, year);
             leafData[`y${year}_sup`] = values.support;
             leafData[`y${year}_bu`] = values.bu;
-            cutSupport += values.support;
-            cutBu += values.bu;
         });
 
+        const { cutSupport, cutBu } = calcReport09CutTotalsByOrg(sourceMap, orgUnitId, displayYears, yearRateMap);
         leafData.cut_support = cutSupport;
         leafData.cut_bu = cutBu;
         leafData.cut_total = cutSupport + cutBu;
@@ -1803,6 +2088,7 @@ const buildReport09Tree = (
             const bgNode = {
                 key: `bg-${keyCounter++}`,
                 unit: bgName,
+                unit_name: bgName,
                 ...createEmptyReport09Node(displayYears),
                 children: []
             };
@@ -1818,6 +2104,7 @@ const buildReport09Tree = (
                 const gpNode = {
                     key: `gp-${keyCounter++}`,
                     unit: grandParent,
+                    unit_name: resolveUnitName(grandParent) || grandParent,
                     ...createEmptyReport09Node(displayYears),
                     children: []
                 };
@@ -1832,6 +2119,7 @@ const buildReport09Tree = (
                     const gp2Node = {
                         key: `gp2-${keyCounter++}`,
                         unit: grandParent2,
+                        unit_name: resolveUnitName(grandParent2) || grandParent2,
                         ...createEmptyReport09Node(displayYears),
                         children: []
                     };
@@ -1856,6 +2144,7 @@ const buildReport09Tree = (
     const grandTotal = {
         key: 'total',
         unit: 'รวมทุกธุรกิจ',
+        unit_name: 'รวมทุกธุรกิจ',
         ...createEmptyReport09Node(displayYears)
     };
     resultTree.forEach((node) => sumNode(grandTotal, node));
@@ -1925,6 +2214,22 @@ const buildReport09Tree = (
         }
     });
 
+    const fillMissingUnitNames = (node: any) => {
+        if (!node || typeof node !== 'object') return;
+        const current = toTrimText(node.unit_name);
+        const label = toTrimText(node.unit);
+        const resolved = resolveUnitName(label);
+        if ((!current || current === label) && resolved) {
+            node.unit_name = resolved;
+        } else if (!current && label) {
+            node.unit_name = label;
+        }
+        if (Array.isArray(node.children)) {
+            node.children.forEach((child: any) => fillMissingUnitNames(child));
+        }
+    };
+    resultTree.forEach((bgNode) => fillMissingUnitNames(bgNode));
+
     return resultTree;
 };
 
@@ -1941,8 +2246,9 @@ export const getReport09DataService = async (
         const displayYears = buildReport09Years(safeEffectiveYear);
         const pool = await poolPromise;
 
-        const [retirementMap, structureRows] = await Promise.all([
+        const [retirementMap, yearRateMap, structureRows] = await Promise.all([
             getReport09RetirementMap(pool, safeEffectiveYear, structureDate, structureIsSecondment),
+            getReport09YearRateMap(pool, safeEffectiveYear, displayYears),
             (async () => {
                 try {
                     const request = pool.request();
@@ -1966,12 +2272,12 @@ export const getReport09DataService = async (
         ]);
 
         if (!structureRows.length) {
-            return buildReport09FallbackTree(retirementMap, displayYears);
+            return buildReport09FallbackTree(retirementMap, displayYears, yearRateMap);
         }
 
-        const tree = buildReport09Tree(structureRows, retirementMap, displayYears);
+        const tree = buildReport09Tree(structureRows, retirementMap, displayYears, yearRateMap);
         if (!tree.length) {
-            return buildReport09FallbackTree(retirementMap, displayYears);
+            return buildReport09FallbackTree(retirementMap, displayYears, yearRateMap);
         }
 
         return tree;
@@ -1981,12 +2287,12 @@ export const getReport09DataService = async (
     }
 };
 
-const mapReport10LevelGroup = (unitLevelNo: string, levelName: string): '010' | '020_030' | '040' | '050' | 'OTHER' => {
-    const normalizedLevelNo = toTrimText(unitLevelNo).replace(/\D/g, '');
-    if (normalizedLevelNo === '010') return '010';
-    if (normalizedLevelNo === '020' || normalizedLevelNo === '030') return '020_030';
-    if (normalizedLevelNo === '040') return '040';
-    if (normalizedLevelNo === '050') return '050';
+const mapReport10LevelGroup = (levelCode: string, levelName: string): '010' | '020_030' | '040' | '050' | 'OTHER' => {
+    const normalizedLevelCode = toTrimText(levelCode).replace(/\D/g, '');
+    if (normalizedLevelCode === '1007' || normalizedLevelCode === '010') return '010';
+    if (normalizedLevelCode === '1006' || normalizedLevelCode === '020' || normalizedLevelCode === '030') return '020_030';
+    if (normalizedLevelCode === '1005' || normalizedLevelCode === '040') return '040';
+    if (normalizedLevelCode === '1004' || normalizedLevelCode === '050') return '050';
 
     if (levelName.includes('ปธบ') || levelName.includes('กผญ')) return '010';
     if (levelName.includes('รองกรรมการผู้จัดการใหญ่') || levelName.includes('ประธานเจ้าหน้าที่')) return '020_030';
@@ -2015,10 +2321,12 @@ export const getReport10SummaryDataService = async (
         return rows.map((rawRow, index) => {
             const row = (rawRow && typeof rawRow === 'object') ? (rawRow as Record<string, unknown>) : {};
             const { num, text } = buildRowAccessor(row);
+            const levelCode = text('LevelCode', 'levelcode', 'LevelGroupNo', 'levelgroupno');
             const position = text('ตำแหน่ง', 'position', 'LevelName', 'levelname');
 
             return {
                 key: `r10-${index + 1}`,
+                level_code: levelCode,
                 position,
                 n1: num('n1'),
                 n2: num('n2'),
@@ -2065,6 +2373,7 @@ export const getReport10ExportDataService = async (
                     ) AS rn
                 FROM fn_InterfacePosition(@EffectiveDate) p
                 WHERE @EffectiveDate BETWEEN TRY_CONVERT(date, p.BeginDate) AND TRY_CONVERT(date, p.EndDate)
+                and SignPos <> 0
             ),
             InfoDataDedup AS (
                 SELECT
@@ -2083,6 +2392,12 @@ export const getReport10ExportDataService = async (
                     MAX(JCODE) AS JCODE
                 FROM mp_JCode
                 GROUP BY levelgroup
+            ),
+            LevelMap AS (
+                SELECT N'1007' AS LevelCode, N'ปธบ./กผญ.' AS LevelName, 1 AS SortOrder UNION ALL
+                SELECT N'1006', N'ประธานเจ้าหน้าที่/รองกรรมการผู้จัดการใหญ่', 2 UNION ALL
+                SELECT N'1005', N'ผู้ช่วยกรรมการผู้จัดการใหญ่', 3 UNION ALL
+                SELECT N'1004', N'ผู้จัดการฝ่าย', 4
             )
             SELECT
                 i.POSCODE,
@@ -2103,16 +2418,17 @@ export const getReport10ExportDataService = async (
                 i.FULLNAMETH,
                 i.POSNAME,
                 JCodeDedup.JCODE,
+                LevelMap.LevelCode,
+                LevelMap.LevelName,
+                LevelMap.SortOrder,
                 InterfaceUnit.ParentOrgUnitNo,
-                UnitParent.UnitName AS ParentUnitName,
-                MP_UnitLevel.UnitLevelName,
-                RIGHT('000' + LTRIM(RTRIM(CAST(MP_UnitLevel.UnitLevelNo AS nvarchar(16)))), 3) AS UnitLevelNo
+                UnitParent.UnitName AS ParentUnitName
             FROM PositionDedup p
             INNER JOIN InfoDataDedup i ON i.POSCODE = p.PositionID AND i.rn = 1
             LEFT JOIN JCodeDedup ON JCodeDedup.levelgroup = p.LevelGroupNo
+            LEFT JOIN LevelMap ON LevelMap.LevelCode = LTRIM(RTRIM(CAST(p.LevelGroupNo AS nvarchar(16))))
             LEFT JOIN fn_InterfaceUnit(@EffectiveDate) InterfaceUnit ON InterfaceUnit.OrgUnitNo = p.OrgUnitID
             LEFT JOIN fn_InterfaceUnit(@EffectiveDate) UnitParent ON UnitParent.OrgUnitNo = InterfaceUnit.ParentOrgUnitNo
-            LEFT JOIN MP_UnitLevel ON MP_UnitLevel.UnitLevelNo = InterfaceUnit.UnitLevel
             WHERE p.rn = 1
         `);
         const rows = Array.isArray(result.recordset) ? result.recordset : [];
@@ -2121,8 +2437,8 @@ export const getReport10ExportDataService = async (
             const row = (rawRow && typeof rawRow === 'object') ? (rawRow as Record<string, unknown>) : {};
             const { num, text } = buildRowAccessor(row);
 
-            const unitLevelNo = text('UnitLevelNo', 'unitlevelno');
-            const levelName = text('UnitLevelName', 'unitlevelname', 'LevelName', 'levelname');
+            const levelCode = text('LevelGroupNo', 'levelgroupno', 'LevelCode', 'levelcode');
+            const levelName = text('LevelName', 'levelname');
             const orgType = num('OrgType', 'orgtype');
             const poolRsFlag = num('PoolRSFlag', 'poolrsflag');
             const strgFlag = num('StrgFlag', 'strgflag');
@@ -2133,13 +2449,14 @@ export const getReport10ExportDataService = async (
 
             return {
                 key: `r10e-${index + 1}`,
-                level_group: mapReport10LevelGroup(unitLevelNo, levelName),
+                level_group: mapReport10LevelGroup(levelCode, levelName),
+                level_group_no: levelCode,
                 level_name: levelName,
                 position_name: text('POSNAME', 'posname'),
-                position_short_name: text('UnitLevelName', 'unitlevelname'),
+                position_short_name: levelName,
                 unit_name: text('UnitName', 'unitname'),
                 parent_unit_name: text('ParentUnitName', 'parentunitname'),
-                unit_level_no: unitLevelNo,
+                unit_level_no: levelCode,
                 unit_level_name: levelName,
                 org_unit_id: text('OrgUnitNo', 'orgunitno', 'OrgUnitID', 'orgunitid'),
                 position_id: text('POSCODE', 'poscode'),
@@ -2176,6 +2493,7 @@ function buildReport08Tree(
     const group1Map = new Map();
     const group2Map = new Map();
     const group3Map = new Map();
+    const unitNameByLabel = new Map<string, string>();
     let keyCounter = 1;
 
     const readRowValue = (row: Record<string, unknown>, ...aliases: string[]) => {
@@ -2196,6 +2514,39 @@ function buildReport08Tree(
             'P_S_21', 'P_S_18_20', 'P_S_16_17', 'P_S_14_15', 'P_S_11_13', 'P_S_9_10', 'P_S_4_8'
         ];
         return aliases.some((alias) => readRowValue(row, alias) !== undefined);
+    };
+
+    const normalizeUnitLabel = (value: unknown) => String(value ?? '')
+        .replace(/^>\s*/, '')
+        .replace(/^→\s*/, '')
+        .replace(/ขึ้นตรง$/, '')
+        .trim();
+
+    flatData.forEach((raw) => {
+        const row = (raw && typeof raw === 'object') ? (raw as Record<string, unknown>) : {};
+        const unitName = toTrimText(readRowValue(row, 'UnitName', 'unit_name', 'unitname'));
+        if (!unitName) return;
+
+        const rawAbbr = toTrimText(readRowValue(row, 'UnitAbbr', 'unit_abbr', 'unitabbr'));
+        const rawDisplay = toTrimText(readRowValue(row, 'DisplayName', 'display_name', 'displayname'));
+        const candidates = [
+            rawAbbr,
+            rawDisplay,
+            normalizeUnitLabel(rawAbbr),
+            normalizeUnitLabel(rawDisplay)
+        ].filter(Boolean);
+
+        candidates.forEach((label) => {
+            if (!unitNameByLabel.has(label)) {
+                unitNameByLabel.set(label, unitName);
+            }
+        });
+    });
+
+    const resolveUnitName = (label: unknown) => {
+        const raw = toTrimText(label);
+        if (!raw) return '';
+        return unitNameByLabel.get(raw) || unitNameByLabel.get(normalizeUnitLabel(raw)) || '';
     };
 
     const getReport01PeopleLevels = (row: Record<string, unknown>) => {
@@ -2270,6 +2621,7 @@ function buildReport08Tree(
             const bgNode = {
                 key: `bg-${keyCounter++}`,
                 unit: bgName,
+                unit_name: toTrimText(bgName),
                 ...createEmptyReport08Node(),
                 children: []
             };
@@ -2303,9 +2655,18 @@ function buildReport08Tree(
         const minorBudget = getReport08Metric(costMap, orgUnitNo, REPORT08_MINOR_LEVEL);
         const totalGrandExpense = expenseTotal + majorBudget + minorBudget;
 
+        const rowLabel = toTrimText(readRowValue(rowObj, 'DisplayName', 'display_name', 'displayname'))
+            || toTrimText(readRowValue(rowObj, 'UnitAbbr', 'unit_abbr', 'unitabbr'))
+            || orgUnitNo
+            || '-';
+        const rowUnitName = toTrimText(readRowValue(rowObj, 'UnitName', 'unit_name', 'unitname'))
+            || resolveUnitName(rowLabel)
+            || rowLabel;
+
         const rowData = {
             key: `r-${keyCounter++}`,
-            unit: row.DisplayName || row.UnitAbbr || orgUnitNo || '-',
+            unit: rowLabel,
+            unit_name: rowUnitName,
             people_21: peopleValues[0] || 0,
             people_18_20: peopleValues[1] || 0,
             people_16_17: peopleValues[2] || 0,
@@ -2336,6 +2697,7 @@ function buildReport08Tree(
                 const gpNode = {
                     key: `gp-${keyCounter++}`,
                     unit: grandParent,
+                    unit_name: resolveUnitName(grandParent) || toTrimText(grandParent),
                     ...createEmptyReport08Node(),
                     children: []
                 };
@@ -2350,6 +2712,7 @@ function buildReport08Tree(
                     const gp2Node = {
                         key: `gp2-${keyCounter++}`,
                         unit: grandParent2,
+                        unit_name: resolveUnitName(grandParent2) || toTrimText(grandParent2),
                         ...createEmptyReport08Node(),
                         children: []
                     };
@@ -2374,6 +2737,7 @@ function buildReport08Tree(
     const grandTotal = {
         key: 'total',
         unit: 'รวมทุกธุรกิจ',
+        unit_name: 'รวมทุกธุรกิจ',
         ...createEmptyReport08Node()
     };
     resultTree.forEach((node) => sumNode(grandTotal, node));
@@ -2425,6 +2789,22 @@ function buildReport08Tree(
         }
     };
     resultTree.forEach((bgNode) => cleanupTree(bgNode));
+
+    const fillMissingUnitNames = (node: any) => {
+        if (!node || typeof node !== 'object') return;
+        const current = toTrimText(node.unit_name);
+        const unitLabel = toTrimText(node.unit);
+        const resolved = resolveUnitName(unitLabel);
+        if ((!current || current === unitLabel) && resolved) {
+            node.unit_name = resolved;
+        } else if (!current && unitLabel) {
+            node.unit_name = unitLabel;
+        }
+        if (Array.isArray(node.children)) {
+            node.children.forEach((child: any) => fillMissingUnitNames(child));
+        }
+    };
+    resultTree.forEach((bgNode) => fillMissingUnitNames(bgNode));
 
     resultTree.forEach((bgNode) => {
         if (!bgNode.children) return;
@@ -2483,6 +2863,39 @@ function buildReport01Tree(flatData: any[]) {
     const group2Map = new Map();
     const group3Map = new Map();
     let keyCounter = 1;
+    const unitNameByLabel = new Map<string, string>();
+
+    const normalizeUnitLabel = (value: unknown) => String(value ?? '')
+        .replace(/^>\s*/, '')
+        .replace(/^→\s*/, '')
+        .replace(/ขึ้นตรง$/, '')
+        .trim();
+
+    flatData.forEach((row) => {
+        const unitName = String(row?.UnitName || '').trim();
+        if (!unitName) return;
+
+        const rawAbbr = String(row?.UnitAbbr || '').trim();
+        const rawDisplay = String(row?.DisplayName || '').trim();
+        const candidates = [
+            rawAbbr,
+            rawDisplay,
+            normalizeUnitLabel(rawAbbr),
+            normalizeUnitLabel(rawDisplay)
+        ].filter(Boolean);
+
+        candidates.forEach((label) => {
+            if (!unitNameByLabel.has(label)) {
+                unitNameByLabel.set(label, unitName);
+            }
+        });
+    });
+
+    const resolveUnitName = (label: unknown) => {
+        const raw = String(label ?? '').trim();
+        if (!raw) return '';
+        return unitNameByLabel.get(raw) || unitNameByLabel.get(normalizeUnitLabel(raw)) || '';
+    };
 
     flatData.forEach((row) => {
         const bgName = row.GroupBGName;
@@ -2498,6 +2911,7 @@ function buildReport01Tree(flatData: any[]) {
                 key: `bg-${keyCounter++}`,
                 unit: bgName,
                 ...createEmptyNode(),
+                unit_name: String(bgName || '').trim(),
                 children: []
             };
             group1Map.set(bgName, bgNode);
@@ -2509,6 +2923,7 @@ function buildReport01Tree(flatData: any[]) {
         const rowData = {
             key: `r-${keyCounter++}`, 
             unit: row.DisplayName || row.UnitAbbr,
+            unit_name: row.UnitName || resolveUnitName(row.DisplayName || row.UnitAbbr) || '',
             // frame_staff
             frame_staff_0: row.Q_N_21 || 0,
             frame_staff_1: row.Q_N_18_20 || 0,
@@ -2587,6 +3002,7 @@ function buildReport01Tree(flatData: any[]) {
                     key: `gp-${keyCounter++}`,
                     unit: grandParent,
                     ...createEmptyNode(),
+                    unit_name: resolveUnitName(grandParent),
                     children: []
                 };
                 group2Map.set(group2KeyId, gpNode);
@@ -2602,6 +3018,7 @@ function buildReport01Tree(flatData: any[]) {
                         key: `gp2-${keyCounter++}`,
                         unit: grandParent2,
                         ...createEmptyNode(),
+                        unit_name: resolveUnitName(grandParent2),
                         children: []
                     };
                     group3Map.set(group3KeyId, gp2Node);
@@ -2628,7 +3045,8 @@ function buildReport01Tree(flatData: any[]) {
     let grandTotal = {
         key: 'total',
         unit: 'รวมทุกธุรกิจ',
-        ...createEmptyNode()
+        ...createEmptyNode(),
+        unit_name: 'รวมทุกธุรกิจ'
     };
     resultTree.forEach(node => sumNode(grandTotal, node));
     resultTree.push(grandTotal);
@@ -2724,6 +3142,7 @@ function sumNode(target: any, source: any) {
 
 function createEmptyNode() {
     return {
+        unit_name: '',
         frame_staff_0: 0, frame_staff_1: 0, frame_staff_2: 0, frame_staff_3: 0, frame_staff_4: 0, frame_staff_5: 0, frame_staff_6: 0, frame_staff_7: 0,
         people_normal_0: 0, people_normal_1: 0, people_normal_2: 0, people_normal_3: 0, people_normal_4: 0, people_normal_5: 0, people_normal_6: 0, people_normal_7: 0,
         frame_sec_0: 0, frame_sec_1: 0, frame_sec_2: 0, frame_sec_3: 0, frame_sec_4: 0, frame_sec_5: 0, frame_sec_6: 0, frame_sec_7: 0,

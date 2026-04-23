@@ -1133,7 +1133,73 @@ export const getReturnsByBorrowService = async (borrowDocumentNo: string) => {
         req.input('ParentDocumentNo', sql.VarChar(13), borrowDocumentNo);
 
         const result = await req.execute('mp_ReturnsByBorrowGet');
-        return result.recordset || [];
+        const rows = result.recordset || [];
+        if (rows.length === 0) return [];
+
+        const transactionNos = Array.from(
+            new Set(
+                rows
+                    .map((row: any) => String(row?.TransactionNo || '').trim())
+                    .filter(Boolean)
+            )
+        );
+
+        if (transactionNos.length === 0) return rows;
+
+        const detailReq = new sql.Request(pool);
+        const placeholders = transactionNos.map((txNo, idx) => {
+            const paramName = `ReturnTx${idx}`;
+            detailReq.input(paramName, sql.VarChar(10), txNo);
+            return `@${paramName}`;
+        });
+
+        const detailSql = `
+            SELECT
+                t.TransactionNo,
+                t.EffectiveDate,
+                t.TransactionDesc,
+                t.UnitReceive,
+                t.UnitTransfer,
+                t.PoolRsFlag,
+                t.StrgFlag,
+                t.BSType,
+                t.SpecFlag,
+                t.LineStaffFlag
+            FROM MP_Transactions t WITH (NOLOCK)
+            WHERE t.TransactionNo IN (${placeholders.join(',')})
+        `;
+
+        const detailResult = await detailReq.query(detailSql);
+        const detailMap = new Map<string, any>();
+        (detailResult.recordset || []).forEach((row: any) => {
+            const txNo = String(row?.TransactionNo || '').trim();
+            if (!txNo) return;
+            detailMap.set(txNo, row);
+        });
+
+        const enrichedRows = rows.map((row: any) => {
+            const txNo = String(row?.TransactionNo || '').trim();
+            const detail = detailMap.get(txNo);
+            if (!detail) return row;
+
+            const mergedPoolRsFlag = row?.PoolRsFlag ?? row?.PoolRSFlag ?? detail?.PoolRsFlag;
+
+            return {
+                ...row,
+                EffectiveDate: row?.EffectiveDate ?? detail?.EffectiveDate ?? null,
+                TransactionDesc: row?.TransactionDesc ?? detail?.TransactionDesc ?? '',
+                UnitReceive: row?.UnitReceive ?? detail?.UnitReceive ?? '',
+                UnitTransfer: row?.UnitTransfer ?? detail?.UnitTransfer ?? '',
+                PoolRsFlag: mergedPoolRsFlag ?? 0,
+                PoolRSFlag: mergedPoolRsFlag ?? 0,
+                StrgFlag: row?.StrgFlag ?? detail?.StrgFlag ?? 0,
+                BSType: row?.BSType ?? detail?.BSType ?? 0,
+                SpecFlag: row?.SpecFlag ?? detail?.SpecFlag ?? 0,
+                LineStaffFlag: row?.LineStaffFlag ?? detail?.LineStaffFlag ?? 0,
+            };
+        });
+
+        return enrichedRows;
     } catch (error) {
         console.error('Error in getReturnsByBorrowService:', error);
         throw error;

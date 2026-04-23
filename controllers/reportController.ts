@@ -251,8 +251,8 @@ export const getReport1ExcelData = async (c: Context) => {
         const worksheet = workbook.addWorksheet('Report 01');
 
         const levels = ['21', '18-20', '16-17', '14-15', '11-13', '9-10', '4-8', 'รวม'];
-        const dataKeys: string[] = ['unit'];
-        const headers: string[] = ['กลุ่ม/หน่วยธุรกิจ'];
+        const dataKeys: string[] = ['unit', 'unit_name'];
+        const headers: string[] = ['กลุ่ม/หน่วยธุรกิจ', 'ชื่อหน่วยงาน'];
 
         const addCols = (show: boolean, subKeys: string[], subLabels: string[]) => {
             if (!show) return;
@@ -268,12 +268,12 @@ export const getReport1ExcelData = async (c: Context) => {
         addCols(isShow('recruit'),       ['recruit_total'], ['สรรหา']);
         addCols(isShow('vacancy'),       levels.map((_, i) => `vacancy_${i}`),       levels.map(l => `ว่าง ${l}`));
         
-        if (isShow('contact_out'))     { dataKeys.push('contact_out');     headers.push('Contact Out'); }
+        if (isShow('contact_out'))     { dataKeys.push('contact_out');     headers.push('Contact Out สัญญาใหญ่'); }
         if (isShow('contact_out_sub')) { dataKeys.push('contact_out_sub'); headers.push('Contact Out สัญญาย่อย'); }
 
         console.log(`[Backend Excel] Headers count: ${headers.length}, DataKeys count: ${dataKeys.length}`);
         
-        worksheet.columns = dataKeys.map((_, i) => ({ width: i === 0 ? 40 : 10 }));
+        worksheet.columns = dataKeys.map((_, i) => ({ width: i === 0 ? 40 : i === 1 ? 32 : 10 }));
 
         const hRow = worksheet.addRow(headers);
         hRow.font = { bold: true };
@@ -285,6 +285,7 @@ export const getReport1ExcelData = async (c: Context) => {
             rowsData.forEach(item => {
                 const rowData = dataKeys.map((k, i) => {
                     if (i === 0) return '    '.repeat(depth) + (item.unit ?? '');
+                    if (i === 1) return item.unit_name ?? '';
                     const v = item[k];
                     return (v !== undefined && v !== null && v !== 0) ? v : '';
                 });

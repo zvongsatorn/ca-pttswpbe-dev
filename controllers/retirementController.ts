@@ -27,7 +27,7 @@ export const getRetirement = async (c: Context) => {
 export const saveRetirement = async (c: Context) => {
     try {
         const body = await c.req.json();
-        const { effectiveYear, rates, remark, user } = body;
+        const { effectiveYear, rates, remark, levelGroupNo, user } = body;
 
         if (!effectiveYear || !rates || !user) {
             return c.json({ success: false, message: 'Missing required parameters' }, 400);
@@ -37,6 +37,7 @@ export const saveRetirement = async (c: Context) => {
             parseInt(effectiveYear),
             rates,
             remark || '',
+            levelGroupNo || '',
             user
         );
         

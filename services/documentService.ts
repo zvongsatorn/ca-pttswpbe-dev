@@ -108,6 +108,7 @@ const toSqlDateTimePreserveLocalClock = (date: Date): Date => {
 };
 
 const unitSnapshotCache = new Map<string, Map<string, UnitSnapshotRow>>();
+const bgNameCache = new Map<string, Map<string, string>>();
 
 const toMonthSnapshotKey = (effectiveDateRaw: unknown): string => {
     const parsed = new Date(String(effectiveDateRaw ?? ''));
@@ -125,6 +126,34 @@ const parseEffectiveMonthDate = (effectiveDateRaw: unknown): Date => {
         return new Date(now.getFullYear(), now.getMonth(), 1, 0, 0, 0, 0);
     }
     return new Date(parsed.getFullYear(), parsed.getMonth(), 1, 0, 0, 0, 0);
+};
+
+const getBgNameMapByEffectiveDate = async (
+    pool: sql.ConnectionPool,
+    effectiveDateRaw: unknown
+): Promise<Map<string, string>> => {
+    const cacheKey = toMonthSnapshotKey(effectiveDateRaw);
+    const cached = bgNameCache.get(cacheKey);
+    if (cached) return cached;
+
+    const snapshotDate = parseEffectiveMonthDate(effectiveDateRaw);
+    const map = new Map<string, string>();
+    try {
+        const request = new sql.Request(pool);
+        request.input('p_CheckDate', sql.DateTime, snapshotDate);
+        const result = await request.execute('mp_BGGetByEffectivePeriod');
+        (result.recordset || []).forEach((row: any) => {
+            const bgNo = normalizeText(row?.BGNo);
+            const bgName = normalizeText(row?.BGName);
+            if (!bgNo) return;
+            map.set(bgNo, bgName || bgNo);
+        });
+    } catch (error) {
+        console.warn('[documentService] Failed to resolve BG names by effective date:', error);
+    }
+
+    bgNameCache.set(cacheKey, map);
+    return map;
 };
 
 const resolveDocumentEffectiveDateFromItems = async (
@@ -283,6 +312,11 @@ const resolveDocumentOrgFilters = async (
             const division = unitMap.get(divisionId);
             divisionName = firstNonEmptyText(division?.unitName, divisionId);
         }
+    }
+
+    if (businessUnitId && (!businessUnitName || normalizeText(businessUnitName) === normalizeText(businessUnitId))) {
+        const bgMap = await getBgNameMapByEffectiveDate(pool, effectiveDateRaw);
+        businessUnitName = firstNonEmptyText(bgMap.get(businessUnitId), businessUnitName, businessUnitId);
     }
 
     if (!agencyName && agencyId) agencyName = agencyId;

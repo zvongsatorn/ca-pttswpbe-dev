@@ -24,6 +24,7 @@ const REQUIRED_COLUMN_ALIASES = {
     FULLNAMETH: ['FULLNAMETH'],
     FULLNAMEENG: ['FULLNAMEENG', 'FULLNAMEENGLISH'],
     CHANGE_DATE: ['CHANGEDATE'],
+    SECONDMENT_TEXT: ['SECONDMENTTEXT'],
     CODE: ['CODE'],
     RETIREYEAR: ['RETIREYEAR'],
     POSNAME: ['POSNAME'],
@@ -86,6 +87,7 @@ interface InfoDataBulkRow {
     RETIREDATE: string | null;
     RETIREYEAR: number | null;
     BAND: string | null;
+    Secondment_text: string | null;
     CHANGE_DATE: string | null;
 }
 
@@ -142,6 +144,18 @@ const toNullableText = (value: unknown, maxLength: number): string | null => {
     const text = cleanCellText(value);
     if (!text) return null;
     return text.slice(0, maxLength);
+};
+
+const toNullableCode8 = (value: unknown): string | null => {
+    const text = cleanCellText(value);
+    if (!text) return null;
+
+    const clipped = text.slice(0, 8);
+    if (/^\d+$/.test(clipped) && clipped.length < 8) {
+        return clipped.padStart(8, '0');
+    }
+
+    return clipped;
 };
 
 const toNullableUnlimitedText = (value: unknown): string | null => {
@@ -398,7 +412,7 @@ const buildRowsForInsert = (
         };
 
         const mapped: InfoDataBulkRow = {
-            CODE: toNullableText(getByColumn('CODE'), 8),
+            CODE: toNullableCode8(getByColumn('CODE')),
             FULLNAMETH: toNullableText(getByColumn('FULLNAMETH'), 100),
             FULLNAMEENG: toNullableText(getByColumn('FULLNAMEENG'), 100),
             SEX: toNullableInt(getByColumn('SEX')),
@@ -411,6 +425,7 @@ const buildRowsForInsert = (
             RETIREDATE: toNullableDate(getByColumn('RETIREDATE')),
             RETIREYEAR: toNullableInt(getByColumn('RETIREYEAR')),
             BAND: toNullableText(getByColumn('BAND'), 3),
+            Secondment_text: toNullableText(getByColumn('SECONDMENT_TEXT'), 20),
             CHANGE_DATE: toNullableDate(getByColumn('CHANGE_DATE'))
         };
 
@@ -465,6 +480,7 @@ const insertInfoDataRows = async (rows: InfoDataBulkRow[], replaceExisting: bool
         table.columns.add('RETIREDATE', sql.Date, { nullable: true });
         table.columns.add('RETIREYEAR', sql.Int, { nullable: true });
         table.columns.add('BAND', sql.VarChar(3), { nullable: true });
+        table.columns.add('Secondment_text', sql.VarChar(20), { nullable: true });
         table.columns.add('CHANGE_DATE', sql.Date, { nullable: true });
 
         batchRows.forEach((row) => {
@@ -482,6 +498,7 @@ const insertInfoDataRows = async (rows: InfoDataBulkRow[], replaceExisting: bool
                 row.RETIREDATE,
                 row.RETIREYEAR,
                 row.BAND,
+                row.Secondment_text,
                 row.CHANGE_DATE
             );
         });
