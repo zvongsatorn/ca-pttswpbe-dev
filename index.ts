@@ -7,6 +7,7 @@ import { serveStatic } from '@hono/node-server/serve-static';
 import { loadEnv } from './config/loadEnv.js';
 import configService from './services/configService.js';
 import { initializeMailAlertScheduler } from './services/mailAlertSchedulerService.js';
+import { initializeSelfPingScheduler } from './services/selfPingService.js';
 
 loadEnv();
 
@@ -97,6 +98,14 @@ app.route('/api/log', logRoutes);
 app.route('/api/delay', delayRoutes);
 app.route('/api/interface', interfaceRoutes);
 app.get('/api/files-proxy', filesProxy);
+app.get('/api/system/healthz', (c) => {
+    return c.json({
+        success: true,
+        status: 'ok',
+        time: new Date().toISOString(),
+        uptimeSeconds: Math.round(process.uptime())
+    });
+});
 
 
 
@@ -120,6 +129,7 @@ let server: any;
         
         console.log(`Server is running on port ${port}`);
         initializeMailAlertScheduler();
+        initializeSelfPingScheduler();
     } catch (err) {
         console.error("Failed to load configuration or start server:", err);
         process.exit(1);

@@ -44,10 +44,15 @@ const REPORT09_RETIRE_YEAR_COL_CANDIDATES = ['RETIREYEAR', 'RetireYear'];
 const REPORT09_INFO_POSITION_COL_CANDIDATES = ['POSCODE', 'PositionID', 'PositionCode', 'PosCode'];
 const REPORT09_POSITION_ID_COL_CANDIDATES = ['PositionID', 'POSCODE', 'PositionCode', 'PosCode'];
 const REPORT09_ORG_COL_CANDIDATES = ['OrgUnitID', 'OrgUnitId', 'OrgUnitNo', 'OrgUnitNO', 'OrgUnit', 'UnitNo', 'UnitCode', 'OrgNo'];
+const REPORT09_ORG_TYPE_COL_CANDIDATES = ['OrgType', 'ORGTYPE', 'orgtype'];
 const REPORT09_LEVEL_COL_CANDIDATES = ['LevelGroupNo', 'LevelGroupNO', 'LevelNo', 'GroupNo', 'PositionLevel'];
 const REPORT09_BS_TYPE_COL_CANDIDATES = ['BSType', 'BsType', 'BS_Type', 'TypeBS'];
 const REPORT09_SIGN_POS_COL_CANDIDATES = ['SignPos', 'SignPOS', 'SignPosition', 'SignPosFlag'];
 const REPORT09_EMPLOYEE_COL_CANDIDATES = ['EmployeeID', 'EmployeeId', 'EmpID', 'EmpId', 'EmployeeNo'];
+const REPORT09_UNIT_FN_CANDIDATES = ['fn_InterfaceUnit'];
+const REPORT09_UNIT_BG_COL_CANDIDATES = ['BGNo', 'BgNo', 'BGNO'];
+const REPORT09_UNIT_NAME_COL_CANDIDATES = ['UnitName', 'OrgUnitName', 'Name'];
+const REPORT09_UNIT_ABBR_COL_CANDIDATES = ['UnitAbbr', 'OrgUnitAbbr', 'ShortName', 'Abbr'];
 const REPORT09_NON_COUNT_DELAY_YEAR = 9999;
 
 export const getDashboardDataService = async (
@@ -446,6 +451,75 @@ const getTableMeta = async (
 
     const schemaName = String(selected.schema_name || '').trim();
     const tableName = String(selected.table_name || '').trim();
+    if (!schemaName || !tableName) return null;
+
+    const objectName = `${schemaName}.${tableName}`;
+    const columnsRes = await pool.request()
+        .input('objectName', sql.NVarChar(300), objectName)
+        .query(`
+            SELECT c.name
+            FROM sys.columns c
+            WHERE c.object_id = OBJECT_ID(@objectName)
+        `);
+
+    const columnRows = Array.isArray(columnsRes.recordset) ? columnsRes.recordset as Array<Record<string, unknown>> : [];
+    const columns = new Map<string, string>();
+    columnRows.forEach((row) => {
+        const colName = String(row.name || '').trim();
+        if (!colName) return;
+        columns.set(colName.toLowerCase(), colName);
+    });
+
+    return {
+        schemaName,
+        tableName,
+        objectName,
+        fullName: `${escapeSqlIdentifier(schemaName)}.${escapeSqlIdentifier(tableName)}`,
+        columns
+    };
+};
+
+const getObjectMeta = async (
+    pool: any,
+    objectCandidates: string[]
+): Promise<TableMeta | null> => {
+    if (!objectCandidates.length) return null;
+
+    const inList = objectCandidates.map((name) => `'${escapeSqlString(name.toLowerCase())}'`).join(',');
+    const objectRes = await pool.request().query(`
+        SELECT s.name AS schema_name, o.name AS object_name
+        FROM sys.objects o
+        INNER JOIN sys.schemas s ON s.schema_id = o.schema_id
+        WHERE LOWER(o.name) IN (${inList})
+          AND o.type IN ('U', 'V', 'IF', 'TF')
+    `);
+
+    const rows = Array.isArray(objectRes.recordset) ? objectRes.recordset as Array<Record<string, unknown>> : [];
+    if (!rows.length) return null;
+
+    const rankObject = (row: Record<string, unknown>, candidate: string) => {
+        const objectName = String(row.object_name || '').toLowerCase();
+        const schemaName = String(row.schema_name || '').toLowerCase();
+        const objectExact = objectName === candidate.toLowerCase() ? 0 : 1;
+        const schemaRank = schemaName === 'dbo' ? 0 : 1;
+        return objectExact * 10 + schemaRank;
+    };
+
+    let selected: Record<string, unknown> | null = null;
+    for (const candidate of objectCandidates) {
+        const matched = rows
+            .filter((row) => String(row.object_name || '').toLowerCase() === candidate.toLowerCase())
+            .sort((a, b) => rankObject(a, candidate) - rankObject(b, candidate));
+        if (matched.length > 0) {
+            selected = matched[0];
+            break;
+        }
+    }
+
+    if (!selected) selected = rows[0];
+
+    const schemaName = String(selected.schema_name || '').trim();
+    const tableName = String(selected.object_name || '').trim();
     if (!schemaName || !tableName) return null;
 
     const objectName = `${schemaName}.${tableName}`;
@@ -1681,6 +1755,7 @@ const getReport09RetirementMap = async (
 
     const infoMeta = await getTableMeta(pool, REPORT09_INFO_TABLE_CANDIDATES);
     const positionMeta = await getTableMeta(pool, REPORT09_POSITION_TABLE_CANDIDATES);
+    const unitMeta = await getObjectMeta(pool, REPORT09_UNIT_FN_CANDIDATES);
     if (!infoMeta || !positionMeta) return new Map();
 
     const retireYearCol = pickColumnName(infoMeta.columns, REPORT09_RETIRE_YEAR_COL_CANDIDATES);
@@ -1689,9 +1764,14 @@ const getReport09RetirementMap = async (
     const infoPosCol = pickColumnName(infoMeta.columns, REPORT09_INFO_POSITION_COL_CANDIDATES);
     const positionIdCol = pickColumnName(positionMeta.columns, REPORT09_POSITION_ID_COL_CANDIDATES);
     const orgCol = pickColumnName(positionMeta.columns, REPORT09_ORG_COL_CANDIDATES);
+    const orgTypeCol = pickColumnName(positionMeta.columns, REPORT09_ORG_TYPE_COL_CANDIDATES);
     const levelCol = pickColumnName(positionMeta.columns, REPORT09_LEVEL_COL_CANDIDATES);
     const bsTypeCol = pickColumnName(positionMeta.columns, REPORT09_BS_TYPE_COL_CANDIDATES);
-    if (!retireYearCol || !infoPosCol || !positionIdCol || !orgCol || !bsTypeCol) return new Map();
+    if (!retireYearCol || !infoPosCol || !positionIdCol || !orgCol || !orgTypeCol || !bsTypeCol) return new Map();
+
+    const unitBgCol = pickColumnName(unitMeta?.columns || new Map<string, string>(), REPORT09_UNIT_BG_COL_CANDIDATES);
+    const unitNameCol = pickColumnName(unitMeta?.columns || new Map<string, string>(), REPORT09_UNIT_NAME_COL_CANDIDATES);
+    const unitAbbrCol = pickColumnName(unitMeta?.columns || new Map<string, string>(), REPORT09_UNIT_ABBR_COL_CANDIDATES);
 
     const signPosCol = pickColumnName(positionMeta.columns, REPORT09_SIGN_POS_COL_CANDIDATES);
     const employeeCol = pickColumnName(positionMeta.columns, REPORT09_EMPLOYEE_COL_CANDIDATES);
@@ -1781,11 +1861,37 @@ const getReport09RetirementMap = async (
         ? `AND LTRIM(RTRIM(CAST(pos.${escapeSqlIdentifier(levelCol)} AS nvarchar(16)))) IN (${allowedLevelGroupNos.map((value) => `'${escapeSqlString(value)}'`).join(',')})`
         : '';
 
+    const unitBgExpr = unitBgCol
+        ? `LTRIM(RTRIM(CAST(unit.${escapeSqlIdentifier(unitBgCol)} AS nvarchar(32))))`
+        : `''`;
+    const unitNameExpr = unitNameCol
+        ? `UPPER(LTRIM(RTRIM(CAST(unit.${escapeSqlIdentifier(unitNameCol)} AS nvarchar(255)))))`
+        : `''`;
+    const unitAbbrExpr = unitAbbrCol
+        ? `UPPER(LTRIM(RTRIM(CAST(unit.${escapeSqlIdentifier(unitAbbrCol)} AS nvarchar(255)))))`
+        : `''`;
+    const hoConditions = [
+        unitBgCol ? `${unitBgExpr} = '905'` : '',
+        unitNameCol ? `${unitNameExpr} IN (N'HO', N'HEAD OFFICE', N'สำนักงานใหญ่')` : '',
+        unitAbbrCol ? `${unitAbbrExpr} = N'HO'` : ''
+    ].filter(Boolean);
+    const isHoExpr = hoConditions.length > 0
+        ? `(${hoConditions.join(' OR ')})`
+        : '1 = 0';
+    const report09BucketExpr = `
+        CASE
+            WHEN ${isHoExpr} THEN 2
+            WHEN TRY_CONVERT(int, pos.${escapeSqlIdentifier(orgTypeCol)}) = 2
+                 AND TRY_CONVERT(int, pos.${escapeSqlIdentifier(bsTypeCol)}) = 2 THEN 2
+            ELSE 1
+        END
+    `;
+
     const query = `
         SELECT
             ${orgKeyExpr} AS org_unit_id,
             ${effectiveRetireYearExpr} AS retire_year,
-            CASE WHEN TRY_CONVERT(int, pos.${escapeSqlIdentifier(bsTypeCol)}) = 2 THEN 2 ELSE 1 END AS bs_type,
+            ${report09BucketExpr} AS bs_type,
             ${countExpr} AS retire_count
         FROM ${infoMeta.fullName} info
         INNER JOIN ${positionMeta.fullName} pos
@@ -1794,7 +1900,6 @@ const getReport09RetirementMap = async (
         ${joinDelayForOverride}
         ${joinStructureForMapping}
         WHERE ${effectiveRetireYearExpr} BETWEEN @FromYear AND @ToYear
-          AND TRY_CONVERT(int, pos.${escapeSqlIdentifier(bsTypeCol)}) IN (1, 2)
           AND ${orgKeyExpr} <> ''
           ${infoSecondmentCondition}
           ${levelFilterCondition}
@@ -1802,7 +1907,7 @@ const getReport09RetirementMap = async (
         GROUP BY
             ${orgKeyExpr},
             ${effectiveRetireYearExpr},
-            CASE WHEN TRY_CONVERT(int, pos.${escapeSqlIdentifier(bsTypeCol)}) = 2 THEN 2 ELSE 1 END
+            ${report09BucketExpr}
     `;
 
     const result = await pool.request()

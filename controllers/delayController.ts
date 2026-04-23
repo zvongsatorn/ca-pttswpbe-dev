@@ -6,10 +6,14 @@ type DelayRequestBody = {
     EmployeeID?: string;
     posName?: string;
     PosName?: string;
+    retirementYear?: string | number;
+    RetirementYear?: string | number;
     delayYear?: string | number;
     DelayYear?: string | number;
     delayStatus?: string | number;
     DelayStatus?: string | number;
+    delayType?: string | number;
+    DelayType?: string | number;
     userId?: string;
     UserID?: string;
     createBy?: string;
@@ -30,8 +34,10 @@ const normalizeUserId = (value: string | undefined): string => {
 const normalizeBody = (body: DelayRequestBody, tokenUserId: string) => {
     const employeeId = String(body.employeeId || body.EmployeeID || '').trim();
     const posName = String(body.posName || body.PosName || '').trim();
+    const retirementYear = parseIntOrNull(body.retirementYear ?? body.RetirementYear);
     const delayYear = parseIntOrNull(body.delayYear ?? body.DelayYear);
     const delayStatus = parseIntOrNull(body.delayStatus ?? body.DelayStatus);
+    const delayType = parseIntOrNull(body.delayType ?? body.DelayType);
     const userId = normalizeUserId(
         String(body.userId || body.UserID || body.createBy || body.updateBy || tokenUserId || 'SYSTEM')
     );
@@ -39,8 +45,10 @@ const normalizeBody = (body: DelayRequestBody, tokenUserId: string) => {
     return {
         employeeId,
         posName,
+        retirementYear,
         delayYear,
         delayStatus: delayStatus ?? 1,
+        delayType,
         userId
     };
 };
@@ -107,8 +115,10 @@ export const createDelayRecord = async (c: Context) => {
         const result = await delayService.createDelayRecord({
             employeeId: normalized.employeeId,
             posName: normalized.posName,
+            retirementYear: normalized.retirementYear,
             delayYear: normalized.delayYear,
             delayStatus: normalized.delayStatus,
+            delayType: normalized.delayType,
             userId: normalized.userId
         });
 
@@ -144,8 +154,10 @@ export const updateDelayRecord = async (c: Context) => {
         const result = await delayService.updateDelayRecord(delayId, {
             employeeId: normalized.employeeId,
             posName: normalized.posName,
+            retirementYear: normalized.retirementYear,
             delayYear: normalized.delayYear,
             delayStatus: normalized.delayStatus,
+            delayType: normalized.delayType,
             userId: normalized.userId
         });
 
