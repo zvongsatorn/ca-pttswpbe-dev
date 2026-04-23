@@ -2392,6 +2392,8 @@ export const getReport09DataService = async (
     }
 };
 
+const REPORT10_ALLOWED_LEVEL_CODES = ['1007', '1006', '1005', '1004'] as const;
+
 const mapReport10LevelGroup = (levelCode: string, levelName: string): '010' | '020_030' | '040' | '050' | 'OTHER' => {
     const normalizedLevelCode = toTrimText(levelCode).replace(/\D/g, '');
     if (normalizedLevelCode === '1007' || normalizedLevelCode === '010') return '010';
@@ -2405,6 +2407,9 @@ const mapReport10LevelGroup = (levelCode: string, levelName: string): '010' | '0
     if (levelName.includes('ผู้จัดการฝ่าย')) return '050';
     return 'OTHER';
 };
+
+const isReport10IncludedLevel = (levelCode: string, levelName: string): boolean =>
+    mapReport10LevelGroup(levelCode, levelName) !== 'OTHER';
 
 export const getReport10SummaryDataService = async (
     effectiveDateStr: string,
@@ -2446,7 +2451,7 @@ export const getReport10SummaryDataService = async (
                 t2: num('t2'),
                 t3: num('t3')
             };
-        });
+        }).filter((row) => isReport10IncludedLevel(row.level_code, row.position));
     } catch (error) {
         console.error('Error in getReport10SummaryDataService:', error);
         throw error;
@@ -2465,6 +2470,10 @@ export const getReport10ExportDataService = async (
 
         request.input('EffectiveDate', sql.DateTime, effectiveDate);
 
+        const allowedLevelList = REPORT10_ALLOWED_LEVEL_CODES
+            .map((levelCode) => `N'${levelCode}'`)
+            .join(', ');
+
         const result = await request.query(`
             ;WITH PositionDedup AS (
                 SELECT
@@ -2479,6 +2488,7 @@ export const getReport10ExportDataService = async (
                 FROM fn_InterfacePosition(@EffectiveDate) p
                 WHERE @EffectiveDate BETWEEN TRY_CONVERT(date, p.BeginDate) AND TRY_CONVERT(date, p.EndDate)
                 and SignPos <> 0
+                AND LTRIM(RTRIM(CAST(p.LevelGroupNo AS nvarchar(16)))) IN (${allowedLevelList})
             ),
             InfoDataDedup AS (
                 SELECT
@@ -2582,7 +2592,7 @@ export const getReport10ExportDataService = async (
                 specific_rate: specFlag === 1 ? 'Y' : 'N',
                 group_type: isSecondment ? 'SECONDMENT' : (isSpecific ? 'SPEC' : 'PTT')
             };
-        });
+        }).filter((row) => isReport10IncludedLevel(row.level_group_no, row.level_name));
     } catch (error) {
         console.error('Error in getReport10ExportDataService:', error);
         throw error;
