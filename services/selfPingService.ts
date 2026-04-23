@@ -1,13 +1,20 @@
+import configService from './configService.js';
+
 let selfPingTimer: NodeJS.Timeout | null = null;
 let selfPingInFlight = false;
 
 const DEFAULT_INTERVAL_MS = 300_000;
 const DEFAULT_TIMEOUT_MS = 15_000;
+const SELF_PING_CONFIG_KEYS = [
+    'SELF_PING_ENABLED',
+    'SELF_PING_INTERVAL_MS',
+    'SELF_PING_TIMEOUT_MS'
+] as const;
 
 const TRUTHY_VALUES = new Set(['1', 'true', 'yes', 'on']);
 const FALSY_VALUES = new Set(['0', 'false', 'no', 'off']);
 
-const parseBoolean = (value: string | undefined): boolean | null => {
+const parseBoolean = (value: string | null | undefined): boolean | null => {
     if (!value) return null;
 
     const normalized = value.trim().toLowerCase();
@@ -16,9 +23,27 @@ const parseBoolean = (value: string | undefined): boolean | null => {
     return null;
 };
 
-const parsePositiveNumber = (value: string | undefined, fallback: number): number => {
+const parsePositiveNumber = (value: string | null | undefined, fallback: number): number => {
     const parsed = Number(value);
     return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+};
+
+const readDbOrEnvConfig = async (): Promise<Record<(typeof SELF_PING_CONFIG_KEYS)[number], string>> => {
+    try {
+        const dbConfigs = await configService.getConfigs([...SELF_PING_CONFIG_KEYS]);
+        return {
+            SELF_PING_ENABLED: dbConfigs.SELF_PING_ENABLED || process.env.SELF_PING_ENABLED || '',
+            SELF_PING_INTERVAL_MS: dbConfigs.SELF_PING_INTERVAL_MS || process.env.SELF_PING_INTERVAL_MS || '',
+            SELF_PING_TIMEOUT_MS: dbConfigs.SELF_PING_TIMEOUT_MS || process.env.SELF_PING_TIMEOUT_MS || ''
+        };
+    } catch (error) {
+        console.error('[SelfPing] Failed to load MP_Config values, falling back to .env:', error);
+        return {
+            SELF_PING_ENABLED: process.env.SELF_PING_ENABLED || '',
+            SELF_PING_INTERVAL_MS: process.env.SELF_PING_INTERVAL_MS || '',
+            SELF_PING_TIMEOUT_MS: process.env.SELF_PING_TIMEOUT_MS || ''
+        };
+    }
 };
 
 const resolveSelfPingUrl = (): string | null => {
@@ -34,8 +59,8 @@ const resolveSelfPingUrl = (): string | null => {
     return `http://127.0.0.1:${port}/api/system/healthz?source=self-ping`;
 };
 
-const shouldEnableSelfPing = (): boolean => {
-    const configured = parseBoolean(process.env.SELF_PING_ENABLED);
+const shouldEnableSelfPing = (configuredValue?: string | null): boolean => {
+    const configured = parseBoolean(configuredValue);
     if (configured !== null) return configured;
 
     return Boolean(process.env.WEBSITE_HOSTNAME);
@@ -65,10 +90,12 @@ const runSelfPingTick = async (selfPingUrl: string, timeoutMs: number) => {
     }
 };
 
-export const initializeSelfPingScheduler = () => {
+export const initializeSelfPingScheduler = async () => {
     if (selfPingTimer) return;
 
-    if (!shouldEnableSelfPing()) {
+    const config = await readDbOrEnvConfig();
+
+    if (!shouldEnableSelfPing(config.SELF_PING_ENABLED)) {
         console.log('[SelfPing] Disabled.');
         return;
     }
@@ -79,8 +106,8 @@ export const initializeSelfPingScheduler = () => {
         return;
     }
 
-    const intervalMs = parsePositiveNumber(process.env.SELF_PING_INTERVAL_MS, DEFAULT_INTERVAL_MS);
-    const timeoutMs = parsePositiveNumber(process.env.SELF_PING_TIMEOUT_MS, DEFAULT_TIMEOUT_MS);
+    const intervalMs = parsePositiveNumber(config.SELF_PING_INTERVAL_MS, DEFAULT_INTERVAL_MS);
+    const timeoutMs = parsePositiveNumber(config.SELF_PING_TIMEOUT_MS, DEFAULT_TIMEOUT_MS);
 
     console.log(`[SelfPing] Enabled. Target=${selfPingUrl} interval=${intervalMs}ms timeout=${timeoutMs}ms`);
 

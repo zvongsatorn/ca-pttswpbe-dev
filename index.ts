@@ -129,7 +129,7 @@ let server: any;
         
         console.log(`Server is running on port ${port}`);
         initializeMailAlertScheduler();
-        initializeSelfPingScheduler();
+        await initializeSelfPingScheduler();
     } catch (err) {
         console.error("Failed to load configuration or start server:", err);
         process.exit(1);
