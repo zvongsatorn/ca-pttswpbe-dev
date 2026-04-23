@@ -7,13 +7,11 @@ import { serveStatic } from '@hono/node-server/serve-static';
 import { loadEnv } from './config/loadEnv.js';
 import configService from './services/configService.js';
 import { initializeMailAlertScheduler } from './services/mailAlertSchedulerService.js';
-import { initializeSelfPingScheduler } from './services/selfPingService.js';
 
 loadEnv();
 
 const app = new Hono();
 const port = Number(process.env.PORT || 5000);
-const BACKGROUND_JOBS_START_DELAY_MS = 30_000;
 
 app.onError((err, c) => {
     console.error(`[Global Error Handler] ${err}`);
@@ -117,26 +115,11 @@ app.get('/', (c) => {
 console.log(`Server starting on port ${port}...`);
 
 let server: any;
-let backgroundJobsTimer: NodeJS.Timeout | null = null;
 
-const startBackgroundJobs = async () => {
+const startBackgroundJobs = () => {
     console.log('[Startup] Starting background jobs...');
     initializeMailAlertScheduler();
-    await initializeSelfPingScheduler();
     console.log('[Startup] Background jobs initialized.');
-};
-
-const scheduleBackgroundJobs = () => {
-    if (backgroundJobsTimer) return;
-
-    console.log(`[Startup] Delaying background jobs for ${BACKGROUND_JOBS_START_DELAY_MS} ms`);
-
-    backgroundJobsTimer = setTimeout(() => {
-        backgroundJobsTimer = null;
-        startBackgroundJobs().catch((error) => {
-            console.error('[Startup] Failed to initialize background jobs:', error);
-        });
-    }, BACKGROUND_JOBS_START_DELAY_MS);
 };
 
 (async () => {
@@ -150,7 +133,7 @@ const scheduleBackgroundJobs = () => {
         });
         
         console.log(`Server is running on port ${port}`);
-        scheduleBackgroundJobs();
+        startBackgroundJobs();
     } catch (err) {
         console.error("Failed to load configuration or start server:", err);
         process.exit(1);
@@ -160,11 +143,6 @@ const scheduleBackgroundJobs = () => {
 // Graceful Shutdown
 const shutdown = async (signal: string) => {
     console.log(`${signal} signal received. Closing server...`);
-
-    if (backgroundJobsTimer) {
-        clearTimeout(backgroundJobsTimer);
-        backgroundJobsTimer = null;
-    }
     
     if (server) {
         server.close(() => {

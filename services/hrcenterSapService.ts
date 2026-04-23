@@ -406,6 +406,94 @@ const sendSapStatusByOrg = async (effectiveDate: Date, sendBy: string, orgUnits:
     await request.execute('mp_HRCenter_SendSAPStatusByOrg');
 };
 
+const markSapSendStatus = async (effectiveDate: Date, sendBy: string, orgUnits: string[]): Promise<void> => {
+    if (orgUnits.length === 0) {
+        await sendSapStatusAll(effectiveDate, sendBy);
+        return;
+    }
+
+    await sendSapStatusByOrg(effectiveDate, sendBy, orgUnits);
+};
+
+interface FtpUploadAttempt {
+    label: string;
+    url: string;
+    args: string[];
+}
+
+const normalizeFtpHost = (value: string): { host: string; scheme: 'ftp' | 'ftps' | null } => {
+    const trimmed = toText(value);
+    if (!trimmed) return { host: '', scheme: null };
+
+    const ftpsMatch = trimmed.match(/^ftps:\/\//i);
+    if (ftpsMatch) {
+        return {
+            host: trimmed.replace(/^ftps:\/\//i, '').replace(/\/+$/, ''),
+            scheme: 'ftps'
+        };
+    }
+
+    const ftpMatch = trimmed.match(/^ftp:\/\//i);
+    if (ftpMatch) {
+        return {
+            host: trimmed.replace(/^ftp:\/\//i, '').replace(/\/+$/, ''),
+            scheme: 'ftp'
+        };
+    }
+
+    return {
+        host: trimmed.replace(/\/+$/, ''),
+        scheme: null
+    };
+};
+
+const buildCurlUploadAttempt = (
+    label: string,
+    url: string,
+    username: string,
+    password: string,
+    localFilePath: string,
+    options?: {
+        insecure?: boolean;
+        sslRequired?: boolean;
+    }
+): FtpUploadAttempt => {
+    const args = [
+        '--fail',
+        '--silent',
+        '--show-error',
+        '--ftp-create-dirs',
+        '--max-time',
+        '120'
+    ];
+
+    if (options?.insecure) {
+        args.push('--insecure');
+    }
+
+    if (options?.sslRequired) {
+        args.push('--ssl-reqd');
+    }
+
+    args.push(
+        '--user',
+        `${username}:${password}`,
+        '--upload-file',
+        localFilePath,
+        url
+    );
+
+    return { label, url, args };
+};
+
+const appendAttemptIfMissing = (attempts: FtpUploadAttempt[], attempt: FtpUploadAttempt): void => {
+    if (attempts.some((item) => item.url === attempt.url && item.args.join('\u0000') === attempt.args.join('\u0000'))) {
+        return;
+    }
+
+    attempts.push(attempt);
+};
+
 const uploadFileToFtp = async (localFilePath: string): Promise<void> => {
     const username = await getConfigValue('SendToSAP_username');
     const password = await getConfigValue('SendToSAP_password');
@@ -417,25 +505,81 @@ const uploadFileToFtp = async (localFilePath: string): Promise<void> => {
         throw new Error('Missing FTP configuration.');
     }
 
-    const host = hostip.replace(/^ftp:\/\//i, '').replace(/\/+$/, '');
+    const { host, scheme } = normalizeFtpHost(hostip);
     const remotePath = remotefile.startsWith('/') ? remotefile : `/${remotefile}`;
-    const ftpUrl = `ftp://${host}${port ? `:${port}` : ''}${remotePath}`;
+    const configuredProtocol = scheme ?? (port === '990' ? 'ftps' : 'ftp');
+    const configuredPortSegment = port ? `:${port}` : '';
+    const configuredUrl = `${configuredProtocol}://${host}${configuredPortSegment}${remotePath}`;
 
-    const args = [
-        '--fail',
-        '--silent',
-        '--show-error',
-        '--ftp-create-dirs',
-        '--max-time',
-        '120',
-        '--user',
-        `${username}:${password}`,
-        '--upload-file',
-        localFilePath,
-        ftpUrl
-    ];
+    const attempts: FtpUploadAttempt[] = [];
+    const errors: string[] = [];
 
-    await execFileAsync('curl', args);
+    appendAttemptIfMissing(
+        attempts,
+        buildCurlUploadAttempt(
+            'configured-endpoint',
+            configuredUrl,
+            username,
+            password,
+            localFilePath,
+            {
+                insecure: false,
+                sslRequired: configuredProtocol === 'ftp' && port === '21'
+            }
+        )
+    );
+
+    appendAttemptIfMissing(
+        attempts,
+        buildCurlUploadAttempt(
+            'implicit-ftps-990-insecure',
+            `ftps://${host}:990${remotePath}`,
+            username,
+            password,
+            localFilePath,
+            {
+                insecure: true
+            }
+        )
+    );
+
+    appendAttemptIfMissing(
+        attempts,
+        buildCurlUploadAttempt(
+            'explicit-ftps-21-insecure',
+            `ftp://${host}:21${remotePath}`,
+            username,
+            password,
+            localFilePath,
+            {
+                insecure: true,
+                sslRequired: true
+            }
+        )
+    );
+
+    for (const attempt of attempts) {
+        try {
+            await execFileAsync('curl', attempt.args);
+            console.info('[HRCenter SAP] FTP upload succeeded', {
+                attempt: attempt.label,
+                url: attempt.url
+            });
+            return;
+        } catch (error: any) {
+            const stderr = toText(error?.stderr);
+            const stdout = toText(error?.stdout);
+            const detail = stderr || stdout || error?.message || 'Unknown FTP upload error';
+            errors.push(`${attempt.label}: ${detail}`);
+            console.warn('[HRCenter SAP] FTP upload attempt failed', {
+                attempt: attempt.label,
+                url: attempt.url,
+                detail
+            });
+        }
+    }
+
+    throw new Error(errors.join(' | '));
 };
 
 export const sendHRCenterToSapService = async (params: HRCenterSendToSapParams): Promise<HRCenterSendToSapResult> => {
@@ -459,12 +603,6 @@ export const sendHRCenterToSapService = async (params: HRCenterSendToSapParams):
     if (resultCode !== '-1') {
         const textfile = await exportText(effectiveDate, orgUnits);
 
-        if (sendType === 0) {
-            await sendSapStatusAll(effectiveDate, employeeId);
-        } else {
-            await sendSapStatusByOrg(effectiveDate, employeeId, orgUnits);
-        }
-
         try {
             await ensureOutboundDirectory();
             const outboundFilePath = getHRCenterSapOutboundFilePath();
@@ -484,12 +622,34 @@ export const sendHRCenterToSapService = async (params: HRCenterSendToSapParams):
                 await uploadFileToFtp(getHRCenterSapOutboundFilePath());
                 ftpSent = true;
             } catch (error) {
+                console.error('[HRCenter SAP] Failed to upload outbound file via FTP', {
+                    outboundFilePath: getHRCenterSapOutboundFilePath(),
+                    error
+                });
                 resultCode = '2';
                 message = 'ส่งไฟล์ FTP ไม่สำเร็จ แต่สามารถดาวน์โหลดไฟล์ได้';
             }
         }
-    } else if (sendType === 1) {
-        await sendSapStatusByOrg(effectiveDate, employeeId, orgUnits);
+
+        if (resultCode === '1' || (resultCode !== '0' && !ftpEnabled)) {
+            try {
+                await markSapSendStatus(effectiveDate, employeeId, orgUnits);
+            } catch (error) {
+                console.error('[HRCenter SAP] Uploaded file successfully, but failed to update SAP send status', {
+                    effectiveDate: effectiveDate.toISOString(),
+                    employeeId,
+                    orgUnits,
+                    ftpEnabled,
+                    ftpSent,
+                    error
+                });
+
+                resultCode = '2';
+                message = ftpEnabled && ftpSent
+                    ? 'นำส่งไฟล์เข้า SAP สำเร็จ แต่บันทึกสถานะการนำส่งในระบบไม่สำเร็จ'
+                    : 'สร้างไฟล์สำเร็จ แต่บันทึกสถานะการนำส่งในระบบไม่สำเร็จ';
+            }
+        }
     }
 
     if (!message) {
