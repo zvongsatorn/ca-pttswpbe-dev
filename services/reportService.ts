@@ -1842,16 +1842,28 @@ const getReport09RetirementMap = async (
         `
         : `LTRIM(RTRIM(CAST(pos.${escapeSqlIdentifier(orgCol)} AS nvarchar(32))))`;
 
-    const joinStructureForMapping = structureIsSecondment === 0
+    const mappedOrgForUnitJoinExpr = structureIsSecondment === 0
         ? `
+            CASE
+                WHEN ISNULL(unit.IsSecondment, 0) = 1
+                     AND rt.Reportto IS NOT NULL
+                     AND LTRIM(RTRIM(CAST(rt.Reportto AS nvarchar(32)))) <> ''
+                    THEN LTRIM(RTRIM(CAST(rt.Reportto AS nvarchar(32))))
+                ELSE LTRIM(RTRIM(CAST(pos.${escapeSqlIdentifier(orgCol)} AS nvarchar(32))))
+            END
+        `
+        : `LTRIM(RTRIM(CAST(pos.${escapeSqlIdentifier(orgCol)} AS nvarchar(32))))`;
+
+    const joinStructureForMapping = `
         LEFT JOIN fn_InterfaceUnit(@EffectiveDate) unit
             ON LTRIM(RTRIM(CAST(unit.OrgUnitNo AS nvarchar(32)))) =
                LTRIM(RTRIM(CAST(pos.${escapeSqlIdentifier(orgCol)} AS nvarchar(32))))
         LEFT JOIN fn_InterfaceReportto(@EffectiveDate) rt
             ON LTRIM(RTRIM(CAST(rt.OrgUnitNo AS nvarchar(32)))) =
                LTRIM(RTRIM(CAST(pos.${escapeSqlIdentifier(orgCol)} AS nvarchar(32))))
-        `
-        : '';
+        LEFT JOIN fn_InterfaceUnit(@EffectiveDate) mappedUnit
+            ON LTRIM(RTRIM(CAST(mappedUnit.OrgUnitNo AS nvarchar(32)))) = ${mappedOrgForUnitJoinExpr}
+        `;
 
     const sourceEmployeeExpr = infoEmployeeCol
         ? `LTRIM(RTRIM(CAST(info.${escapeSqlIdentifier(infoEmployeeCol)} AS nvarchar(32))))`
@@ -1903,6 +1915,9 @@ const getReport09RetirementMap = async (
     const unitBgExpr = unitBgCol
         ? `LTRIM(RTRIM(CAST(unit.${escapeSqlIdentifier(unitBgCol)} AS nvarchar(32))))`
         : `''`;
+    const mappedUnitBgExpr = unitBgCol
+        ? `LTRIM(RTRIM(CAST(mappedUnit.${escapeSqlIdentifier(unitBgCol)} AS nvarchar(32))))`
+        : `''`;
     const unitNameExpr = unitNameCol
         ? `UPPER(LTRIM(RTRIM(CAST(unit.${escapeSqlIdentifier(unitNameCol)} AS nvarchar(255)))))`
         : `''`;
@@ -1920,6 +1935,8 @@ const getReport09RetirementMap = async (
     const report09BucketExpr = `
         CASE
             WHEN ${isHoExpr} THEN 2
+            WHEN ${mappedUnitBgExpr} = '905'
+                 AND NULLIF(LTRIM(RTRIM(CAST(pos.${escapeSqlIdentifier(bsTypeCol)} AS nvarchar(32)))), '') IS NULL THEN 2
             WHEN TRY_CONVERT(int, pos.${escapeSqlIdentifier(orgTypeCol)}) = 2
                  AND TRY_CONVERT(int, pos.${escapeSqlIdentifier(bsTypeCol)}) = 2 THEN 2
             ELSE 1
@@ -2067,6 +2084,9 @@ export const getReport09AuditService = async (
     const unitBgExpr = unitBgCol
         ? `LTRIM(RTRIM(CAST(srcUnit.${escapeSqlIdentifier(unitBgCol)} AS nvarchar(32))))`
         : `''`;
+    const mappedUnitBgExpr = unitBgCol
+        ? `LTRIM(RTRIM(CAST(mappedUnit.${escapeSqlIdentifier(unitBgCol)} AS nvarchar(32))))`
+        : `''`;
     const unitNameExpr = unitNameCol
         ? `UPPER(LTRIM(RTRIM(CAST(srcUnit.${escapeSqlIdentifier(unitNameCol)} AS nvarchar(255)))))`
         : `''`;
@@ -2090,6 +2110,8 @@ export const getReport09AuditService = async (
     const report09BucketExpr = `
         CASE
             WHEN ${isHoExpr} THEN N'Support'
+            WHEN ${mappedUnitBgExpr} = '905'
+                 AND NULLIF(LTRIM(RTRIM(CAST(pos.${escapeSqlIdentifier(bsTypeCol)} AS nvarchar(32)))), '') IS NULL THEN N'Support'
             WHEN TRY_CONVERT(int, pos.${escapeSqlIdentifier(orgTypeCol)}) = 2
                  AND TRY_CONVERT(int, pos.${escapeSqlIdentifier(bsTypeCol)}) = 2 THEN N'Support'
             ELSE N'BU'
