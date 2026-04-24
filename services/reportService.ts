@@ -5,6 +5,17 @@ import { getReport7FormulaConfigByEffectiveDateService } from './landscapeFormul
 type Report08LevelMap = Map<string, Map<string, number>>;
 type Report09OrgYearMap = Map<string, Map<number, { support: number; bu: number }>>;
 type Report09YearRateMap = Map<number, { support: { rate: number; base: number }; bu: { rate: number; base: number } }>;
+type Report09AuditRow = {
+    stage_code: string;
+    stage_name: string;
+    org_unit_id: string;
+    unit_abbr: string;
+    unit_name: string;
+    retire_year: number;
+    bs_type: 'Support' | 'BU';
+    position_rows: number;
+    employee_count: number;
+};
 
 type TableMeta = {
     schemaName: string;
@@ -53,6 +64,9 @@ const REPORT09_UNIT_FN_CANDIDATES = ['fn_InterfaceUnit'];
 const REPORT09_UNIT_BG_COL_CANDIDATES = ['BGNo', 'BgNo', 'BGNO'];
 const REPORT09_UNIT_NAME_COL_CANDIDATES = ['UnitName', 'OrgUnitName', 'Name'];
 const REPORT09_UNIT_ABBR_COL_CANDIDATES = ['UnitAbbr', 'OrgUnitAbbr', 'ShortName', 'Abbr'];
+const REPORT09_LEVEL_GROUP_TABLE_CANDIDATES = ['MP_LevelGroup'];
+const REPORT09_LEVEL_GROUP_ACTIVE_COL_CANDIDATES = ['LevelDelayActive', 'LevelDelayActiive', 'LevelDalayActive'];
+const REPORT09_LEVEL_GROUP_ORDER_COL_CANDIDATES = ['LevelDelayOrder', 'LevelDalayOrder', 'LevelGroupOrder'];
 const REPORT09_NON_COUNT_DELAY_YEAR = 9999;
 
 export const getDashboardDataService = async (
@@ -1670,6 +1684,18 @@ const getReport09OrgUnitNo = (row: Record<string, unknown>): string => {
     return '';
 };
 
+const resolveReport09LevelGroupColumns = async (
+    pool: any
+): Promise<{ activeColumn: string | null; orderColumn: string | null }> => {
+    const levelMeta = await getTableMeta(pool, REPORT09_LEVEL_GROUP_TABLE_CANDIDATES);
+    if (!levelMeta) return { activeColumn: null, orderColumn: null };
+
+    return {
+        activeColumn: pickColumnName(levelMeta.columns, REPORT09_LEVEL_GROUP_ACTIVE_COL_CANDIDATES),
+        orderColumn: pickColumnName(levelMeta.columns, REPORT09_LEVEL_GROUP_ORDER_COL_CANDIDATES)
+    };
+};
+
 const getReport09RetirementLevelFilter = async (
     pool: any,
     effectiveYear: number
@@ -1677,6 +1703,19 @@ const getReport09RetirementLevelFilter = async (
     try {
         const effectiveYearAD = effectiveYear > 2500 ? effectiveYear - 543 : effectiveYear;
         const effectiveYearBE = effectiveYearAD + 543;
+        const { activeColumn, orderColumn } = await resolveReport09LevelGroupColumns(pool);
+        const activeFilter = activeColumn
+            ? `AND ISNULL(TRY_CONVERT(int, ${escapeSqlIdentifier(activeColumn)}), 0) = 1`
+            : '';
+        const activeFilterForAlias = activeColumn
+            ? `AND ISNULL(TRY_CONVERT(int, lg.${escapeSqlIdentifier(activeColumn)}), 0) = 1`
+            : '';
+        const orderExpr = orderColumn
+            ? `TRY_CONVERT(int, ${escapeSqlIdentifier(orderColumn)})`
+            : 'NULL';
+        const orderExprForAlias = orderColumn
+            ? `TRY_CONVERT(int, lg.${escapeSqlIdentifier(orderColumn)})`
+            : 'NULL';
 
         const selectedResult = await pool.request()
             .input('EffectiveYearAD', sql.Int, effectiveYearAD)
@@ -1688,7 +1727,7 @@ const getReport09RetirementLevelFilter = async (
                 WHERE EffectiveYear IN (@EffectiveYearAD, @EffectiveYearBE)
                   AND NULLIF(LTRIM(RTRIM(CAST(LevelGroupNo AS nvarchar(16)))), '') IS NOT NULL
                 ORDER BY
-                    CASE WHEN EffectiveYear = @EffectiveYearAD THEN 0 ELSE 1 END,
+                    CASE WHEN EffectiveYear = @EffectiveYearBE THEN 0 ELSE 1 END,
                     TRY_CONVERT(bigint, BUSupportRateRemarkID) DESC
             `);
 
@@ -1702,20 +1741,20 @@ const getReport09RetirementLevelFilter = async (
             .query(`
                 ;WITH Selected AS (
                     SELECT TOP (1)
-                        TRY_CONVERT(int, LevelDelayOrder) AS SelectedOrder
+                        ${orderExpr} AS SelectedOrder
                     FROM MP_LevelGroup
                     WHERE LTRIM(RTRIM(CAST(LevelGroupNo AS nvarchar(16)))) = @SelectedLevelGroupNo
-                      AND ISNULL(TRY_CONVERT(int, LevelDelayActive), 0) = 1
+                      ${activeFilter}
                 )
                 SELECT
                     LTRIM(RTRIM(CAST(lg.LevelGroupNo AS nvarchar(16)))) AS LevelGroupNo
                 FROM MP_LevelGroup lg
                 CROSS JOIN Selected s
                 WHERE s.SelectedOrder IS NOT NULL
-                  AND ISNULL(TRY_CONVERT(int, lg.LevelDelayActive), 0) = 1
-                  AND TRY_CONVERT(int, lg.LevelDelayOrder) <= s.SelectedOrder
+                  ${activeFilterForAlias}
+                  AND ${orderExprForAlias} <= s.SelectedOrder
                 ORDER BY
-                    TRY_CONVERT(int, lg.LevelDelayOrder) DESC,
+                    ${orderExprForAlias} DESC,
                     LTRIM(RTRIM(CAST(lg.LevelGroupNo AS nvarchar(16))))
             `);
 
@@ -1939,6 +1978,240 @@ const getReport09RetirementMap = async (
     return map;
 };
 
+export const getReport09AuditService = async (
+    effectiveYear: number
+): Promise<{
+    metadata: {
+        effectiveYear: number;
+        displayYears: number[];
+        selectedLevelGroupNo: string;
+        allowedLevelGroupNos: string[];
+        stageDescriptions: Array<{ stage_code: string; stage_name: string; description: string }>;
+    };
+    rows: Report09AuditRow[];
+}> => {
+    const safeEffectiveYear = toNumberOrZero(effectiveYear) || (new Date().getFullYear() + 543);
+    const effectiveYearAD = safeEffectiveYear > 2500 ? safeEffectiveYear - 543 : safeEffectiveYear;
+    const structureDate = new Date(`${effectiveYearAD}-01-01T00:00:00`);
+    const displayYears = buildReport09Years(safeEffectiveYear);
+    const fromYear = displayYears[0];
+    const toYear = displayYears[displayYears.length - 1];
+    const structureIsSecondment = 0;
+    const pool = await poolPromise;
+
+    const infoMeta = await getTableMeta(pool, REPORT09_INFO_TABLE_CANDIDATES);
+    const positionMeta = await getTableMeta(pool, REPORT09_POSITION_TABLE_CANDIDATES);
+    const unitMeta = await getObjectMeta(pool, REPORT09_UNIT_FN_CANDIDATES);
+    if (!infoMeta || !positionMeta) {
+        throw new Error('Report09 source tables are unavailable');
+    }
+
+    const retireYearCol = pickColumnName(infoMeta.columns, REPORT09_RETIRE_YEAR_COL_CANDIDATES);
+    const infoEmployeeCol = pickColumnName(infoMeta.columns, REPORT09_INFO_EMPLOYEE_COL_CANDIDATES);
+    const infoSecondmentTextCol = pickColumnName(infoMeta.columns, REPORT09_INFO_SECONDMENT_TEXT_COL_CANDIDATES);
+    const infoPosCol = pickColumnName(infoMeta.columns, REPORT09_INFO_POSITION_COL_CANDIDATES);
+    const positionIdCol = pickColumnName(positionMeta.columns, REPORT09_POSITION_ID_COL_CANDIDATES);
+    const orgCol = pickColumnName(positionMeta.columns, REPORT09_ORG_COL_CANDIDATES);
+    const orgTypeCol = pickColumnName(positionMeta.columns, REPORT09_ORG_TYPE_COL_CANDIDATES);
+    const levelCol = pickColumnName(positionMeta.columns, REPORT09_LEVEL_COL_CANDIDATES);
+    const bsTypeCol = pickColumnName(positionMeta.columns, REPORT09_BS_TYPE_COL_CANDIDATES);
+    if (!retireYearCol || !infoPosCol || !positionIdCol || !orgCol || !orgTypeCol || !bsTypeCol) {
+        throw new Error('Report09 required columns are unavailable');
+    }
+
+    const unitBgCol = pickColumnName(unitMeta?.columns || new Map<string, string>(), REPORT09_UNIT_BG_COL_CANDIDATES);
+    const unitNameCol = pickColumnName(unitMeta?.columns || new Map<string, string>(), REPORT09_UNIT_NAME_COL_CANDIDATES);
+    const unitAbbrCol = pickColumnName(unitMeta?.columns || new Map<string, string>(), REPORT09_UNIT_ABBR_COL_CANDIDATES);
+    const signPosCol = pickColumnName(positionMeta.columns, REPORT09_SIGN_POS_COL_CANDIDATES);
+    const employeeCol = pickColumnName(positionMeta.columns, REPORT09_EMPLOYEE_COL_CANDIDATES);
+
+    const sourceEmployeeExpr = infoEmployeeCol
+        ? `LTRIM(RTRIM(CAST(info.${escapeSqlIdentifier(infoEmployeeCol)} AS nvarchar(64))))`
+        : employeeCol
+            ? `LTRIM(RTRIM(CAST(pos.${escapeSqlIdentifier(employeeCol)} AS nvarchar(64))))`
+            : `LTRIM(RTRIM(CAST(pos.${escapeSqlIdentifier(positionIdCol)} AS nvarchar(64))))`;
+    const employeeKeyExpr = `NULLIF(${sourceEmployeeExpr}, '')`;
+    const originalOrgExpr = `LTRIM(RTRIM(CAST(pos.${escapeSqlIdentifier(orgCol)} AS nvarchar(32))))`;
+    const mappedOrgExpr = structureIsSecondment === 0
+        ? `
+            CASE
+                WHEN ISNULL(srcUnit.IsSecondment, 0) = 1
+                     AND rt.Reportto IS NOT NULL
+                     AND LTRIM(RTRIM(CAST(rt.Reportto AS nvarchar(32)))) <> ''
+                    THEN LTRIM(RTRIM(CAST(rt.Reportto AS nvarchar(32))))
+                ELSE ${originalOrgExpr}
+            END
+        `
+        : originalOrgExpr;
+    const effectiveRetireYearExpr = `
+        CASE
+            WHEN delay.delay_year = ${REPORT09_NON_COUNT_DELAY_YEAR}
+                THEN TRY_CONVERT(int, info.${escapeSqlIdentifier(retireYearCol)})
+            WHEN delay.delay_year IS NOT NULL
+                THEN delay.delay_year
+            ELSE TRY_CONVERT(int, info.${escapeSqlIdentifier(retireYearCol)})
+        END
+    `;
+    const employeeConditionExpr = infoSecondmentTextCol
+        ? `CASE WHEN UPPER(LTRIM(RTRIM(CAST(info.${escapeSqlIdentifier(infoSecondmentTextCol)} AS nvarchar(64))))) = 'EMPLOYEE' THEN 1 ELSE 0 END`
+        : '1';
+    const signPosConditionExpr = signPosCol
+        ? `CASE WHEN TRY_CONVERT(int, pos.${escapeSqlIdentifier(signPosCol)}) = 100 THEN 1 ELSE 0 END`
+        : '1';
+
+    const { selectedLevelGroupNo, allowedLevelGroupNos } = await getReport09RetirementLevelFilter(pool, safeEffectiveYear);
+    const levelConditionExpr = levelCol && allowedLevelGroupNos.length > 0
+        ? `CASE WHEN LTRIM(RTRIM(CAST(pos.${escapeSqlIdentifier(levelCol)} AS nvarchar(16)))) IN (${allowedLevelGroupNos.map((value) => `'${escapeSqlString(value)}'`).join(',')}) THEN 1 ELSE 0 END`
+        : '1';
+
+    const unitBgExpr = unitBgCol
+        ? `LTRIM(RTRIM(CAST(srcUnit.${escapeSqlIdentifier(unitBgCol)} AS nvarchar(32))))`
+        : `''`;
+    const unitNameExpr = unitNameCol
+        ? `UPPER(LTRIM(RTRIM(CAST(srcUnit.${escapeSqlIdentifier(unitNameCol)} AS nvarchar(255)))))`
+        : `''`;
+    const unitAbbrExpr = unitAbbrCol
+        ? `UPPER(LTRIM(RTRIM(CAST(srcUnit.${escapeSqlIdentifier(unitAbbrCol)} AS nvarchar(255)))))`
+        : `''`;
+    const mappedUnitNameExpr = unitNameCol
+        ? `LTRIM(RTRIM(CAST(mappedUnit.${escapeSqlIdentifier(unitNameCol)} AS nvarchar(255))))`
+        : mappedOrgExpr;
+    const mappedUnitAbbrExpr = unitAbbrCol
+        ? `LTRIM(RTRIM(CAST(mappedUnit.${escapeSqlIdentifier(unitAbbrCol)} AS nvarchar(255))))`
+        : mappedOrgExpr;
+    const hoConditions = [
+        unitBgCol ? `${unitBgExpr} = '905'` : '',
+        unitNameCol ? `${unitNameExpr} IN (N'HO', N'HEAD OFFICE', N'สำนักงานใหญ่')` : '',
+        unitAbbrCol ? `${unitAbbrExpr} = N'HO'` : ''
+    ].filter(Boolean);
+    const isHoExpr = hoConditions.length > 0
+        ? `(${hoConditions.join(' OR ')})`
+        : '1 = 0';
+    const report09BucketExpr = `
+        CASE
+            WHEN ${isHoExpr} THEN N'Support'
+            WHEN TRY_CONVERT(int, pos.${escapeSqlIdentifier(orgTypeCol)}) = 2
+                 AND TRY_CONVERT(int, pos.${escapeSqlIdentifier(bsTypeCol)}) = 2 THEN N'Support'
+            ELSE N'BU'
+        END
+    `;
+
+    const query = `
+        ;WITH delay AS (
+            SELECT employee_id, delay_year
+            FROM (
+                SELECT
+                    LTRIM(RTRIM(CAST(EmployeeID AS nvarchar(32)))) AS employee_id,
+                    TRY_CONVERT(int, DelayYear) AS delay_year,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY LTRIM(RTRIM(CAST(EmployeeID AS nvarchar(32))))
+                        ORDER BY COALESCE(UpdateDate, CreateDate) DESC,
+                                 TRY_CONVERT(bigint, DelayID) DESC
+                    ) AS rn
+                FROM MP_Delay
+                WHERE ISNULL(DelayStatus, 1) = 1
+                  AND LTRIM(RTRIM(CAST(EmployeeID AS nvarchar(32)))) <> ''
+                  AND TRY_CONVERT(int, DelayYear) IS NOT NULL
+            ) d
+            WHERE d.rn = 1
+        ),
+        base AS (
+            SELECT
+                ${employeeKeyExpr} AS employee_key,
+                LTRIM(RTRIM(CAST(pos.${escapeSqlIdentifier(positionIdCol)} AS nvarchar(64)))) AS position_key,
+                ${mappedOrgExpr} AS org_unit_id,
+                ${mappedUnitAbbrExpr} AS unit_abbr,
+                ${mappedUnitNameExpr} AS unit_name,
+                ${effectiveRetireYearExpr} AS retire_year,
+                ${report09BucketExpr} AS bs_type,
+                ${employeeConditionExpr} AS pass_employee,
+                ${signPosConditionExpr} AS pass_signpos,
+                ${levelConditionExpr} AS pass_level
+            FROM ${infoMeta.fullName} info
+            INNER JOIN ${positionMeta.fullName} pos
+                ON LTRIM(RTRIM(CAST(pos.${escapeSqlIdentifier(positionIdCol)} AS nvarchar(64)))) =
+                   LTRIM(RTRIM(CAST(info.${escapeSqlIdentifier(infoPosCol)} AS nvarchar(64))))
+            LEFT JOIN delay
+                ON delay.employee_id = ${sourceEmployeeExpr}
+            LEFT JOIN fn_InterfaceUnit(@EffectiveDate) srcUnit
+                ON LTRIM(RTRIM(CAST(srcUnit.OrgUnitNo AS nvarchar(32)))) = ${originalOrgExpr}
+            LEFT JOIN fn_InterfaceReportto(@EffectiveDate) rt
+                ON LTRIM(RTRIM(CAST(rt.OrgUnitNo AS nvarchar(32)))) = ${originalOrgExpr}
+            LEFT JOIN fn_InterfaceUnit(@EffectiveDate) mappedUnit
+                ON LTRIM(RTRIM(CAST(mappedUnit.OrgUnitNo AS nvarchar(32)))) = ${mappedOrgExpr}
+            WHERE ${effectiveRetireYearExpr} BETWEEN @FromYear AND @ToYear
+        )
+        SELECT
+            stage.stage_code,
+            stage.stage_name,
+            NULLIF(LTRIM(RTRIM(CAST(base.org_unit_id AS nvarchar(32)))), '') AS org_unit_id,
+            COALESCE(NULLIF(LTRIM(RTRIM(CAST(base.unit_abbr AS nvarchar(255)))), ''), NULLIF(LTRIM(RTRIM(CAST(base.org_unit_id AS nvarchar(32)))), '')) AS unit_abbr,
+            COALESCE(NULLIF(LTRIM(RTRIM(CAST(base.unit_name AS nvarchar(255)))), ''), NULLIF(LTRIM(RTRIM(CAST(base.org_unit_id AS nvarchar(32)))), '')) AS unit_name,
+            base.retire_year,
+            base.bs_type,
+            COUNT_BIG(1) AS position_rows,
+            COUNT(DISTINCT COALESCE(base.employee_key, CONCAT(N'POSITION:', base.position_key))) AS employee_count
+        FROM base
+        CROSS APPLY (VALUES
+            (N'01', N'ช่วงปีเกษียณ', 1),
+            (N'02', N'เฉพาะ Employee', base.pass_employee),
+            (N'03', N'เฉพาะ SignPos=100', base.pass_employee * base.pass_signpos),
+            (N'04', N'เฉพาะ Level ที่ใช้คำนวณ', base.pass_employee * base.pass_signpos * base.pass_level),
+            (N'05', N'มีหน่วยงานหลัง map secondment', base.pass_employee * base.pass_signpos * base.pass_level * CASE WHEN NULLIF(LTRIM(RTRIM(CAST(base.org_unit_id AS nvarchar(32)))), '') IS NOT NULL THEN 1 ELSE 0 END)
+        ) stage(stage_code, stage_name, pass_filter)
+        WHERE stage.pass_filter = 1
+        GROUP BY
+            stage.stage_code,
+            stage.stage_name,
+            NULLIF(LTRIM(RTRIM(CAST(base.org_unit_id AS nvarchar(32)))), ''),
+            COALESCE(NULLIF(LTRIM(RTRIM(CAST(base.unit_abbr AS nvarchar(255)))), ''), NULLIF(LTRIM(RTRIM(CAST(base.org_unit_id AS nvarchar(32)))), '')),
+            COALESCE(NULLIF(LTRIM(RTRIM(CAST(base.unit_name AS nvarchar(255)))), ''), NULLIF(LTRIM(RTRIM(CAST(base.org_unit_id AS nvarchar(32)))), '')),
+            base.retire_year,
+            base.bs_type
+        ORDER BY
+            stage.stage_code,
+            org_unit_id,
+            base.retire_year,
+            base.bs_type
+    `;
+
+    const result = await pool.request()
+        .input('FromYear', sql.Int, fromYear)
+        .input('ToYear', sql.Int, toYear)
+        .input('EffectiveDate', sql.DateTime, structureDate)
+        .query(query);
+
+    const rows = (Array.isArray(result.recordset) ? result.recordset : [])
+        .map((row: Record<string, unknown>): Report09AuditRow => ({
+            stage_code: toTrimText(row.stage_code),
+            stage_name: toTrimText(row.stage_name),
+            org_unit_id: normalizeReport09OrgUnitKey(row.org_unit_id),
+            unit_abbr: toTrimText(row.unit_abbr),
+            unit_name: toTrimText(row.unit_name),
+            retire_year: toNumberOrZero(row.retire_year),
+            bs_type: toTrimText(row.bs_type) === 'Support' ? 'Support' : 'BU',
+            position_rows: toNumberOrZero(row.position_rows),
+            employee_count: toNumberOrZero(row.employee_count)
+        }));
+
+    return {
+        metadata: {
+            effectiveYear: safeEffectiveYear,
+            displayYears,
+            selectedLevelGroupNo,
+            allowedLevelGroupNos,
+            stageDescriptions: [
+                { stage_code: '01', stage_name: 'ช่วงปีเกษียณ', description: 'Join infodata + InterfacePosition และปีเกษียณอยู่ในช่วง 5 ปีที่แสดง โดยใช้ MP_Delay override แล้ว' },
+                { stage_code: '02', stage_name: 'เฉพาะ Employee', description: 'ผ่านเงื่อนไข infodata.Secondment_text = Employee' },
+                { stage_code: '03', stage_name: 'เฉพาะ SignPos=100', description: 'ผ่านเงื่อนไข SignPos = 100 ถ้าตารางมี column นี้' },
+                { stage_code: '04', stage_name: 'เฉพาะ Level ที่ใช้คำนวณ', description: 'ผ่าน LevelGroupNo ตาม MP_BUSupportRateRemark และ MP_LevelGroup' },
+                { stage_code: '05', stage_name: 'มีหน่วยงานหลัง map secondment', description: 'ผ่านทุกเงื่อนไขสุดท้าย และมี OrgUnit หลัง map secondment ไป Reportto' }
+            ]
+        },
+        rows
+    };
+};
+
 const getReport09OrgYearValue = (
     sourceMap: Report09OrgYearMap,
     orgUnitId: string,
@@ -2108,6 +2381,90 @@ const buildReport09FallbackTree = (
     rows.forEach((row) => sumNode(grandTotal, row));
     rows.push(grandTotal);
     return rows;
+};
+
+const getReport09GroupName = (groupBg: unknown, fallback: unknown = ''): string => {
+    const group = String(groupBg ?? '').trim();
+    if (group === '1') return 'สำนักงานใหญ่';
+    if (group === '2') return 'กลุ่มธุรกิจปิโตรเลี่ยมขั้นต้นฯ';
+    if (group === '3') return 'กลุ่มธุรกิจใหม่และความยั่งยืน';
+    if (group === '4') return 'กลุ่มธุรกิจขั้นปลาย';
+    return toTrimText(fallback) || 'ไม่ระบุกลุ่มธุรกิจ';
+};
+
+const appendReport09MissingStructureRows = async (
+    pool: any,
+    structureRows: any[],
+    sourceMap: Report09OrgYearMap,
+    structureDate: Date
+) => {
+    const existingOrgUnitIds = new Set(
+        structureRows
+            .map((row) => getReport09OrgUnitNo((row && typeof row === 'object') ? row as Record<string, unknown> : {}))
+            .filter(Boolean)
+    );
+    const missingOrgUnitIds = Array.from(sourceMap.keys()).filter((orgUnitId) => !existingOrgUnitIds.has(orgUnitId));
+    if (!missingOrgUnitIds.length) return structureRows;
+
+    const inList = missingOrgUnitIds.map((orgUnitId) => `N'${escapeSqlString(orgUnitId)}'`).join(',');
+    const result = await pool.request()
+        .input('EffectiveDate', sql.DateTime, structureDate)
+        .query(`
+            SELECT
+                LTRIM(RTRIM(CAST(unit.OrgUnitNo AS nvarchar(32)))) AS OrgUnitNo,
+                LTRIM(RTRIM(CAST(unit.UnitAbbr AS nvarchar(255)))) AS UnitAbbr,
+                LTRIM(RTRIM(CAST(unit.UnitName AS nvarchar(255)))) AS UnitName,
+                LTRIM(RTRIM(CAST(unit.ParentOrgUnitNo AS nvarchar(32)))) AS ParentOrgUnitNo,
+                TRY_CONVERT(int, unit.GroupBG) AS GroupBG,
+                LTRIM(RTRIM(CAST(bg.BGName AS nvarchar(255)))) AS BGName,
+                TRY_CONVERT(int, unit.IsBelongTo) AS IsBelongTo
+            FROM fn_InterfaceUnit(@EffectiveDate) unit
+            LEFT JOIN MP_BG bg
+                ON LTRIM(RTRIM(CAST(bg.BGNo AS nvarchar(32)))) = LTRIM(RTRIM(CAST(unit.BGNo AS nvarchar(32))))
+               AND @EffectiveDate BETWEEN bg.BeginDate AND bg.EndDate
+            WHERE LTRIM(RTRIM(CAST(unit.OrgUnitNo AS nvarchar(32)))) IN (${inList})
+        `);
+
+    const rows = Array.isArray(result.recordset) ? result.recordset as Array<Record<string, unknown>> : [];
+    const rowByOrgUnitId = new Map(
+        rows
+            .map((row) => [normalizeReport09OrgUnitKey(row.OrgUnitNo), row] as const)
+            .filter(([orgUnitId]) => Boolean(orgUnitId))
+    );
+
+    const supplementalRows = missingOrgUnitIds.map((orgUnitId) => {
+        const unit = rowByOrgUnitId.get(orgUnitId);
+        if (!unit) {
+            return {
+                OrgUnitNo: orgUnitId,
+                OrgUnitID: orgUnitId,
+                UnitAbbr: orgUnitId,
+                DisplayName: orgUnitId,
+                UnitName: orgUnitId,
+                GroupBGName: 'ไม่ระบุกลุ่มธุรกิจ',
+                GrandParent: '',
+                GrandParent2: '',
+                IsBelongTo: 0
+            };
+        }
+
+        const unitAbbr = toTrimText(unit.UnitAbbr) || orgUnitId;
+        const unitName = toTrimText(unit.UnitName) || unitAbbr;
+        return {
+            OrgUnitNo: orgUnitId,
+            OrgUnitID: orgUnitId,
+            UnitAbbr: unitAbbr,
+            DisplayName: unitAbbr,
+            UnitName: unitName,
+            ParentOrgUnitNo: toTrimText(unit.ParentOrgUnitNo),
+            GroupBGName: getReport09GroupName(unit.GroupBG, unit.BGName),
+            GrandParent: '',
+            GrandParent2: '',
+            IsBelongTo: toNumberOrZero(unit.IsBelongTo)
+        };
+    });
+
+    return [...structureRows, ...supplementalRows];
 };
 
 const buildReport09Tree = (
@@ -2380,7 +2737,8 @@ export const getReport09DataService = async (
             return buildReport09FallbackTree(retirementMap, displayYears, yearRateMap);
         }
 
-        const tree = buildReport09Tree(structureRows, retirementMap, displayYears, yearRateMap);
+        const completeStructureRows = await appendReport09MissingStructureRows(pool, structureRows, retirementMap, structureDate);
+        const tree = buildReport09Tree(completeStructureRows, retirementMap, displayYears, yearRateMap);
         if (!tree.length) {
             return buildReport09FallbackTree(retirementMap, displayYears, yearRateMap);
         }

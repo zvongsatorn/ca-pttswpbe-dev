@@ -1,5 +1,5 @@
 import { Context } from 'hono';
-import { getDashboardDataService, getDashboardExcelDataService, getReport1ExcelDataService, getReport01DataService, getReport02DataService, getReport03DataService, getReport03FilterOptionsService, getReport04DataService, getReport05DataService, getReport06DataService, getReport07DataService, getReport08DataService, getReport09DataService, getReport10SummaryDataService, getReport10ExportDataService } from '../services/reportService.js';
+import { getDashboardDataService, getDashboardExcelDataService, getReport1ExcelDataService, getReport01DataService, getReport02DataService, getReport03DataService, getReport03FilterOptionsService, getReport04DataService, getReport05DataService, getReport06DataService, getReport07DataService, getReport08DataService, getReport09AuditService, getReport09DataService, getReport10SummaryDataService, getReport10ExportDataService } from '../services/reportService.js';
 import ExcelJS from 'exceljs';
 
 export const getDashboardData = async (c: Context) => {
@@ -715,6 +715,30 @@ export const getReport9Data = async (c: Context) => {
         });
     } catch (error: any) {
         console.error('Error in getReport9Data controller:', error);
+        return c.json({
+            status: 500,
+            message: 'Internal server error',
+            error: error.message
+        }, 500);
+    }
+};
+
+export const getReport9AuditData = async (c: Context) => {
+    try {
+        const effectiveYear = parseInt(c.req.query('effectiveYear') || '0', 10);
+
+        if (!effectiveYear) {
+            return c.json({ status: 400, message: 'Missing required parameter: effectiveYear' }, 400);
+        }
+
+        const data = await getReport09AuditService(effectiveYear);
+
+        return c.json({
+            status: 200,
+            data
+        });
+    } catch (error: any) {
+        console.error('Error in getReport9AuditData controller:', error);
         return c.json({
             status: 500,
             message: 'Internal server error',

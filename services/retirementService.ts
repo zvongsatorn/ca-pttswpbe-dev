@@ -137,6 +137,18 @@ class RetirementService {
         return String(value || '').trim();
     }
 
+    private toBEYear(value: unknown): number {
+        const year = Number(value);
+        if (!Number.isFinite(year)) return new Date().getFullYear() + 543;
+        return year < 2500 ? Math.trunc(year) + 543 : Math.trunc(year);
+    }
+
+    private toADYear(value: unknown): number {
+        const year = Number(value);
+        if (!Number.isFinite(year)) return new Date().getFullYear();
+        return year > 2500 ? Math.trunc(year) - 543 : Math.trunc(year);
+    }
+
     private escapeSqlIdentifier(value: string): string {
         return `[${String(value || '').replace(/]/g, ']]')}]`;
     }
@@ -191,7 +203,7 @@ class RetirementService {
     }
 
     private async getRetirementLevelOptions(pool: sql.ConnectionPool, effectiveYear: number): Promise<RetirementLevelOption[]> {
-        const asOfDate = `${effectiveYear}-01-01`;
+        const asOfDate = `${this.toADYear(effectiveYear)}-01-01`;
         const resolvedColumns = await this.resolveMpLevelGroupColumns(pool);
         const activeFilter = resolvedColumns.activeColumn
             ? `
@@ -269,8 +281,10 @@ class RetirementService {
     async getRetirementData(effectiveYear: number) {
         const pool = await poolPromise;
         try {
+            const effectiveYearBE = this.toBEYear(effectiveYear);
+            const legacyEffectiveYearAD = this.toADYear(effectiveYearBE);
             const ratesResult = await pool.request()
-                .input('EffectiveYear', sql.Int, effectiveYear)
+                .input('EffectiveYear', sql.Int, effectiveYearBE)
                 .execute('mp_BUSupportRateGet');
 
             let rates: Array<Record<string, unknown>> = Array.isArray(ratesResult.recordset) ? ratesResult.recordset : [];
@@ -281,7 +295,7 @@ class RetirementService {
             // Fallback to direct table query so BU/Support can still be split correctly.
             if (!hasTypeRate || !hasBase) {
                 const fallbackRatesResult = await pool.request()
-                    .input('EffectiveYear', sql.Int, effectiveYear)
+                    .input('EffectiveYear', sql.Int, effectiveYearBE)
                     .query(`
                         SELECT
                             BUSupportRateID,
@@ -302,11 +316,41 @@ class RetirementService {
                 rates = Array.isArray(fallbackRatesResult.recordset) ? fallbackRatesResult.recordset : [];
             }
 
+            if (!rates.length && legacyEffectiveYearAD !== effectiveYearBE) {
+                const legacyRatesResult = await pool.request()
+                    .input('EffectiveYear', sql.Int, legacyEffectiveYearAD)
+                    .input('TargetEffectiveYear', sql.Int, effectiveYearBE)
+                    .query(`
+                        SELECT
+                            BUSupportRateID,
+                            @TargetEffectiveYear AS EffectiveYear,
+                            CASE
+                                WHEN TRY_CONVERT(int, [Year]) < 2500 THEN TRY_CONVERT(int, [Year]) + 543
+                                ELSE TRY_CONVERT(int, [Year])
+                            END AS [Year],
+                            TypeRate,
+                            Rate,
+                            Base,
+                            BUSupportRateStatus,
+                            CreateBy,
+                            CreateDate,
+                            UpdateBy,
+                            UpdateDate
+                        FROM MP_BUSupportRate
+                        WHERE EffectiveYear = @EffectiveYear
+                        ORDER BY [Year], TypeRate
+                    `)
+                    .catch(() => ({ recordset: [] as Array<Record<string, unknown>> }));
+                rates = Array.isArray(legacyRatesResult.recordset) ? legacyRatesResult.recordset : [];
+            }
+
             rates = rates.map((row: { TypeRate?: unknown }) => {
                 const parsedTypeRate = Number(row.TypeRate);
                 const parsedBase = Number((row as { Base?: unknown }).Base);
                 return {
                     ...row,
+                    EffectiveYear: this.toBEYear((row as { EffectiveYear?: unknown }).EffectiveYear ?? effectiveYearBE),
+                    Year: this.toBEYear((row as { Year?: unknown }).Year),
                     TypeRate: parsedTypeRate === 2 ? 2 : 1,
                     Base: Number.isFinite(parsedBase) && parsedBase > 0 ? Math.trunc(parsedBase) : 1
                 };
@@ -315,7 +359,7 @@ class RetirementService {
             let levelGroupNo = '';
 
             const remarkResult = await pool.request()
-                .input('EffectiveYear', sql.Int, effectiveYear)
+                .input('EffectiveYear', sql.Int, effectiveYearBE)
                 .execute('mp_BUSupportRateRemarkGet');
 
             if (remarkResult.recordset.length > 0) {
@@ -325,7 +369,7 @@ class RetirementService {
 
             try {
                 const remarkFallback = await pool.request()
-                    .input('EffectiveYear', sql.Int, effectiveYear)
+                    .input('EffectiveYear', sql.Int, effectiveYearBE)
                     .query(`
                         SELECT TOP (1)
                             LTRIM(RTRIM(CAST(Remark AS nvarchar(500)))) AS Remark,
@@ -344,7 +388,30 @@ class RetirementService {
                 // Keep SP result when direct table fallback is not available.
             }
 
-            const levelGroups = await this.getRetirementLevelOptions(pool, effectiveYear);
+            if (!remark && legacyEffectiveYearAD !== effectiveYearBE) {
+                try {
+                    const legacyRemarkFallback = await pool.request()
+                        .input('EffectiveYear', sql.Int, legacyEffectiveYearAD)
+                        .query(`
+                            SELECT TOP (1)
+                                LTRIM(RTRIM(CAST(Remark AS nvarchar(500)))) AS Remark,
+                                LTRIM(RTRIM(CAST(LevelGroupNo AS nvarchar(16)))) AS LevelGroupNo
+                            FROM MP_BUSupportRateRemark
+                            WHERE EffectiveYear = @EffectiveYear
+                            ORDER BY TRY_CONVERT(bigint, BUSupportRateRemarkID) DESC
+                        `);
+
+                    if (Array.isArray(legacyRemarkFallback.recordset) && legacyRemarkFallback.recordset.length > 0) {
+                        const row = legacyRemarkFallback.recordset[0] as Record<string, unknown>;
+                        remark = String(row.Remark || '').trim();
+                        levelGroupNo = this.normalizeLevelGroupNo(row.LevelGroupNo);
+                    }
+                } catch {
+                    // Ignore legacy lookup errors.
+                }
+            }
+
+            const levelGroups = await this.getRetirementLevelOptions(pool, effectiveYearBE);
 
             return { rates, remark, levelGroupNo, levelGroups };
         } catch (err) {
@@ -365,6 +432,7 @@ class RetirementService {
         await transaction.begin();
 
         try {
+            const effectiveYearBE = this.toBEYear(effectiveYear);
             const now = new Date();
             const normalizedLevelGroupNo = this.normalizeLevelGroupNo(levelGroupNo);
             let useStoredProcedureWithTypeRate = await this.supportsTypeRateInUpsertSP(transaction);
@@ -377,7 +445,7 @@ class RetirementService {
                 const rate = Number(item.rate);
                 const base = Number(item.base);
 
-                const safeYear = Number.isFinite(year) ? year : effectiveYear;
+                const safeYear = Number.isFinite(year) ? this.toBEYear(year) : effectiveYearBE;
                 const safeRate = Number.isFinite(rate) ? rate : 0;
                 const safeBase = Number.isFinite(base) && base > 0 ? Math.trunc(base) : 1;
 
@@ -385,7 +453,7 @@ class RetirementService {
                     try {
                         await this.upsertRateByStoredProcedure(
                             transaction,
-                            effectiveYear,
+                            effectiveYearBE,
                             safeYear,
                             typeRate,
                             safeRate,
@@ -405,7 +473,7 @@ class RetirementService {
 
                 await this.upsertRateByDirectTable(
                     transaction,
-                    effectiveYear,
+                    effectiveYearBE,
                     safeYear,
                     typeRate,
                     safeRate,
@@ -417,14 +485,14 @@ class RetirementService {
 
             // 2. Upsert remark in MP_BUSupportRateRemark
             await new sql.Request(transaction)
-                .input('EffectiveYear', sql.Int, effectiveYear)
+                .input('EffectiveYear', sql.Int, effectiveYearBE)
                 .input('Remark', sql.VarChar(500), remark)
                 .input('User', sql.VarChar(20), user)
                 .input('Now', sql.DateTime, now)
                 .execute('mp_BUSupportRateRemarkUpsert');
 
             await new sql.Request(transaction)
-                .input('EffectiveYear', sql.Int, effectiveYear)
+                .input('EffectiveYear', sql.Int, effectiveYearBE)
                 .input('LevelGroupNo', sql.VarChar(4), normalizedLevelGroupNo || null)
                 .query(`
                     UPDATE MP_BUSupportRateRemark
@@ -442,7 +510,9 @@ class RetirementService {
     }
 
     async copyRetirementData(fromYear: number, toYear: number, user: string) {
-        const data = await this.getRetirementData(fromYear);
+        const fromYearBE = this.toBEYear(fromYear);
+        const toYearBE = this.toBEYear(toYear);
+        const data = await this.getRetirementData(fromYearBE);
         if (data.rates.length === 0) {
             return { success: false, message: 'No data found for the source year.' };
         }
@@ -451,14 +521,14 @@ class RetirementService {
             const sourceYear = Number(r.Year);
             const sourceRate = Number(r.Rate);
             return {
-                year: toYear + ((Number.isFinite(sourceYear) ? sourceYear : fromYear) - fromYear),
+                year: toYearBE + ((Number.isFinite(sourceYear) ? this.toBEYear(sourceYear) : fromYearBE) - fromYearBE),
                 rate: Number.isFinite(sourceRate) ? sourceRate : 0,
                 base: Number.isFinite(Number(r.Base)) && Number(r.Base) > 0 ? Math.trunc(Number(r.Base)) : 1,
                 typeRate: Number(r.TypeRate) === 2 ? 2 : 1
             };
         });
 
-        return this.saveRetirementData(toYear, newRates, data.remark, data.levelGroupNo || '', user);
+        return this.saveRetirementData(toYearBE, newRates, data.remark, data.levelGroupNo || '', user);
     }
 }
 
