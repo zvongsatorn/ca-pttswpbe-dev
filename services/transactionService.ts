@@ -1,4 +1,5 @@
 import { sql, poolPromise } from '../config/db.js';
+import { resetSentSapStatusForTransactions } from './sapSendStatusService.js';
 
 export interface DraftTransactionPayload {
     transactionType: number;
@@ -930,6 +931,7 @@ export const directApproveTransactionsService = async (transactionNos: string[],
                 req.input('UpdateDate', sql.DateTime, today);
                 await req.execute('mp_TransactionsDirectApprove');
             }
+            await resetSentSapStatusForTransactions(transaction, normalizedTransactionNos);
             await transaction.commit();
             return { success: true, message: 'Transactions approved successfully.' };
         } catch (error) {

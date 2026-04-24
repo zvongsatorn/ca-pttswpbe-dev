@@ -1,6 +1,7 @@
 import { sql, poolPromise } from '../config/db.js';
 import { sendMail, resolveMailRecipient } from './mailService.js';
 import { createMailLog } from './mailLogService.js';
+import { resetSentSapStatusForTransactions } from './sapSendStatusService.js';
 
 const sendMailWithLog = async (params: {
     recipient: string | null;
@@ -598,6 +599,11 @@ export const submitDocumentService = async (payload: SubmitDocumentPayload, crea
                     throw new Error(`Failed to update transaction status to 2 for itemId "${itemId}"`);
                 }
             }
+
+            await resetSentSapStatusForTransactions(
+                transaction,
+                payload.items.map((item) => item.itemId)
+            );
 
             await transaction.commit();
 
