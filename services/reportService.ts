@@ -2560,6 +2560,50 @@ const adjustReport09DisplayedRowsToOwnOnly = (
     rows.forEach((row) => visit(row));
 };
 
+const recalculateReport09SummaryCutsFromDisplayedRows = (rows: any[]) => {
+    const isSummaryRow = (node: any) => {
+        const rowKey = String(node?.key || '');
+        return rowKey === 'total' || rowKey.startsWith('bg-');
+    };
+
+    const sumDisplayedDetailCuts = (node: any): { cutSupport: number; cutBu: number } => {
+        if (!node || typeof node !== 'object') {
+            return { cutSupport: 0, cutBu: 0 };
+        }
+
+        let cutSupport = isSummaryRow(node) ? 0 : toNumberOrZero(node.cut_support);
+        let cutBu = isSummaryRow(node) ? 0 : toNumberOrZero(node.cut_bu);
+
+        if (Array.isArray(node.children)) {
+            node.children.forEach((child: any) => {
+                const childTotals = sumDisplayedDetailCuts(child);
+                cutSupport += childTotals.cutSupport;
+                cutBu += childTotals.cutBu;
+            });
+        }
+
+        return { cutSupport, cutBu };
+    };
+
+    const totalRow = rows.find((row) => String(row?.key || '') === 'total');
+    const groupRows = rows.filter((row) => String(row?.key || '').startsWith('bg-'));
+
+    groupRows.forEach((groupRow) => {
+        const totals = sumDisplayedDetailCuts(groupRow);
+        groupRow.cut_support = totals.cutSupport;
+        groupRow.cut_bu = totals.cutBu;
+        groupRow.cut_total = totals.cutSupport + totals.cutBu;
+    });
+
+    if (totalRow) {
+        const cutSupport = groupRows.reduce((sum, groupRow) => sum + toNumberOrZero(groupRow.cut_support), 0);
+        const cutBu = groupRows.reduce((sum, groupRow) => sum + toNumberOrZero(groupRow.cut_bu), 0);
+        totalRow.cut_support = cutSupport;
+        totalRow.cut_bu = cutBu;
+        totalRow.cut_total = cutSupport + cutBu;
+    }
+};
+
 const buildReport09FallbackTree = (
     sourceMap: Report09OrgYearMap,
     displayYears: number[],
@@ -2985,6 +3029,7 @@ const buildReport09Tree = (
     resultTree.forEach((bgNode) => fillMissingUnitNames(bgNode));
     adjustReport09DisplayedRowsToOwnOnly(resultTree, displayYears);
     recalculateReport09CutsForDisplayedRows(resultTree, displayYears, yearRateMap);
+    recalculateReport09SummaryCutsFromDisplayedRows(resultTree);
 
     return resultTree;
 };
