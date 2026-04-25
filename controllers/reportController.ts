@@ -645,13 +645,14 @@ export const getReport7Data = async (c: Context) => {
         const employeeId = c.req.query('employeeId') || '';
         const userGroupNo = c.req.query('userGroupNo') || '';
         const division = c.req.query('division') || '';
+        const orgUnitNo = c.req.query('orgUnitNo') || '';
         const bgNo = c.req.query('bgNo') || '';
 
         if (!effectiveDate || !employeeId || !userGroupNo) {
             return c.json({ status: 400, message: 'Missing required parameters: effectiveDate, employeeId, userGroupNo' }, 400);
         }
 
-        const data = await getReport07DataService(effectiveDate, employeeId, userGroupNo, division, bgNo);
+        const data = await getReport07DataService(effectiveDate, employeeId, userGroupNo, division, orgUnitNo, bgNo);
 
         return c.json({
             status: 200,

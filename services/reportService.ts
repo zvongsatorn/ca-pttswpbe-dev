@@ -1,6 +1,5 @@
 import { sql, poolPromise } from '../config/db.js';
 import { calculateReport7ShapeGapMetrics } from '../config/report7FormulaConfig.js';
-import { getReport7FormulaConfigByEffectiveDateService } from './landscapeFormulaService.js';
 
 type Report08LevelMap = Map<string, Map<string, number>>;
 type Report09OrgYearMap = Map<string, Map<number, { support: number; bu: number }>>;
@@ -1384,21 +1383,98 @@ export const getReport06DataService = async (
 
 const round2 = (value: number): number => Math.round((value + Number.EPSILON) * 100) / 100;
 
+const cleanReport7UnitShort = (value: unknown): string =>
+    toTrimText(value).replace(/\s*ขึ้นตรง\s*$/, '').trim();
+
 export const getReport07DataService = async (
     effectiveDateStr: string,
     employeeId: string,
     userGroupNo: string,
     division: string,
+    orgUnitNo: string,
     bgNo: string
 ) => {
     try {
-        const selectedDivisionValues = splitCsvValues(division);
-        const selectedBgValues = splitCsvValues(bgNo);
-        const selectedDivisionSet = selectedDivisionValues.length > 0 ? new Set(selectedDivisionValues) : null;
-        const selectedBgSet = selectedBgValues.length > 0 ? new Set(selectedBgValues) : null;
+        const report4Rows = await getReport04DataService(effectiveDateStr, employeeId, userGroupNo, division, orgUnitNo, bgNo);
+        const baseRows = report4Rows.map((rawRow, index) => {
+            const row = (rawRow && typeof rawRow === 'object') ? rawRow as Record<string, unknown> : {};
+            const q1 = toNumberOrZero(row.frame_staff_21);
+            const q2 = toNumberOrZero(row.frame_staff_18_20);
+            const q3 = toNumberOrZero(row.frame_staff_16_17);
+            const q4 = toNumberOrZero(row.frame_staff_14_15);
+            const q5 = toNumberOrZero(row.frame_staff_11_13);
+            const q6 = toNumberOrZero(row.frame_staff_9_10);
+            const q7 = toNumberOrZero(row.frame_staff_under_8);
+            const qTotal = toNumberOrZero(row.frame_staff_total) || (q1 + q2 + q3 + q4 + q5 + q6 + q7);
 
-        const baseRows = await getReport06DataService(effectiveDateStr, employeeId, userGroupNo, division, bgNo);
-        const formulaConfig = await getReport7FormulaConfigByEffectiveDateService(effectiveDateStr);
+            const m1 = toNumberOrZero(row.people_normal_21);
+            const m2 = toNumberOrZero(row.people_normal_18_20);
+            const m3 = toNumberOrZero(row.people_normal_16_17);
+            const m4 = toNumberOrZero(row.people_normal_14_15);
+            const m5 = toNumberOrZero(row.people_normal_11_13);
+            const m6 = toNumberOrZero(row.people_normal_9_10);
+            const m7 = toNumberOrZero(row.people_normal_under_8);
+            const mTotal = toNumberOrZero(row.people_normal_total) || (m1 + m2 + m3 + m4 + m5 + m6 + m7);
+
+            const t1 = toNumberOrZero(row.vacancy_21);
+            const t2 = toNumberOrZero(row.vacancy_18_20);
+            const t3 = toNumberOrZero(row.vacancy_16_17);
+            const t4 = toNumberOrZero(row.vacancy_14_15);
+            const t5 = toNumberOrZero(row.vacancy_11_13);
+            const t6 = toNumberOrZero(row.vacancy_9_10);
+            const t7 = toNumberOrZero(row.vacancy_under_8);
+            const vacancyTotal = toNumberOrZero(row.vacancy_total) || (t1 + t2 + t3 + t4 + t5 + t6 + t7);
+            const recruitTotal = toNumberOrZero(row.recruit_total);
+
+            return {
+                key: `r7-${index + 1}`,
+                org_unit_no: toTrimText(row.unit_code),
+                parent_org_unit_no: toTrimText(row.line_of_work),
+                lvl: 0,
+                bg_no: '',
+                business_unit: toTrimText(row.business_unit),
+                unit_level: '',
+                unit_level_name: toTrimText(row.level),
+                unit_short: toTrimText(row.unit_short),
+                unit_name: toTrimText(row.unit_name),
+
+                q_1: q1,
+                q_2: q2,
+                q_3: q3,
+                q_4: q4,
+                q_5: q5,
+                q_6: q6,
+                q_7: q7,
+                q_total: qTotal,
+                m_1: m1,
+                m_2: m2,
+                m_3: m3,
+                m_4: m4,
+                m_5: m5,
+                m_6: m6,
+                m_7: m7,
+                m_total: mTotal,
+                f_1: 0,
+                f_2: 0,
+                f_3: 0,
+                f_4: 0,
+                f_5: 0,
+                f_6: 0,
+                f_7: 0,
+                f_total: recruitTotal,
+                t_1: t1,
+                t_2: t2,
+                t_3: t3,
+                t_4: t4,
+                t_5: t5,
+                t_6: t6,
+                t_7: t7,
+                total: vacancyTotal,
+                q_8: toNumberOrZero(row.contact_out),
+                q_10: toNumberOrZero(row.contact_out_sub),
+                remark: toTrimText(row.remark)
+            };
+        });
         const effectiveDate = new Date(effectiveDateStr);
         const pool = await poolPromise;
 
@@ -1475,12 +1551,26 @@ export const getReport07DataService = async (
             const bgNoCode = toTrimText(row.bg_no);
             const landscape = landscapeMap.get(orgUnitNo) || defaultLandscape;
 
+            const q1 = toNumberOrZero(row.q_1);
+            const q2 = toNumberOrZero(row.q_2);
+            const q3 = toNumberOrZero(row.q_3);
             const q4 = toNumberOrZero(row.q_4);
             const q5 = toNumberOrZero(row.q_5);
             const q6 = toNumberOrZero(row.q_6);
             const q7 = toNumberOrZero(row.q_7);
             const qTotal = toNumberOrZero(row.q_total);
             const contractOut = toNumberOrZero(row.q_8);
+            const subContract = toNumberOrZero(row.q_10);
+
+            const m1 = toNumberOrZero(row.m_1);
+            const m2 = toNumberOrZero(row.m_2);
+            const m3 = toNumberOrZero(row.m_3);
+            const m4 = toNumberOrZero(row.m_4);
+            const m5 = toNumberOrZero(row.m_5);
+            const m6 = toNumberOrZero(row.m_6);
+            const m7 = toNumberOrZero(row.m_7);
+            const mTotal = toNumberOrZero(row.m_total);
+            const recruitTotal = toNumberOrZero(row.f_total);
 
             const mpVp = landscape?.vp ?? 0;
             const mpDm = landscape?.dm ?? 0;
@@ -1498,15 +1588,34 @@ export const getReport07DataService = async (
                 mp_dm: mpDm,
                 mp_sr: mpSr,
                 mp_jr: mpJr
-            }, formulaConfig || undefined);
+            });
 
             return {
                 ...row,
                 business_unit: bgNameMap.get(bgNoCode) || toTrimText(row.business_unit) || bgNoCode,
+                unit_short: cleanReport7UnitShort(row.unit_short),
+                q_1: q1,
+                q_2: q2,
+                q_3: q3,
+                q_4: q4,
+                q_5: q5,
+                q_6: q6,
+                q_7: q7,
+                q_total: qTotal,
+                t_1: q1 - m1,
+                t_2: q2 - m2,
+                t_3: q3 - m3,
+                t_4: q4 - m4,
+                t_5: q5 - m5,
+                t_6: q6 - m6,
+                t_7: q7 - m7,
+                total: qTotal - mTotal - recruitTotal,
+                q_8: contractOut,
+                q_10: subContract,
                 frame_contract_out: contractOut,
-                frame_sub_contract: toNumberOrZero(row.q_10),
-                recruit_total: toNumberOrZero(row.f_total),
-                vacancy_total: toNumberOrZero(row.total),
+                frame_sub_contract: subContract,
+                recruit_total: recruitTotal,
+                vacancy_total: qTotal - mTotal - recruitTotal,
                 mp_vp: round2(mpVp),
                 mp_dm: round2(mpDm),
                 mp_sr: round2(mpSr),
@@ -1525,13 +1634,7 @@ export const getReport07DataService = async (
             };
         });
 
-        return enrichedRows.filter((row) => {
-            const raw = row as Record<string, unknown>;
-            return (
-                matchesSelectedSet(selectedBgSet, [raw.bg_no]) &&
-                matchesSelectedSet(selectedDivisionSet, [raw.parent_org_unit_no])
-            );
-        });
+        return enrichedRows;
     } catch (error) {
         console.error('Error in getReport07DataService:', error);
         throw error;
@@ -1662,6 +1765,8 @@ const createEmptyReport09Node = (displayYears: number[]) => {
     displayYears.forEach((year) => {
         node[`y${year}_sup`] = 0;
         node[`y${year}_bu`] = 0;
+        node[`y${year}_cut_sup`] = 0;
+        node[`y${year}_cut_bu`] = 0;
     });
 
     return node;
@@ -2365,6 +2470,58 @@ const calcReport09CutTotalsByOrg = (
     return { cutSupport, cutBu };
 };
 
+const calcReport09CutTotalsForDisplayedRow = (
+    row: Record<string, unknown>,
+    displayYears: number[],
+    yearRateMap: Report09YearRateMap
+) => {
+    let cutSupport = 0;
+    let cutBu = 0;
+    let carrySupport = 0;
+    let carryBu = 0;
+
+    displayYears.forEach((year) => {
+        const ratio = yearRateMap.get(year) || {
+            support: { rate: 1, base: 1 },
+            bu: { rate: 1, base: 1 }
+        };
+
+        const supportCut = calcReport09Cut(toNumberOrZero(row[`y${year}_sup`]), carrySupport, ratio.support.rate, ratio.support.base);
+        cutSupport += supportCut.cut;
+        carrySupport = supportCut.carryOut;
+
+        const buCut = calcReport09Cut(toNumberOrZero(row[`y${year}_bu`]), carryBu, ratio.bu.rate, ratio.bu.base);
+        cutBu += buCut.cut;
+        carryBu = buCut.carryOut;
+
+        row[`y${year}_cut_sup`] = supportCut.cut;
+        row[`y${year}_cut_bu`] = buCut.cut;
+    });
+
+    return { cutSupport, cutBu };
+};
+
+const recalculateReport09CutsForDisplayedRows = (
+    rows: any[],
+    displayYears: number[],
+    yearRateMap: Report09YearRateMap
+) => {
+    const visit = (node: any) => {
+        if (!node || typeof node !== 'object') return;
+
+        const { cutSupport, cutBu } = calcReport09CutTotalsForDisplayedRow(node, displayYears, yearRateMap);
+        node.cut_support = cutSupport;
+        node.cut_bu = cutBu;
+        node.cut_total = cutSupport + cutBu;
+
+        if (Array.isArray(node.children)) {
+            node.children.forEach((child: any) => visit(child));
+        }
+    };
+
+    rows.forEach((row) => visit(row));
+};
+
 const buildReport09FallbackTree = (
     sourceMap: Report09OrgYearMap,
     displayYears: number[],
@@ -2402,6 +2559,7 @@ const buildReport09FallbackTree = (
 
     rows.forEach((row) => sumNode(grandTotal, row));
     rows.push(grandTotal);
+    recalculateReport09CutsForDisplayedRows(rows, displayYears, yearRateMap);
     return rows;
 };
 
@@ -2487,6 +2645,80 @@ const appendReport09MissingStructureRows = async (
     });
 
     return [...structureRows, ...supplementalRows];
+};
+
+const addReport09OrgYearValues = (
+    targetMap: Report09OrgYearMap,
+    targetOrgUnitId: string,
+    sourceYearMap: Map<number, { support: number; bu: number }>
+) => {
+    if (!targetOrgUnitId) return;
+    if (!targetMap.has(targetOrgUnitId)) {
+        targetMap.set(targetOrgUnitId, new Map());
+    }
+
+    const targetYearMap = targetMap.get(targetOrgUnitId)!;
+    sourceYearMap.forEach((sourceValue, year) => {
+        const current = targetYearMap.get(year) || { support: 0, bu: 0 };
+        current.support += toNumberOrZero(sourceValue.support);
+        current.bu += toNumberOrZero(sourceValue.bu);
+        targetYearMap.set(year, current);
+    });
+};
+
+const rollupReport09SourceMapToStructure = async (
+    pool: any,
+    structureRows: any[],
+    sourceMap: Report09OrgYearMap,
+    structureDate: Date
+): Promise<Report09OrgYearMap> => {
+    const structureOrgUnitIds = new Set(
+        structureRows
+            .map((row) => getReport09OrgUnitNo((row && typeof row === 'object') ? row as Record<string, unknown> : {}))
+            .filter(Boolean)
+    );
+    if (!structureOrgUnitIds.size) return sourceMap;
+
+    const missingOrgUnitIds = Array.from(sourceMap.keys()).filter((orgUnitId) => !structureOrgUnitIds.has(orgUnitId));
+    if (!missingOrgUnitIds.length) return sourceMap;
+
+    const unitResult = await pool.request()
+        .input('EffectiveDate', sql.DateTime, structureDate)
+        .query(`
+            SELECT
+                LTRIM(RTRIM(CAST(unit.OrgUnitNo AS nvarchar(32)))) AS OrgUnitNo,
+                LTRIM(RTRIM(CAST(unit.ParentOrgUnitNo AS nvarchar(32)))) AS ParentOrgUnitNo
+            FROM fn_InterfaceUnit(@EffectiveDate) unit
+        `);
+
+    const parentByOrgUnitId = new Map<string, string>();
+    const unitRows = Array.isArray(unitResult.recordset) ? unitResult.recordset as Array<Record<string, unknown>> : [];
+    unitRows.forEach((row) => {
+        const orgUnitId = normalizeReport09OrgUnitKey(row.OrgUnitNo);
+        if (!orgUnitId) return;
+        parentByOrgUnitId.set(orgUnitId, normalizeReport09OrgUnitKey(row.ParentOrgUnitNo));
+    });
+
+    const rolledMap: Report09OrgYearMap = new Map();
+    const resolveDisplayedAncestor = (orgUnitId: string) => {
+        let current = orgUnitId;
+        const visited = new Set<string>();
+
+        while (current && !visited.has(current)) {
+            if (structureOrgUnitIds.has(current)) return current;
+            visited.add(current);
+            current = parentByOrgUnitId.get(current) || '';
+        }
+
+        return '';
+    };
+
+    sourceMap.forEach((yearMap, orgUnitId) => {
+        const targetOrgUnitId = resolveDisplayedAncestor(orgUnitId) || orgUnitId;
+        addReport09OrgYearValues(rolledMap, targetOrgUnitId, yearMap);
+    });
+
+    return rolledMap;
 };
 
 const buildReport09Tree = (
@@ -2713,6 +2945,7 @@ const buildReport09Tree = (
         }
     };
     resultTree.forEach((bgNode) => fillMissingUnitNames(bgNode));
+    recalculateReport09CutsForDisplayedRows(resultTree, displayYears, yearRateMap);
 
     return resultTree;
 };
@@ -2759,8 +2992,8 @@ export const getReport09DataService = async (
             return buildReport09FallbackTree(retirementMap, displayYears, yearRateMap);
         }
 
-        const completeStructureRows = await appendReport09MissingStructureRows(pool, structureRows, retirementMap, structureDate);
-        const tree = buildReport09Tree(completeStructureRows, retirementMap, displayYears, yearRateMap);
+        const visibleRetirementMap = await rollupReport09SourceMapToStructure(pool, structureRows, retirementMap, structureDate);
+        const tree = buildReport09Tree(structureRows, visibleRetirementMap, displayYears, yearRateMap);
         if (!tree.length) {
             return buildReport09FallbackTree(retirementMap, displayYears, yearRateMap);
         }

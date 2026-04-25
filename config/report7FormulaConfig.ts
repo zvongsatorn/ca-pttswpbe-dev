@@ -26,10 +26,18 @@ type Report7ShapeRule =
     }
     | { type: 'sum'; fields: Report7FormulaField[] };
 
-type Report7GapRule = {
-    baseField: Report7FormulaField;
-    shapeField: Report7FormulaField;
-};
+type Report7GapMetricField = 'gap_vp' | 'gap_dm' | 'gap_sr' | 'gap_jr' | 'gap_total';
+
+type Report7GapRule =
+    | {
+        type: 'ratio';
+        baseField: Report7FormulaField;
+        shapeField: Report7FormulaField;
+    }
+    | {
+        type: 'sum';
+        fields: Report7GapMetricField[];
+    };
 
 export type Report7FormulaConfig = {
     shape: {
@@ -62,6 +70,14 @@ export type Report7CalculatedMetrics = {
     gap_jr: number;
     gap_total: number;
 };
+
+const REPORT7_GAP_FIELDS: Report7GapMetricField[] = [
+    'gap_vp',
+    'gap_dm',
+    'gap_sr',
+    'gap_jr',
+    'gap_total'
+];
 
 const REPORT7_FIELDS: Report7FormulaField[] = [
     'q_4',
@@ -124,8 +140,12 @@ const evaluateShapeRule = (
 
 const evaluateGapRule = (
     values: Record<Report7FormulaField, number>,
+    gaps: Record<Report7GapMetricField, number>,
     rule: Report7GapRule
 ): number => {
+    if (rule.type === 'sum') {
+        return rule.fields.reduce((sum, field) => sum + toFiniteNumber(gaps[field]), 0);
+    }
     const base = getFieldValue(values, rule.baseField);
     const shape = getFieldValue(values, rule.shapeField);
     return safeRatio(base - shape, shape);
@@ -136,6 +156,12 @@ const isField = (value: unknown): value is Report7FormulaField =>
 
 const isFieldArray = (value: unknown): value is Report7FormulaField[] =>
     Array.isArray(value) && value.every((item) => isField(item));
+
+const isGapMetricField = (value: unknown): value is Report7GapMetricField =>
+    typeof value === 'string' && REPORT7_GAP_FIELDS.includes(value as Report7GapMetricField);
+
+const isGapMetricFieldArray = (value: unknown): value is Report7GapMetricField[] =>
+    Array.isArray(value) && value.every((item) => isGapMetricField(item));
 
 const isShapeRule = (value: unknown): value is Report7ShapeRule => {
     if (!value || typeof value !== 'object') return false;
@@ -159,25 +185,32 @@ const isShapeRule = (value: unknown): value is Report7ShapeRule => {
 const isGapRule = (value: unknown): value is Report7GapRule => {
     if (!value || typeof value !== 'object') return false;
     const rule = value as Record<string, unknown>;
-    return isField(rule.baseField) && isField(rule.shapeField);
+    // backward compatible with old payload (no `type`)
+    if ((rule.type === undefined || rule.type === null || rule.type === 'ratio') && isField(rule.baseField) && isField(rule.shapeField)) {
+        return true;
+    }
+    if (rule.type === 'sum') {
+        return isGapMetricFieldArray(rule.fields);
+    }
+    return false;
 };
 
-// สูตรอ้างอิงจากไฟล์ legacy/samplelandscape.xlsx
+// สูตรอ้างอิงจากไฟล์ legacy/รายงาน Manpower Landscape_Calsheet.xlsx
 // Shape Ratio
-// VP    : =V
-// DM    : =(W/(W+X+Y))*(M+O+P)
-// SR    : =(W/(W+X+Y))*(N+O+P)
-// JR    : =(W/(W+X+Y))*(N+O+P)
+// VP    : =M  (14-15)
+// DM    : =(DM/(DM+SR+JR))*(รวม-(21+18-20+16-17+14-15))  => q5+q6+q7
+// SR    : =(SR/(DM+SR+JR))*(รวม-(21+18-20+16-17+14-15))  => q5+q6+q7
+// JR    : =(JR/(DM+SR+JR))*(รวม-(21+18-20+16-17+14-15))  => q5+q6+q7
 // Total : =SUM(VP:JR)
 // %Gap
-// VP    : =(K-VP)/VP
-// DM    : =(L-DM)/DM
-// SR    : =(M-SR)/SR
-// JR    : =(N-JR)/JR
-// Total : =(O-Total)/Total
+// VP    : =(q4-shape_vp)/shape_vp
+// DM    : =(q5-shape_dm)/shape_dm
+// SR    : =(q6-shape_sr)/shape_sr
+// JR    : =(q7-shape_jr)/shape_jr
+// Total : =SUM(gap_vp:gap_jr)
 export const report7FormulaConfig: Report7FormulaConfig = {
     shape: {
-        vp: { type: 'direct', field: 'mp_vp' },
+        vp: { type: 'direct', field: 'q_4' },
         dm: {
             type: 'ratio_x_sum',
             numerator: 'mp_dm',
@@ -186,13 +219,13 @@ export const report7FormulaConfig: Report7FormulaConfig = {
         },
         sr: {
             type: 'ratio_x_sum',
-            numerator: 'mp_dm',
+            numerator: 'mp_sr',
             denominator: ['mp_dm', 'mp_sr', 'mp_jr'],
             multiplier: ['q_5', 'q_6', 'q_7']
         },
         jr: {
             type: 'ratio_x_sum',
-            numerator: 'mp_dm',
+            numerator: 'mp_jr',
             denominator: ['mp_dm', 'mp_sr', 'mp_jr'],
             multiplier: ['q_5', 'q_6', 'q_7']
         },
@@ -202,11 +235,11 @@ export const report7FormulaConfig: Report7FormulaConfig = {
         }
     },
     gap: {
-        vp: { baseField: 'q_4', shapeField: 'shape_vp' },
-        dm: { baseField: 'q_4', shapeField: 'shape_dm' },
-        sr: { baseField: 'q_5', shapeField: 'shape_sr' },
-        jr: { baseField: 'q_5', shapeField: 'shape_jr' },
-        total: { baseField: 'q_6', shapeField: 'shape_total' }
+        vp: { type: 'ratio', baseField: 'q_4', shapeField: 'shape_vp' },
+        dm: { type: 'ratio', baseField: 'q_5', shapeField: 'shape_dm' },
+        sr: { type: 'ratio', baseField: 'q_6', shapeField: 'shape_sr' },
+        jr: { type: 'ratio', baseField: 'q_7', shapeField: 'shape_jr' },
+        total: { type: 'sum', fields: ['gap_vp', 'gap_dm', 'gap_sr', 'gap_jr'] }
     }
 };
 
@@ -271,16 +304,29 @@ export const calculateReport7ShapeGapMetrics = (
     values.shape_jr = evaluateShapeRule(values, config.shape.jr);
     values.shape_total = evaluateShapeRule(values, config.shape.total);
 
+    const gaps: Record<Report7GapMetricField, number> = {
+        gap_vp: 0,
+        gap_dm: 0,
+        gap_sr: 0,
+        gap_jr: 0,
+        gap_total: 0
+    };
+    gaps.gap_vp = evaluateGapRule(values, gaps, config.gap.vp);
+    gaps.gap_dm = evaluateGapRule(values, gaps, config.gap.dm);
+    gaps.gap_sr = evaluateGapRule(values, gaps, config.gap.sr);
+    gaps.gap_jr = evaluateGapRule(values, gaps, config.gap.jr);
+    gaps.gap_total = evaluateGapRule(values, gaps, config.gap.total);
+
     return {
         shape_vp: values.shape_vp,
         shape_dm: values.shape_dm,
         shape_sr: values.shape_sr,
         shape_jr: values.shape_jr,
         shape_total: values.shape_total,
-        gap_vp: evaluateGapRule(values, config.gap.vp),
-        gap_dm: evaluateGapRule(values, config.gap.dm),
-        gap_sr: evaluateGapRule(values, config.gap.sr),
-        gap_jr: evaluateGapRule(values, config.gap.jr),
-        gap_total: evaluateGapRule(values, config.gap.total)
+        gap_vp: gaps.gap_vp,
+        gap_dm: gaps.gap_dm,
+        gap_sr: gaps.gap_sr,
+        gap_jr: gaps.gap_jr,
+        gap_total: gaps.gap_total
     };
 };

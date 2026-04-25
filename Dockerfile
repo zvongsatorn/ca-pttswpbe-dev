@@ -14,8 +14,8 @@ ENV NODE_ENV=production
 # Create uploads directory
 RUN mkdir -p /app/uploads && chown -R node:node /app/uploads
 
-# Install dumb-init for proper signal handling
-RUN apk add --no-cache dumb-init
+# Install runtime tools required by the app
+RUN apk add --no-cache dumb-init curl ca-certificates
 
 # Install dependencies strictly from lockfile
 COPY package*.json ./

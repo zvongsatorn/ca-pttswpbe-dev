@@ -1,10 +1,7 @@
 import { sql, poolPromise } from '../config/db.js';
 import fs from 'node:fs';
 import path from 'node:path';
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
-
-const execFileAsync = promisify(execFile);
+import { Client } from 'basic-ftp';
 
 const OUTBOUND_DIR_NAME = 'Outbound';
 const OUTBOUND_FILE_NAME = 'Input_ZHROMI040.txt';
@@ -417,8 +414,13 @@ const markSapSendStatus = async (effectiveDate: Date, sendBy: string, orgUnits: 
 
 interface FtpUploadAttempt {
     label: string;
-    url: string;
-    args: string[];
+    host: string;
+    port: number;
+    secure: boolean | 'implicit';
+    rejectUnauthorized: boolean;
+    remoteDir: string;
+    remoteFileName: string;
+    logUrl: string;
 }
 
 const normalizeFtpHost = (value: string): { host: string; scheme: 'ftp' | 'ftps' | null } => {
@@ -447,51 +449,117 @@ const normalizeFtpHost = (value: string): { host: string; scheme: 'ftp' | 'ftps'
     };
 };
 
-const buildCurlUploadAttempt = (
+const buildFtpUploadAttempt = (
     label: string,
-    url: string,
-    username: string,
-    password: string,
-    localFilePath: string,
-    options?: {
-        insecure?: boolean;
-        sslRequired?: boolean;
-    }
+    host: string,
+    port: number,
+    secure: boolean | 'implicit',
+    rejectUnauthorized: boolean,
+    remoteDir: string,
+    remoteFileName: string
 ): FtpUploadAttempt => {
-    const args = [
-        '--fail',
-        '--silent',
-        '--show-error',
-        '--ftp-create-dirs',
-        '--max-time',
-        '120'
-    ];
-
-    if (options?.insecure) {
-        args.push('--insecure');
-    }
-
-    if (options?.sslRequired) {
-        args.push('--ssl-reqd');
-    }
-
-    args.push(
-        '--user',
-        `${username}:${password}`,
-        '--upload-file',
-        localFilePath,
-        url
-    );
-
-    return { label, url, args };
+    const scheme = secure === 'implicit' ? 'ftps' : (secure ? 'ftp+tls' : 'ftp');
+    const joinedPath = path.posix.join(remoteDir, remoteFileName).replace(/^\/+/, '/');
+    return {
+        label,
+        host,
+        port,
+        secure,
+        rejectUnauthorized,
+        remoteDir,
+        remoteFileName,
+        logUrl: `${scheme}://${host}:${port}${joinedPath}`
+    };
 };
 
 const appendAttemptIfMissing = (attempts: FtpUploadAttempt[], attempt: FtpUploadAttempt): void => {
-    if (attempts.some((item) => item.url === attempt.url && item.args.join('\u0000') === attempt.args.join('\u0000'))) {
+    if (
+        attempts.some((item) =>
+            item.host === attempt.host &&
+            item.port === attempt.port &&
+            item.secure === attempt.secure &&
+            item.rejectUnauthorized === attempt.rejectUnauthorized &&
+            item.remoteDir === attempt.remoteDir &&
+            item.remoteFileName === attempt.remoteFileName
+        )
+    ) {
         return;
     }
 
     attempts.push(attempt);
+};
+
+const resolveConfiguredSecureMode = (
+    scheme: 'ftp' | 'ftps' | null,
+    portNumber: number
+): boolean | 'implicit' => {
+    if (scheme === 'ftps') {
+        return portNumber === 21 ? true : 'implicit';
+    }
+
+    if (scheme === 'ftp') {
+        return portNumber === 21 ? true : false;
+    }
+
+    if (portNumber === 990) return 'implicit';
+    if (portNumber === 21) return true;
+    return false;
+};
+
+const resolveRemoteTarget = (remotefile: string, localFilePath: string): { remoteDir: string; remoteFileName: string } => {
+    const normalized = toText(remotefile).replace(/\\/g, '/');
+    const localName = path.posix.basename(localFilePath);
+
+    if (!normalized) {
+        return {
+            remoteDir: '/',
+            remoteFileName: localName
+        };
+    }
+
+    const isDirOnly = normalized.endsWith('/');
+    if (isDirOnly) {
+        const dir = normalized.replace(/\/+$/, '') || '/';
+        return {
+            remoteDir: dir.startsWith('/') ? dir : `/${dir}`,
+            remoteFileName: localName
+        };
+    }
+
+    const remoteFileName = path.posix.basename(normalized) || localName;
+    const parsedDir = path.posix.dirname(normalized);
+    const remoteDir = parsedDir && parsedDir !== '.' ? parsedDir : '/';
+
+    return {
+        remoteDir: remoteDir.startsWith('/') ? remoteDir : `/${remoteDir}`,
+        remoteFileName
+    };
+};
+
+const uploadFileViaFtpAttempt = async (
+    attempt: FtpUploadAttempt,
+    username: string,
+    password: string,
+    localFilePath: string
+): Promise<void> => {
+    const client = new Client(120_000);
+    client.ftp.verbose = false;
+
+    try {
+        await client.access({
+            host: attempt.host,
+            port: attempt.port,
+            user: username,
+            password,
+            secure: attempt.secure,
+            secureOptions: attempt.secure ? { rejectUnauthorized: attempt.rejectUnauthorized } : undefined
+        });
+
+        await client.ensureDir(attempt.remoteDir);
+        await client.uploadFrom(localFilePath, attempt.remoteFileName);
+    } finally {
+        client.close();
+    }
 };
 
 const uploadFileToFtp = async (localFilePath: string): Promise<void> => {
@@ -506,74 +574,79 @@ const uploadFileToFtp = async (localFilePath: string): Promise<void> => {
     }
 
     const { host, scheme } = normalizeFtpHost(hostip);
-    const remotePath = remotefile.startsWith('/') ? remotefile : `/${remotefile}`;
-    const configuredProtocol = scheme ?? (port === '990' ? 'ftps' : 'ftp');
-    const configuredPortSegment = port ? `:${port}` : '';
-    const configuredUrl = `${configuredProtocol}://${host}${configuredPortSegment}${remotePath}`;
+    const portNumber = Number.parseInt(port, 10) || 21;
+    const configuredSecureMode = resolveConfiguredSecureMode(scheme, portNumber);
+    const remoteTarget = resolveRemoteTarget(remotefile, localFilePath);
 
     const attempts: FtpUploadAttempt[] = [];
     const errors: string[] = [];
 
     appendAttemptIfMissing(
         attempts,
-        buildCurlUploadAttempt(
+        buildFtpUploadAttempt(
             'configured-endpoint',
-            configuredUrl,
-            username,
-            password,
-            localFilePath,
-            {
-                insecure: false,
-                sslRequired: configuredProtocol === 'ftp' && port === '21'
-            }
+            host,
+            portNumber,
+            configuredSecureMode,
+            true,
+            remoteTarget.remoteDir,
+            remoteTarget.remoteFileName
         )
     );
 
     appendAttemptIfMissing(
         attempts,
-        buildCurlUploadAttempt(
+        buildFtpUploadAttempt(
+            'implicit-ftps-445-insecure',
+            host,
+            445,
+            'implicit',
+            false,
+            remoteTarget.remoteDir,
+            remoteTarget.remoteFileName
+        )
+    );
+
+    appendAttemptIfMissing(
+        attempts,
+        buildFtpUploadAttempt(
             'implicit-ftps-990-insecure',
-            `ftps://${host}:990${remotePath}`,
-            username,
-            password,
-            localFilePath,
-            {
-                insecure: true
-            }
+            host,
+            990,
+            'implicit',
+            false,
+            remoteTarget.remoteDir,
+            remoteTarget.remoteFileName
         )
     );
 
     appendAttemptIfMissing(
         attempts,
-        buildCurlUploadAttempt(
+        buildFtpUploadAttempt(
             'explicit-ftps-21-insecure',
-            `ftp://${host}:21${remotePath}`,
-            username,
-            password,
-            localFilePath,
-            {
-                insecure: true,
-                sslRequired: true
-            }
+            host,
+            21,
+            true,
+            false,
+            remoteTarget.remoteDir,
+            remoteTarget.remoteFileName
         )
     );
 
     for (const attempt of attempts) {
         try {
-            await execFileAsync('curl', attempt.args);
+            await uploadFileViaFtpAttempt(attempt, username, password, localFilePath);
             console.info('[HRCenter SAP] FTP upload succeeded', {
                 attempt: attempt.label,
-                url: attempt.url
+                url: attempt.logUrl
             });
             return;
         } catch (error: any) {
-            const stderr = toText(error?.stderr);
-            const stdout = toText(error?.stdout);
-            const detail = stderr || stdout || error?.message || 'Unknown FTP upload error';
+            const detail = toText(error?.message) || `Unknown FTP upload error (${toText(error?.code) || 'NO_CODE'})`;
             errors.push(`${attempt.label}: ${detail}`);
             console.warn('[HRCenter SAP] FTP upload attempt failed', {
                 attempt: attempt.label,
-                url: attempt.url,
+                url: attempt.logUrl,
                 detail
             });
         }

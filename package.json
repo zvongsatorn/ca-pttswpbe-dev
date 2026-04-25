@@ -7,6 +7,7 @@
         "start": "tsx index.ts",
         "dev": "tsx watch index.ts",
         "build": "tsc",
+        "test:ftps": "cross-env NODE_ENV=dev tsx scripts/ftpsClientProbe.ts",
         "test:pis": "tsx pis_fetch_probe.ts",
         "start:prod": "cross-env NODE_ENV=production node dist/index.js",
         "start:local": "cross-env NODE_ENV=local tsx index.ts",
@@ -15,6 +16,7 @@
     },
     "dependencies": {
         "@hono/node-server": "^1.19.9",
+        "basic-ftp": "^5.3.0",
         "bcrypt": "^6.0.0",
         "bcryptjs": "^3.0.3",
         "dotenv": "^17.3.1",
