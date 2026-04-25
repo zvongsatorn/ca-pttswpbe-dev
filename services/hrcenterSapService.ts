@@ -1,7 +1,7 @@
 import { sql, poolPromise } from '../config/db.js';
 import fs from 'node:fs';
 import path from 'node:path';
-import { Client } from 'basic-ftp';
+import { Client, enterPassiveModeIPv4 } from 'basic-ftp';
 
 const OUTBOUND_DIR_NAME = 'Outbound';
 const OUTBOUND_FILE_NAME = 'Input_ZHROMI040.txt';
@@ -420,6 +420,8 @@ interface FtpUploadAttempt {
     rejectUnauthorized: boolean;
     remoteDir: string;
     remoteFileName: string;
+    transferMode: 'default' | 'ipv4_pasv';
+    dataProtection: 'P' | 'C';
     logUrl: string;
 }
 
@@ -456,7 +458,9 @@ const buildFtpUploadAttempt = (
     secure: boolean | 'implicit',
     rejectUnauthorized: boolean,
     remoteDir: string,
-    remoteFileName: string
+    remoteFileName: string,
+    transferMode: 'default' | 'ipv4_pasv' = 'default',
+    dataProtection: 'P' | 'C' = 'P'
 ): FtpUploadAttempt => {
     const scheme = secure === 'implicit' ? 'ftps' : (secure ? 'ftp+tls' : 'ftp');
     const joinedPath = path.posix.join(remoteDir, remoteFileName).replace(/^\/+/, '/');
@@ -468,7 +472,9 @@ const buildFtpUploadAttempt = (
         rejectUnauthorized,
         remoteDir,
         remoteFileName,
-        logUrl: `${scheme}://${host}:${port}${joinedPath}`
+        transferMode,
+        dataProtection,
+        logUrl: `${scheme}://${host}:${port}${joinedPath};mode=${transferMode};prot=${dataProtection}`
     };
 };
 
@@ -480,7 +486,9 @@ const appendAttemptIfMissing = (attempts: FtpUploadAttempt[], attempt: FtpUpload
             item.secure === attempt.secure &&
             item.rejectUnauthorized === attempt.rejectUnauthorized &&
             item.remoteDir === attempt.remoteDir &&
-            item.remoteFileName === attempt.remoteFileName
+            item.remoteFileName === attempt.remoteFileName &&
+            item.transferMode === attempt.transferMode &&
+            item.dataProtection === attempt.dataProtection
         )
     ) {
         return;
@@ -546,6 +554,10 @@ const uploadFileViaFtpAttempt = async (
     client.ftp.verbose = false;
 
     try {
+        if (attempt.transferMode === 'ipv4_pasv') {
+            client.prepareTransfer = enterPassiveModeIPv4;
+        }
+
         await client.access({
             host: attempt.host,
             port: attempt.port,
@@ -554,6 +566,10 @@ const uploadFileViaFtpAttempt = async (
             secure: attempt.secure,
             secureOptions: attempt.secure ? { rejectUnauthorized: attempt.rejectUnauthorized } : undefined
         });
+
+        if (attempt.secure && attempt.dataProtection === 'C') {
+            await client.sendIgnoringError('PROT C');
+        }
 
         await client.ensureDir(attempt.remoteDir);
         await client.uploadFrom(localFilePath, attempt.remoteFileName);
@@ -617,6 +633,36 @@ const uploadFileToFtp = async (localFilePath: string): Promise<void> => {
             false,
             remoteTarget.remoteDir,
             remoteTarget.remoteFileName
+        )
+    );
+
+    appendAttemptIfMissing(
+        attempts,
+        buildFtpUploadAttempt(
+            'implicit-ftps-990-insecure-ipv4-pasv',
+            host,
+            990,
+            'implicit',
+            false,
+            remoteTarget.remoteDir,
+            remoteTarget.remoteFileName,
+            'ipv4_pasv',
+            'P'
+        )
+    );
+
+    appendAttemptIfMissing(
+        attempts,
+        buildFtpUploadAttempt(
+            'implicit-ftps-990-insecure-ipv4-pasv-prot-c',
+            host,
+            990,
+            'implicit',
+            false,
+            remoteTarget.remoteDir,
+            remoteTarget.remoteFileName,
+            'ipv4_pasv',
+            'C'
         )
     );
 
