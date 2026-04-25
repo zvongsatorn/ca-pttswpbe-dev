@@ -2,6 +2,22 @@ import { Context } from 'hono';
 import { getDashboardDataService, getDashboardExcelDataService, getReport1ExcelDataService, getReport01DataService, getReport02DataService, getReport03DataService, getReport03FilterOptionsService, getReport04DataService, getReport05DataService, getReport06DataService, getReport07DataService, getReport08DataService, getReport09AuditService, getReport09DataService, getReport10SummaryDataService, getReport10ExportDataService } from '../services/reportService.js';
 import ExcelJS from 'exceljs';
 
+const normalizeEmployeeId = (value: string): string => {
+    const raw = String(value || '').trim();
+    if (!raw) return '';
+    const match = raw.toUpperCase().match(/[A-Z]\d{7}/);
+    if (match) return match[0];
+    return raw.slice(0, 8).toUpperCase();
+};
+
+const normalizeUserGroupNo = (value: string): string => {
+    const raw = String(value || '').trim();
+    if (!raw) return '';
+    if (/^\d{1,2}$/.test(raw)) return raw.padStart(2, '0');
+    const match = raw.match(/\b(\d{1,2})\b/);
+    return match ? match[1].padStart(2, '0') : '';
+};
+
 export const getDashboardData = async (c: Context) => {
     try {
         const effectiveMonth = c.req.query('effectiveMonth') || '';
@@ -701,8 +717,8 @@ export const getReport8Data = async (c: Context) => {
 export const getReport9Data = async (c: Context) => {
     try {
         const effectiveYear = parseInt(c.req.query('effectiveYear') || '0', 10);
-        const employeeId = c.req.query('employeeId') || '';
-        const userGroupNo = c.req.query('userGroupNo') || '';
+        const employeeId = normalizeEmployeeId(c.req.query('employeeId') || '');
+        const userGroupNo = normalizeUserGroupNo(c.req.query('userGroupNo') || '');
 
         if (!effectiveYear || !employeeId) {
             return c.json({ status: 400, message: 'Missing required parameters: effectiveYear, employeeId' }, 400);
@@ -716,10 +732,11 @@ export const getReport9Data = async (c: Context) => {
         });
     } catch (error: any) {
         console.error('Error in getReport9Data controller:', error);
+        const errorMessage = String(error?.message || 'Internal server error');
         return c.json({
             status: 500,
-            message: 'Internal server error',
-            error: error.message
+            message: errorMessage,
+            error: errorMessage
         }, 500);
     }
 };

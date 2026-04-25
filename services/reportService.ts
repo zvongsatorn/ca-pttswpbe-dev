@@ -1755,6 +1755,22 @@ const normalizeReport09OrgUnitKey = (value: unknown): string => {
     return raw;
 };
 
+const normalizeReport09EmployeeIdParam = (value: unknown): string => {
+    const raw = toTrimText(value).toUpperCase();
+    if (!raw) return 'SYSTEM';
+    const match = raw.match(/[A-Z]\d{7}/);
+    if (match) return match[0];
+    return raw.slice(0, 8) || 'SYSTEM';
+};
+
+const normalizeReport09UserGroupNoParam = (value: unknown): string => {
+    const raw = toTrimText(value);
+    if (!raw) return '';
+    if (/^\d{1,2}$/.test(raw)) return raw.padStart(2, '0');
+    const match = raw.match(/\b(\d{1,2})\b/);
+    return match ? match[1].padStart(2, '0') : '';
+};
+
 const createEmptyReport09Node = (displayYears: number[]) => {
     const node: Record<string, number> = {
         cut_support: 0,
@@ -1921,15 +1937,15 @@ const getReport09RetirementMap = async (
     const employeeCol = pickColumnName(positionMeta.columns, REPORT09_EMPLOYEE_COL_CANDIDATES);
 
     const signPosCondition = signPosCol
-        ? `AND TRY_CONVERT(int, pos.${escapeSqlIdentifier(signPosCol)}) = 100`
+        ? `AND pos.${escapeSqlIdentifier(signPosCol)} = '100'`
         : '';
     const infoSecondmentCondition = infoSecondmentTextCol
-        ? `AND UPPER(LTRIM(RTRIM(CAST(info.${escapeSqlIdentifier(infoSecondmentTextCol)} AS nvarchar(64))))) = 'EMPLOYEE'`
+        ? `AND info.${escapeSqlIdentifier(infoSecondmentTextCol)} IN ('Employee', 'EMPLOYEE', 'employee')`
         : '';
     const countDistinctEmployeeExpr = infoEmployeeCol
-        ? `LTRIM(RTRIM(CAST(info.${escapeSqlIdentifier(infoEmployeeCol)} AS nvarchar(64))))`
+        ? `info.${escapeSqlIdentifier(infoEmployeeCol)}`
         : employeeCol
-            ? `LTRIM(RTRIM(CAST(pos.${escapeSqlIdentifier(employeeCol)} AS nvarchar(64))))`
+            ? `pos.${escapeSqlIdentifier(employeeCol)}`
             : '';
     const countExpr = countDistinctEmployeeExpr
         ? `COUNT(DISTINCT ${countDistinctEmployeeExpr})`
@@ -1940,53 +1956,51 @@ const getReport09RetirementMap = async (
             CASE
                 WHEN ISNULL(unit.IsSecondment, 0) = 1
                      AND rt.Reportto IS NOT NULL
-                     AND LTRIM(RTRIM(CAST(rt.Reportto AS nvarchar(32)))) <> ''
-                    THEN LTRIM(RTRIM(CAST(rt.Reportto AS nvarchar(32))))
-                ELSE LTRIM(RTRIM(CAST(pos.${escapeSqlIdentifier(orgCol)} AS nvarchar(32))))
+                     AND rt.Reportto <> ''
+                    THEN rt.Reportto
+                ELSE pos.${escapeSqlIdentifier(orgCol)}
             END
         `
-        : `LTRIM(RTRIM(CAST(pos.${escapeSqlIdentifier(orgCol)} AS nvarchar(32))))`;
+        : `pos.${escapeSqlIdentifier(orgCol)}`;
 
     const mappedOrgForUnitJoinExpr = structureIsSecondment === 0
         ? `
             CASE
                 WHEN ISNULL(unit.IsSecondment, 0) = 1
                      AND rt.Reportto IS NOT NULL
-                     AND LTRIM(RTRIM(CAST(rt.Reportto AS nvarchar(32)))) <> ''
-                    THEN LTRIM(RTRIM(CAST(rt.Reportto AS nvarchar(32))))
-                ELSE LTRIM(RTRIM(CAST(pos.${escapeSqlIdentifier(orgCol)} AS nvarchar(32))))
+                     AND rt.Reportto <> ''
+                    THEN rt.Reportto
+                ELSE pos.${escapeSqlIdentifier(orgCol)}
             END
         `
-        : `LTRIM(RTRIM(CAST(pos.${escapeSqlIdentifier(orgCol)} AS nvarchar(32))))`;
+        : `pos.${escapeSqlIdentifier(orgCol)}`;
 
     const joinStructureForMapping = `
         LEFT JOIN fn_InterfaceUnit(@EffectiveDate) unit
-            ON LTRIM(RTRIM(CAST(unit.OrgUnitNo AS nvarchar(32)))) =
-               LTRIM(RTRIM(CAST(pos.${escapeSqlIdentifier(orgCol)} AS nvarchar(32))))
+            ON unit.OrgUnitNo = pos.${escapeSqlIdentifier(orgCol)}
         LEFT JOIN fn_InterfaceReportto(@EffectiveDate) rt
-            ON LTRIM(RTRIM(CAST(rt.OrgUnitNo AS nvarchar(32)))) =
-               LTRIM(RTRIM(CAST(pos.${escapeSqlIdentifier(orgCol)} AS nvarchar(32))))
+            ON rt.OrgUnitNo = pos.${escapeSqlIdentifier(orgCol)}
         LEFT JOIN fn_InterfaceUnit(@EffectiveDate) mappedUnit
-            ON LTRIM(RTRIM(CAST(mappedUnit.OrgUnitNo AS nvarchar(32)))) = ${mappedOrgForUnitJoinExpr}
+            ON mappedUnit.OrgUnitNo = ${mappedOrgForUnitJoinExpr}
         `;
 
     const sourceEmployeeExpr = infoEmployeeCol
-        ? `LTRIM(RTRIM(CAST(info.${escapeSqlIdentifier(infoEmployeeCol)} AS nvarchar(32))))`
+        ? `info.${escapeSqlIdentifier(infoEmployeeCol)}`
         : employeeCol
-            ? `LTRIM(RTRIM(CAST(pos.${escapeSqlIdentifier(employeeCol)} AS nvarchar(32))))`
+            ? `pos.${escapeSqlIdentifier(employeeCol)}`
             : '';
 
     const effectiveRetireYearExpr = sourceEmployeeExpr
         ? `
             CASE
                 WHEN delay.delay_year = ${REPORT09_NON_COUNT_DELAY_YEAR}
-                    THEN TRY_CONVERT(int, info.${escapeSqlIdentifier(retireYearCol)})
+                    THEN info.${escapeSqlIdentifier(retireYearCol)}
                 WHEN delay.delay_year IS NOT NULL
                     THEN delay.delay_year
-                ELSE TRY_CONVERT(int, info.${escapeSqlIdentifier(retireYearCol)})
+                ELSE info.${escapeSqlIdentifier(retireYearCol)}
             END
         `
-        : `TRY_CONVERT(int, info.${escapeSqlIdentifier(retireYearCol)})`;
+        : `info.${escapeSqlIdentifier(retireYearCol)}`;
 
     const joinDelayForOverride = sourceEmployeeExpr
         ? `
@@ -1994,17 +2008,17 @@ const getReport09RetirementMap = async (
             SELECT employee_id, delay_year
             FROM (
                 SELECT
-                    LTRIM(RTRIM(CAST(EmployeeID AS nvarchar(32)))) AS employee_id,
-                    TRY_CONVERT(int, DelayYear) AS delay_year,
+                    EmployeeID AS employee_id,
+                    DelayYear AS delay_year,
                     ROW_NUMBER() OVER (
-                        PARTITION BY LTRIM(RTRIM(CAST(EmployeeID AS nvarchar(32))))
+                        PARTITION BY EmployeeID
                         ORDER BY COALESCE(UpdateDate, CreateDate) DESC,
                                  TRY_CONVERT(bigint, DelayID) DESC
                     ) AS rn
                 FROM MP_Delay
                 WHERE ISNULL(DelayStatus, 1) = 1
-                  AND LTRIM(RTRIM(CAST(EmployeeID AS nvarchar(32)))) <> ''
-                  AND TRY_CONVERT(int, DelayYear) IS NOT NULL
+                  AND EmployeeID <> ''
+                  AND DelayYear IS NOT NULL
             ) d
             WHERE d.rn = 1
         ) delay
@@ -2014,20 +2028,20 @@ const getReport09RetirementMap = async (
 
     const { allowedLevelGroupNos } = await getReport09RetirementLevelFilter(pool, effectiveYear);
     const levelFilterCondition = levelCol && allowedLevelGroupNos.length > 0
-        ? `AND LTRIM(RTRIM(CAST(pos.${escapeSqlIdentifier(levelCol)} AS nvarchar(16)))) IN (${allowedLevelGroupNos.map((value) => `'${escapeSqlString(value)}'`).join(',')})`
+        ? `AND pos.${escapeSqlIdentifier(levelCol)} IN (${allowedLevelGroupNos.map((value) => `'${escapeSqlString(value)}'`).join(',')})`
         : '';
 
     const unitBgExpr = unitBgCol
-        ? `LTRIM(RTRIM(CAST(unit.${escapeSqlIdentifier(unitBgCol)} AS nvarchar(32))))`
+        ? `unit.${escapeSqlIdentifier(unitBgCol)}`
         : `''`;
     const mappedUnitBgExpr = unitBgCol
-        ? `LTRIM(RTRIM(CAST(mappedUnit.${escapeSqlIdentifier(unitBgCol)} AS nvarchar(32))))`
+        ? `mappedUnit.${escapeSqlIdentifier(unitBgCol)}`
         : `''`;
     const unitNameExpr = unitNameCol
-        ? `UPPER(LTRIM(RTRIM(CAST(unit.${escapeSqlIdentifier(unitNameCol)} AS nvarchar(255)))))`
+        ? `UPPER(unit.${escapeSqlIdentifier(unitNameCol)})`
         : `''`;
     const unitAbbrExpr = unitAbbrCol
-        ? `UPPER(LTRIM(RTRIM(CAST(unit.${escapeSqlIdentifier(unitAbbrCol)} AS nvarchar(255)))))`
+        ? `UPPER(unit.${escapeSqlIdentifier(unitAbbrCol)})`
         : `''`;
     const hoConditions = [
         unitBgCol ? `${unitBgExpr} = '905'` : '',
@@ -2041,9 +2055,9 @@ const getReport09RetirementMap = async (
         CASE
             WHEN ${isHoExpr} THEN 2
             WHEN ${mappedUnitBgExpr} = '905'
-                 AND NULLIF(LTRIM(RTRIM(CAST(pos.${escapeSqlIdentifier(bsTypeCol)} AS nvarchar(32)))), '') IS NULL THEN 2
-            WHEN TRY_CONVERT(int, pos.${escapeSqlIdentifier(orgTypeCol)}) = 2
-                 AND TRY_CONVERT(int, pos.${escapeSqlIdentifier(bsTypeCol)}) = 2 THEN 2
+                 AND pos.${escapeSqlIdentifier(bsTypeCol)} IS NULL THEN 2
+            WHEN pos.${escapeSqlIdentifier(orgTypeCol)} = 2
+                 AND pos.${escapeSqlIdentifier(bsTypeCol)} = 2 THEN 2
             ELSE 1
         END
     `;
@@ -2056,8 +2070,7 @@ const getReport09RetirementMap = async (
             ${countExpr} AS retire_count
         FROM ${infoMeta.fullName} info
         INNER JOIN ${positionMeta.fullName} pos
-            ON LTRIM(RTRIM(CAST(pos.${escapeSqlIdentifier(positionIdCol)} AS nvarchar(64)))) =
-               LTRIM(RTRIM(CAST(info.${escapeSqlIdentifier(infoPosCol)} AS nvarchar(64))))
+            ON pos.${escapeSqlIdentifier(positionIdCol)} = info.${escapeSqlIdentifier(infoPosCol)}
         ${joinDelayForOverride}
         ${joinStructureForMapping}
         WHERE ${effectiveRetireYearExpr} BETWEEN @FromYear AND @ToYear
@@ -2522,6 +2535,31 @@ const recalculateReport09CutsForDisplayedRows = (
     rows.forEach((row) => visit(row));
 };
 
+const adjustReport09DisplayedRowsToOwnOnly = (
+    rows: any[],
+    displayYears: number[]
+) => {
+    const valueKeys = displayYears.flatMap((year) => [`y${year}_sup`, `y${year}_bu`]);
+
+    const visit = (node: any) => {
+        if (!node || typeof node !== 'object') return;
+        if (Array.isArray(node.children)) {
+            node.children.forEach((child: any) => visit(child));
+        }
+
+        const rowKey = String(node.key || '');
+        const isSummaryRow = rowKey === 'total' || rowKey.startsWith('bg-');
+        if (isSummaryRow || !Array.isArray(node.children) || node.children.length === 0) return;
+
+        valueKeys.forEach((key) => {
+            const childSum = node.children.reduce((sum: number, child: any) => sum + toNumberOrZero(child[key]), 0);
+            node[key] = Math.max(0, toNumberOrZero(node[key]) - childSum);
+        });
+    };
+
+    rows.forEach((row) => visit(row));
+};
+
 const buildReport09FallbackTree = (
     sourceMap: Report09OrgYearMap,
     displayYears: number[],
@@ -2591,18 +2629,18 @@ const appendReport09MissingStructureRows = async (
         .input('EffectiveDate', sql.DateTime, structureDate)
         .query(`
             SELECT
-                LTRIM(RTRIM(CAST(unit.OrgUnitNo AS nvarchar(32)))) AS OrgUnitNo,
-                LTRIM(RTRIM(CAST(unit.UnitAbbr AS nvarchar(255)))) AS UnitAbbr,
-                LTRIM(RTRIM(CAST(unit.UnitName AS nvarchar(255)))) AS UnitName,
-                LTRIM(RTRIM(CAST(unit.ParentOrgUnitNo AS nvarchar(32)))) AS ParentOrgUnitNo,
-                TRY_CONVERT(int, unit.GroupBG) AS GroupBG,
-                LTRIM(RTRIM(CAST(bg.BGName AS nvarchar(255)))) AS BGName,
-                TRY_CONVERT(int, unit.IsBelongTo) AS IsBelongTo
+                unit.OrgUnitNo,
+                unit.UnitAbbr,
+                unit.UnitName,
+                unit.ParentOrgUnitNo,
+                unit.GroupBG,
+                bg.BGName,
+                unit.IsBelongTo
             FROM fn_InterfaceUnit(@EffectiveDate) unit
             LEFT JOIN MP_BG bg
-                ON LTRIM(RTRIM(CAST(bg.BGNo AS nvarchar(32)))) = LTRIM(RTRIM(CAST(unit.BGNo AS nvarchar(32))))
+                ON bg.BGNo = unit.BGNo
                AND @EffectiveDate BETWEEN bg.BeginDate AND bg.EndDate
-            WHERE LTRIM(RTRIM(CAST(unit.OrgUnitNo AS nvarchar(32)))) IN (${inList})
+            WHERE unit.OrgUnitNo IN (${inList})
         `);
 
     const rows = Array.isArray(result.recordset) ? result.recordset as Array<Record<string, unknown>> : [];
@@ -2686,8 +2724,8 @@ const rollupReport09SourceMapToStructure = async (
         .input('EffectiveDate', sql.DateTime, structureDate)
         .query(`
             SELECT
-                LTRIM(RTRIM(CAST(unit.OrgUnitNo AS nvarchar(32)))) AS OrgUnitNo,
-                LTRIM(RTRIM(CAST(unit.ParentOrgUnitNo AS nvarchar(32)))) AS ParentOrgUnitNo
+                unit.OrgUnitNo,
+                unit.ParentOrgUnitNo
             FROM fn_InterfaceUnit(@EffectiveDate) unit
         `);
 
@@ -2945,6 +2983,7 @@ const buildReport09Tree = (
         }
     };
     resultTree.forEach((bgNode) => fillMissingUnitNames(bgNode));
+    adjustReport09DisplayedRowsToOwnOnly(resultTree, displayYears);
     recalculateReport09CutsForDisplayedRows(resultTree, displayYears, yearRateMap);
 
     return resultTree;
@@ -2957,6 +2996,8 @@ export const getReport09DataService = async (
 ) => {
     try {
         const safeEffectiveYear = toNumberOrZero(effectiveYear) || (new Date().getFullYear() + 543);
+        const safeEmployeeId = normalizeReport09EmployeeIdParam(employeeId);
+        const safeUserGroupNo = normalizeReport09UserGroupNoParam(userGroupNo);
         const effectiveYearAD = safeEffectiveYear > 2500 ? safeEffectiveYear - 543 : safeEffectiveYear;
         const structureDate = new Date(`${effectiveYearAD}-01-01T00:00:00`);
         const structureIsSecondment = 0;
@@ -2970,8 +3011,8 @@ export const getReport09DataService = async (
                 try {
                     const request = pool.request();
                     request.input('Effectivedate', sql.DateTime, structureDate);
-                    request.input('EmployeeID', sql.VarChar(8), employeeId);
-                    request.input('UserGroupNo', sql.VarChar(2), userGroupNo || null);
+                    request.input('EmployeeID', sql.VarChar(8), safeEmployeeId);
+                    request.input('UserGroupNo', sql.VarChar(2), safeUserGroupNo);
                     request.input('IsSecondment', sql.Int, structureIsSecondment);
                     const result = await request.execute('mp_Report09Get');
                     return Array.isArray(result.recordset) ? result.recordset : [];
@@ -2980,8 +3021,8 @@ export const getReport09DataService = async (
                     console.warn('mp_Report09Get unavailable, fallback to mp_Report01Get:', spError);
                     const fallbackRequest = pool.request();
                     fallbackRequest.input('Effectivedate', sql.DateTime, structureDate);
-                    fallbackRequest.input('EmployeeID', sql.VarChar(8), employeeId);
-                    fallbackRequest.input('UserGroupNo', sql.VarChar(2), userGroupNo || null);
+                    fallbackRequest.input('EmployeeID', sql.VarChar(8), safeEmployeeId);
+                    fallbackRequest.input('UserGroupNo', sql.VarChar(2), safeUserGroupNo);
                     const fallbackResult = await fallbackRequest.execute('mp_Report01Get');
                     return Array.isArray(fallbackResult.recordset) ? fallbackResult.recordset : [];
                 }

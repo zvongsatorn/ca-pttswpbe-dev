@@ -7,20 +7,28 @@ let isLoaded = false;
 export function loadEnv() {
     if (isLoaded) return;
 
-    const nodeEnv = (process.env.NODE_ENV || 'development').trim();
+    const nodeEnv = (process.env.NODE_ENV || 'development').trim().toLowerCase();
+    const envCandidates = Array.from(new Set([
+        `.env.${nodeEnv}`,
+        ...(nodeEnv === 'development' ? ['.env.dev'] : []),
+        ...(nodeEnv === 'dev' ? ['.env.development'] : []),
+        '.env.local',
+        '.env'
+    ]));
 
-    const envFile = `.env.${nodeEnv}`;
-    const filePath = path.resolve(process.cwd(), envFile);
+    for (const envFile of envCandidates) {
+        const filePath = path.resolve(process.cwd(), envFile);
+        if (!existsSync(filePath)) continue;
 
-    if (existsSync(filePath)) {
         try {
             loadEnvFile(filePath);
             console.log(`Loaded environment from: ${envFile}`);
             isLoaded = true;
+            return;
         } catch (e) {
             console.error(`Failed to load environment from ${envFile}:`, e);
         }
-    } else {
-        console.warn(`Environment file ${envFile} not found.`);
     }
+
+    console.warn(`No environment file found. Tried: ${envCandidates.join(', ')}`);
 }
