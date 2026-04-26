@@ -9,6 +9,16 @@ const toSqlDateOnly = (value: Date | string): Date => {
     return new Date(Date.UTC(parsed.getFullYear(), parsed.getMonth(), parsed.getDate(), 0, 0, 0, 0));
 };
 
+const getMonthStartDate = (value = new Date()): Date =>
+    new Date(value.getFullYear(), value.getMonth(), 1);
+
+const formatCompactDate = (value: Date): string => {
+    const year = value.getFullYear();
+    const month = String(value.getMonth() + 1).padStart(2, '0');
+    const day = String(value.getDate()).padStart(2, '0');
+    return `${year}${month}${day}`;
+};
+
 class UserRightService {
     // 1. mp_OrgUnitInGroupGet (Reconstructed logic)
     async getOrgUnitInGroup(userGroupNo: string) {
@@ -83,7 +93,7 @@ class UserRightService {
             .input('UserGroupNo', sql.NVarChar, userGroupNo)
             .input('EmployeeID', sql.NVarChar, employeeId)
             .input('OrgUnitNo', sql.NVarChar, orgUnitNo)
-            .input('BeginDate', sql.Date, toSqlDateOnly(new Date()))
+            .input('BeginDate', sql.Date, toSqlDateOnly(getMonthStartDate()))
             .input('EndDate', sql.Date, toSqlDateOnly(new Date('9999-12-31')))
             .input('CreateBy', sql.NVarChar, createBy)
             .input('CreateDate', sql.DateTime, new Date())
@@ -131,7 +141,7 @@ class UserRightService {
     async addUserInAllUnit(userGroupNo: string, employeeId: string, createBy: string) {
         const pool = await poolPromise;
         const now = new Date();
-        const bdate = now.toISOString().split('T')[0].replace(/-/g, '');
+        const bdate = formatCompactDate(getMonthStartDate(now));
         const edate = '99991231';
 
         await pool.request()
@@ -148,7 +158,7 @@ class UserRightService {
     async addUserInBUAll(userGroupNo: string, employeeId: string, bgNo: string, createBy: string) {
         const pool = await poolPromise;
         const now = new Date();
-        const bdate = now.toISOString().split('T')[0].replace(/-/g, '');
+        const bdate = formatCompactDate(getMonthStartDate(now));
         const edate = '99991231';
 
         await pool.request()
@@ -166,7 +176,7 @@ class UserRightService {
     async addUserInBelongAll(userGroupNo: string, employeeId: string, orgUnitNo: string, createBy: string) {
         const pool = await poolPromise;
         const now = new Date();
-        const bdate = now.toISOString().split('T')[0].replace(/-/g, '');
+        const bdate = formatCompactDate(getMonthStartDate(now));
         const edate = '99991231';
 
         await pool.request()

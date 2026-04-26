@@ -1386,6 +1386,19 @@ const round2 = (value: number): number => Math.round((value + Number.EPSILON) * 
 const cleanReport7UnitShort = (value: unknown): string =>
     toTrimText(value).replace(/\s*ขึ้นตรง\s*$/, '').trim();
 
+type Report7QuotaTotals = {
+    q_1: number;
+    q_2: number;
+    q_3: number;
+    q_4: number;
+    q_5: number;
+    q_6: number;
+    q_7: number;
+    q_total: number;
+    q_8: number;
+    q_10: number;
+};
+
 export const getReport07DataService = async (
     effectiveDateStr: string,
     employeeId: string,
@@ -1478,6 +1491,47 @@ export const getReport07DataService = async (
         const effectiveDate = new Date(effectiveDateStr);
         const pool = await poolPromise;
 
+        const quotaRequest = pool.request();
+        quotaRequest.input('EffectiveDate', sql.DateTime, effectiveDate);
+        const quotaRes = await quotaRequest.query(`
+            SELECT
+                OrgUnitNo,
+                SUM(ISNULL(L9907, 0)) AS q_1,
+                SUM(ISNULL(L9906, 0)) AS q_2,
+                SUM(ISNULL(L9905, 0)) AS q_3,
+                SUM(ISNULL(L9904, 0)) AS q_4,
+                SUM(ISNULL(L9903, 0)) AS q_5,
+                SUM(ISNULL(L9902, 0)) AS q_6,
+                SUM(ISNULL(L9901, 0)) AS q_7,
+                SUM(ISNULL(L9907, 0) + ISNULL(L9906, 0) + ISNULL(L9905, 0) + ISNULL(L9904, 0)
+                    + ISNULL(L9903, 0) + ISNULL(L9902, 0) + ISNULL(L9901, 0)) AS q_total,
+                SUM(ISNULL(L9908, 0)) AS q_8,
+                SUM(ISNULL(L9910, 0)) AS q_10
+            FROM MP_QuotaN
+            WHERE EffectiveDate = DATEADD(month, DATEDIFF(month, 0, @EffectiveDate), 0)
+            GROUP BY OrgUnitNo
+        `);
+        const quotaMap = new Map<string, Report7QuotaTotals>();
+        const quotaRows = Array.isArray(quotaRes.recordset) ? quotaRes.recordset : [];
+        quotaRows.forEach((raw) => {
+            const row = (raw && typeof raw === 'object') ? (raw as Record<string, unknown>) : {};
+            const { num, text } = buildRowAccessor(row);
+            const orgUnitNo = text('OrgUnitNo');
+            if (!orgUnitNo) return;
+            quotaMap.set(orgUnitNo, {
+                q_1: num('q_1'),
+                q_2: num('q_2'),
+                q_3: num('q_3'),
+                q_4: num('q_4'),
+                q_5: num('q_5'),
+                q_6: num('q_6'),
+                q_7: num('q_7'),
+                q_total: num('q_total'),
+                q_8: num('q_8'),
+                q_10: num('q_10')
+            });
+        });
+
         const bgNameRequest = pool.request();
         bgNameRequest.input('EffectiveDate', sql.DateTime, effectiveDate);
         const bgNameRes = await bgNameRequest.query(`
@@ -1550,17 +1604,18 @@ export const getReport07DataService = async (
             const orgUnitNo = toTrimText(row.org_unit_no);
             const bgNoCode = toTrimText(row.bg_no);
             const landscape = landscapeMap.get(orgUnitNo) || defaultLandscape;
+            const quota = quotaMap.get(orgUnitNo);
 
-            const q1 = toNumberOrZero(row.q_1);
-            const q2 = toNumberOrZero(row.q_2);
-            const q3 = toNumberOrZero(row.q_3);
-            const q4 = toNumberOrZero(row.q_4);
-            const q5 = toNumberOrZero(row.q_5);
-            const q6 = toNumberOrZero(row.q_6);
-            const q7 = toNumberOrZero(row.q_7);
-            const qTotal = toNumberOrZero(row.q_total);
-            const contractOut = toNumberOrZero(row.q_8);
-            const subContract = toNumberOrZero(row.q_10);
+            const q1 = quota?.q_1 ?? toNumberOrZero(row.q_1);
+            const q2 = quota?.q_2 ?? toNumberOrZero(row.q_2);
+            const q3 = quota?.q_3 ?? toNumberOrZero(row.q_3);
+            const q4 = quota?.q_4 ?? toNumberOrZero(row.q_4);
+            const q5 = quota?.q_5 ?? toNumberOrZero(row.q_5);
+            const q6 = quota?.q_6 ?? toNumberOrZero(row.q_6);
+            const q7 = quota?.q_7 ?? toNumberOrZero(row.q_7);
+            const qTotal = quota?.q_total ?? toNumberOrZero(row.q_total);
+            const contractOut = quota?.q_8 ?? toNumberOrZero(row.q_8);
+            const subContract = quota?.q_10 ?? toNumberOrZero(row.q_10);
 
             const m1 = toNumberOrZero(row.m_1);
             const m2 = toNumberOrZero(row.m_2);

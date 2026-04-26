@@ -7,12 +7,23 @@ class UserGroupService {
         return /^\d+$/.test(raw) ? raw.padStart(2, '0') : raw;
     }
 
+    private getMonthStartDate(value = new Date()): Date {
+        return new Date(value.getFullYear(), value.getMonth(), 1);
+    }
+
+    private formatCompactDate(value: Date): string {
+        const year = value.getFullYear();
+        const month = String(value.getMonth() + 1).padStart(2, '0');
+        const day = String(value.getDate()).padStart(2, '0');
+        return `${year}${month}${day}`;
+    }
+
     private async addAllOrgUnitsForHrPolicy(userGroupNo: string, employeeID: string, createBy: string) {
         if (this.normalizeGroupNo(userGroupNo) !== '04') return;
 
         const pool = await poolPromise;
         const now = new Date();
-        const beginDate = now.toISOString().split('T')[0].replace(/-/g, '');
+        const beginDate = this.formatCompactDate(this.getMonthStartDate(now));
 
         await pool.request()
             .input('UserGroupNo', sql.NVarChar, userGroupNo)
@@ -154,7 +165,7 @@ class UserGroupService {
         await pool.request()
             .input('UserGroupNo', sql.NVarChar, userGroupNo)
             .input('LevelGroupNo', sql.NVarChar, levelGroupNo)
-            .input('BeginDate', sql.Date, new Date())
+            .input('BeginDate', sql.Date, this.getMonthStartDate())
             .input('EndDate', sql.Date, new Date('9999-12-31'))
             .input('CreateBy', sql.NVarChar, createBy)
             .input('CreateDate', sql.DateTime, new Date())
@@ -206,7 +217,7 @@ class UserGroupService {
         await pool.request()
             .input('UserGroupNo', sql.NVarChar, userGroupNo)
             .input('EmployeeID', sql.NVarChar, employeeID)
-            .input('BeginDate', sql.Date, new Date())
+            .input('BeginDate', sql.Date, this.getMonthStartDate())
             .input('EndDate', sql.Date, new Date('9999-12-31'))
             .input('CreateBy', sql.NVarChar, createBy)
             .input('CreateDate', sql.DateTime, new Date())
