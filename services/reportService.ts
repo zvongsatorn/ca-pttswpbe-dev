@@ -3229,28 +3229,29 @@ export const getReport10ExportDataService = async (
             .join(', ');
 
         const result = await request.query(`
-            ;WITH PositionDedup AS (
-                SELECT
-                    p.*,
-                    ROW_NUMBER() OVER (
-                        PARTITION BY p.PositionID
-                        ORDER BY
-                            CAST(p.EndDate AS nvarchar(32)) DESC,
-                            CAST(p.BeginDate AS nvarchar(32)) DESC,
-                            CAST(p.OrgUnitID AS nvarchar(32)) DESC
-                    ) AS rn
+            ;WITH PositionSource AS (
+                SELECT p.*
                 FROM fn_InterfacePosition(@EffectiveDate) p
                 WHERE @EffectiveDate BETWEEN TRY_CONVERT(date, p.BeginDate) AND TRY_CONVERT(date, p.EndDate)
-                and SignPos <> 0
-                AND LTRIM(RTRIM(CAST(p.LevelGroupNo AS nvarchar(16)))) IN (${allowedLevelList})
+                  AND LTRIM(RTRIM(CAST(p.LevelGroupNo AS nvarchar(16)))) IN (${allowedLevelList})
             ),
-            InfoDataDedup AS (
+            InfoDataByPosition AS (
                 SELECT
                     i.*,
                     ROW_NUMBER() OVER (
                         PARTITION BY i.POSCODE
                         ORDER BY
                             CAST(i.CODE AS nvarchar(32)) DESC,
+                            CAST(i.FULLNAMETH AS nvarchar(300)) DESC
+                    ) AS rn
+                FROM InfoData i
+            ),
+            InfoDataByPositionEmployee AS (
+                SELECT
+                    i.*,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY i.POSCODE, i.CODE
+                        ORDER BY
                             CAST(i.FULLNAMETH AS nvarchar(300)) DESC
                     ) AS rn
                 FROM InfoData i
@@ -3269,7 +3270,7 @@ export const getReport10ExportDataService = async (
                 SELECT N'1004', N'ผู้จัดการฝ่าย', 4
             )
             SELECT
-                i.POSCODE,
+                COALESCE(iEmployee.POSCODE, iPosition.POSCODE, p.PositionID) AS POSCODE,
                 p.OrgUnitID AS OrgUnitNo,
                 InterfaceUnit.UnitName,
                 p.OrgFlag,
@@ -3283,22 +3284,27 @@ export const getReport10ExportDataService = async (
                 p.SpecFlag,
                 p.LineStaffFlag,
                 p.EmployeeID,
-                i.CODE AS InfoEmployeeID,
-                i.FULLNAMETH,
-                i.POSNAME,
+                COALESCE(iEmployee.CODE, iPosition.CODE) AS InfoEmployeeID,
+                COALESCE(iEmployee.FULLNAMETH, iPosition.FULLNAMETH) AS FULLNAMETH,
+                COALESCE(iEmployee.POSNAME, iPosition.POSNAME) AS POSNAME,
                 JCodeDedup.JCODE,
                 LevelMap.LevelCode,
                 LevelMap.LevelName,
                 LevelMap.SortOrder,
                 InterfaceUnit.ParentOrgUnitNo,
                 UnitParent.UnitName AS ParentUnitName
-            FROM PositionDedup p
-            INNER JOIN InfoDataDedup i ON i.POSCODE = p.PositionID AND i.rn = 1
+            FROM PositionSource p
+            LEFT JOIN InfoDataByPositionEmployee iEmployee
+                ON iEmployee.POSCODE = p.PositionID
+                AND iEmployee.CODE = p.EmployeeID
+                AND iEmployee.rn = 1
+            LEFT JOIN InfoDataByPosition iPosition
+                ON iPosition.POSCODE = p.PositionID
+                AND iPosition.rn = 1
             LEFT JOIN JCodeDedup ON JCodeDedup.levelgroup = p.LevelGroupNo
             LEFT JOIN LevelMap ON LevelMap.LevelCode = LTRIM(RTRIM(CAST(p.LevelGroupNo AS nvarchar(16))))
             LEFT JOIN fn_InterfaceUnit(@EffectiveDate) InterfaceUnit ON InterfaceUnit.OrgUnitNo = p.OrgUnitID
             LEFT JOIN fn_InterfaceUnit(@EffectiveDate) UnitParent ON UnitParent.OrgUnitNo = InterfaceUnit.ParentOrgUnitNo
-            WHERE p.rn = 1
         `);
         const rows = Array.isArray(result.recordset) ? result.recordset : [];
 
