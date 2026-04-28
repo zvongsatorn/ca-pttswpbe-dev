@@ -3343,6 +3343,7 @@ export const getReport10ExportDataService = async (
                 org_flag: num('OrgFlag', 'orgflag'),
                 org_type: orgType,
                 pool_rs_flag: poolRsFlag,
+                sign_pos: text('SignPos', 'signpos'),
                 strg_flag: strgFlag,
                 bs_type: bsType,
                 spec_flag: specFlag,
