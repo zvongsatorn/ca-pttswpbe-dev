@@ -60,3 +60,6 @@ pis_prod_all.json
 
 # Office temp lock files
 .~lock.*
+
+# SonarQube local scanner
+.scannerwork/
