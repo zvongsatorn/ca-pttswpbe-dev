@@ -12,7 +12,10 @@
         "start:prod": "cross-env NODE_ENV=production node dist/index.js",
         "start:local": "cross-env NODE_ENV=local tsx index.ts",
         "start:test": "cross-env NODE_ENV=test tsx index.ts",
-        "start:dev": "cross-env NODE_ENV=dev tsx index.ts"
+        "start:dev": "cross-env NODE_ENV=dev tsx index.ts",
+        "typecheck": "tsc --noEmit",
+        "test:unit": "node --no-warnings --test tests/*.test.mts",
+        "test": "npm run test:unit && npm run typecheck"
     },
     "dependencies": {
         "@hono/node-server": "^1.19.9",
