@@ -1,0 +1,31 @@
+workflow:
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "develop"'
+    - when: never
+
+stages:
+  - validate
+  - security
+
+default:
+  image: node:24.15.0-alpine
+  cache:
+    key:
+      files:
+        - package-lock.json
+    paths:
+      - .npm/
+  before_script:
+    - node --version
+    - npm --version
+    - npm ci --cache .npm --prefer-offline
+
+typecheck:
+  stage: validate
+  script:
+    - npx tsc --noEmit
+
+audit:
+  stage: security
+  script:
+    - npm audit --audit-level=high
