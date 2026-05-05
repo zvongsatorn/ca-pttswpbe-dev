@@ -1,0 +1,44 @@
+# https://learn.microsoft.com/en-us/azure/templates/microsoft.app/2023-11-02-preview/containerapps?pivots=deployment-language-arm-template
+type: Microsoft.App/containerApps
+apiVersion: 2025-01-01-preview
+properties:
+  configuration:
+    ingress:
+      external: true
+      targetPort: 5000
+  template:
+    containers:
+    - image: IMAGE_RELEASE_ID ## Do not edit
+      name: APP_RELEASE_NAME ## Do not edit
+      resources:
+        cpu: 0.25
+        memory: 0.5Gi
+      env:
+    #   - name: env_secret_1
+    #     secretRef: secret-data-key-1
+      - name: env_test1
+        value: This is environment variable.
+      probes:
+      - type: Liveness
+        httpGet:
+          path: "/"
+          port: 5000
+        initialDelaySeconds: 3
+        periodSeconds: 3
+      - type: Readiness
+        httpGet:
+          path: "/"
+          port: 5000
+        initialDelaySeconds: 3
+        periodSeconds: 3
+    #   volumeMounts:
+    #   - mountPath: "/app/empty"
+    #     volumeName: volume-empty
+    #   - mountPath: "/app/demo"
+    #     volumeName: volume-aca-demo-file
+    # volumes:
+    # - name: volume-empty
+    #   storageType: EmptyDir
+    # - name: volume-aca-demo-file
+    #   storageType: AzureFile
+    #   storageName: academovolume

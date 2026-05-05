@@ -10,6 +10,7 @@ const toPositiveInt = (value: string | undefined, fallback: number): number => {
 
 const dbConnectionTimeout = toPositiveInt(process.env.DB_CONNECTION_TIMEOUT_MS, 30000);
 const dbRequestTimeout = toPositiveInt(process.env.DB_REQUEST_TIMEOUT_MS, 30000);
+const trustServerCertificate = process.env.DB_TRUST_SERVER_CERTIFICATE === 'true';
 
 const config: sql.config = {
     user: process.env.DB_USER,
@@ -26,7 +27,7 @@ const config: sql.config = {
     requestTimeout: dbRequestTimeout,
     options: {
         encrypt: true,
-        trustServerCertificate: true
+        trustServerCertificate
     }
 };
 

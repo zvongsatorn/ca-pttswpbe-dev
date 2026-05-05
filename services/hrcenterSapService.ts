@@ -153,8 +153,9 @@ const genQuotaByOrgUnitAll = async (effectiveDate: Date, orgUnitNo: string): Pro
 
     for (const row of rows) {
         const poolRsFlag = getFieldInt(row, ['PoolRsFlag']);
-        const orgType = poolRsFlag === 2 ? 2 : 1;
-        const orgFlag = 1;
+        const orgType = getFieldInt(row, ['OrgType']) || (poolRsFlag === 2 ? 2 : 1);
+        const orgFlag = getFieldInt(row, ['OrgFlag']) || 1;
+        const lineStaffFlag = getFieldInt(row, ['LineStaffFlag']) || 1;
 
         const insertReq = new sql.Request(pool);
         insertReq.input('OrgUnitNo', sql.VarChar(8), getFieldText(row, ['OrgUnitNo']));
@@ -177,6 +178,7 @@ const genQuotaByOrgUnitAll = async (effectiveDate: Date, orgUnitNo: string): Pro
         insertReq.input('StrgFlag', sql.Int, getFieldInt(row, ['StrgFlag']));
         insertReq.input('BSType', sql.Int, getFieldInt(row, ['BSType']));
         insertReq.input('SpecFlag', sql.Int, getFieldInt(row, ['SpecFlag']));
+        insertReq.input('LineStaffFlag', sql.Int, lineStaffFlag);
         insertReq.input('CreateBy', sql.VarChar(20), 'System');
         insertReq.input('CreateDate', sql.DateTime, new Date());
         insertReq.input('UpdateBy', sql.VarChar(20), 'System');

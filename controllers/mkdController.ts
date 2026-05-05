@@ -345,6 +345,10 @@ import * as path from 'path';
 export const uploadFile = async (c: Context) => {
     try {
         const id = c.req.param('id');
+        if (!id) {
+            return c.json({ success: false, message: 'Missing MKD id' }, 400);
+        }
+
         const body = await c.req.parseBody();
         const file = body['file'] as any; 
         const user = body['user'] as string || 'SYSTEM';
@@ -388,9 +392,8 @@ export const deleteFile = async (c: Context) => {
     try {
         const id = c.req.param('id');
         const fileId = c.req.param('fileId');
-
         if (!id || !fileId) {
-             return c.json({ message: 'Missing IDs' }, 400);
+            return c.json({ success: false, message: 'Missing file parameters' }, 400);
         }
 
         await deleteFileService(fileId);
@@ -999,7 +1002,12 @@ export const downloadMasterKeyTemplate = async (c: Context) => {
 
 export const submitMKDApproveAction = async (c: Context) => {
     try {
-        const id = parseInt(c.req.param('id'));
+        const idParam = c.req.param('id');
+        if (!idParam) {
+            return c.json({ success: false, message: 'Missing MKD id' }, 400);
+        }
+
+        const id = parseInt(idParam);
         const { approveId, employeeId, action, remark } = await c.req.json();
         const result = await submitMKDApproveActionService(id, approveId, employeeId, action, remark);
         return c.json(result, 200);
@@ -1011,7 +1019,12 @@ export const submitMKDApproveAction = async (c: Context) => {
 
 export const copyMKD = async (c: Context) => {
     try {
-        const id = parseInt(c.req.param('id'));
+        const idParam = c.req.param('id');
+        if (!idParam) {
+            return c.json({ success: false, message: 'Missing MKD id' }, 400);
+        }
+
+        const id = parseInt(idParam);
         const { copyFromId, employeeId, effectiveYear } = await c.req.json();
         const result = await copyMKDService(copyFromId, id, employeeId, effectiveYear);
         return c.json(result, 200);
@@ -1034,7 +1047,12 @@ export const getMKDHistory = async (c: Context) => {
 
 export const cancelMKD = async (c: Context) => {
     try {
-        const id = parseInt(c.req.param('id'));
+        const idParam = c.req.param('id');
+        if (!idParam) {
+            return c.json({ success: false, message: 'Missing MKD id' }, 400);
+        }
+
+        const id = parseInt(idParam);
         const result = await cancelMKDService(id);
         return c.json(result, 200);
     } catch (error: any) {

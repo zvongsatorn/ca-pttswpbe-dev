@@ -1,12 +1,17 @@
 import { Context } from 'hono';
 import bcrypt from 'bcrypt';
-import { createHash } from 'crypto';
+import { createHash, randomBytes } from 'crypto';
 
 import jwt from 'jsonwebtoken';
 import configService from '../services/configService.js';
 import userGroupService from '../services/userGroupService.js';
 import * as userService from '../services/userService.js';
 import { insertLogActionService } from '../services/logService.js';
+
+const createTemporaryPassword = () => {
+    const suffix = randomBytes(12).toString('base64url');
+    return `Tmp-${suffix}9!`;
+};
 
 class AuthController {
     login = async (c: Context) => {
@@ -365,7 +370,7 @@ class AuthController {
 
     getPublicConfig = async (c: Context) => {
         try {
-            const key = c.req.param('key');
+            const key = c.req.param('key') ?? '';
             // Whitelist for public config keys
             const allowedKeys = ['LoginAdmin', 'SignupB2C'];
             
@@ -422,7 +427,7 @@ class AuthController {
                 }],
                 passwordProfile: {
                     forceChangePasswordNextSignIn: true,
-                    password: "Password@123" // Placeholder, user will change it
+                    password: createTemporaryPassword()
                 },
                 passwordPolicies: "None",
                 userPrincipalName: `${Date.now()}_${email.split('@')[0]}@${b2cDomain}`,

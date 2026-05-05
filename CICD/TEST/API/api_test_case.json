@@ -1,0 +1,33 @@
+{
+	"info": {
+		"_postman_id": "338f0077-92b3-4f0e-94d5-c22ce3fe091e",
+		"name": "Auto Test",
+		"schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
+		"_exporter_id": "6996766"
+	},
+	"item": [{
+		"name": "App Health Check",
+		"event": [{
+			"listen": "test",
+			"script": {
+				"exec": [
+					"pm.test(\"Status code is 200\", function () {\r",
+					"    pm.response.to.have.status(200);\r",
+					"});\r"
+				],
+				"type": "text/javascript"
+			}
+		}],
+		"request": {
+			"method": "GET",
+			"header": [],
+			"url": {
+				"raw": "{{hostname}}-DevOps",
+				"host": [
+					"{{hostname}}-DevOps"
+				]
+			}
+		},
+		"response": []
+	}]
+}

@@ -87,6 +87,8 @@ const run = async () => {
     console.log(`[FTPS Test] remotePath=${remotePath}`);
 
     try {
+        const allowInsecureTls = process.env.FTPS_TEST_ALLOW_INSECURE_TLS === 'true';
+
         await client.access({
             host,
             port,
@@ -94,7 +96,7 @@ const run = async () => {
             password,
             secure: secureMode,
             secureOptions: {
-                rejectUnauthorized: false
+                rejectUnauthorized: !allowInsecureTls
             }
         });
 
