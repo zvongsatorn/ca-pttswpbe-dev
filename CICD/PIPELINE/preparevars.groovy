@@ -8,7 +8,7 @@ def globalVariable(envName){
 
     env.application_language    = [ "python": false, "nodejs": true, "golang": false, "dotnet_core": false, "java": false, "php": false, "dotnet_fw": false ]
     env.deploy_type             = [ "oc": false, "aks": false, "aws": false, "azure_function": false, "appservice_srccode": false, "appservice_container": false, "aca": true ]
-    env.unit_test_base_image    = ""
+    env.unit_test_base_image    = "node:24.15.0-alpine"
     env.automate_test           = [ "api_test" : true, "ui_test" : false ]
     env.allow_failure           = [ "trivy" : false, "sonarqube" : false, "blackduck" : false, "owasp" : false, "owasp_zap"  : false , "coverity" : false , "performance_test" : false, "api_test" : false, "ui_test" : true]
     env.build_cmd               = ""
