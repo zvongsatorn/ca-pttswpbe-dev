@@ -1,6 +1,6 @@
 import { Context } from 'hono';
 import bcrypt from 'bcrypt';
-import { createHash, randomBytes } from 'crypto';
+import { createHash, randomBytes, timingSafeEqual } from 'crypto';
 
 import jwt from 'jsonwebtoken';
 import configService from '../services/configService.js';
@@ -11,6 +11,12 @@ import { insertLogActionService } from '../services/logService.js';
 const createTemporaryPassword = () => {
     const suffix = randomBytes(12).toString('base64url');
     return `Tmp-${suffix}9!`;
+};
+
+const constantTimeEquals = (left: string, right: string): boolean => {
+    const leftBuffer = Buffer.from(left);
+    const rightBuffer = Buffer.from(right);
+    return leftBuffer.length === rightBuffer.length && timingSafeEqual(leftBuffer, rightBuffer);
 };
 
 class AuthController {
@@ -74,30 +80,18 @@ class AuthController {
                 return c.json({ message: 'User does not have a local password set' }, 401);
             }
 
-            const verifyLegacyHash = (input: string, stored: string): boolean => {
-                const md5 = createHash('md5').update(input).digest('hex');
-                const sha1 = createHash('sha1').update(input).digest('hex');
-                const sha256 = createHash('sha256').update(input).digest('hex');
-                const md5b64 = createHash('md5').update(input).digest('base64');
-                const sha1b64 = createHash('sha1').update(input).digest('base64');
-                const sha256b64 = createHash('sha256').update(input).digest('base64');
+            const verifyStoredPassword = async (input: string, stored: string): Promise<boolean> => {
+                if (/^\$2[aby]\$\d{2}\$/.test(stored)) {
+                    return bcrypt.compare(input, stored);
+                }
 
-                const candidateSet = new Set<string>([
-                    input,
-                    md5, md5.toUpperCase(),
-                    sha1, sha1.toUpperCase(),
-                    sha256, sha256.toUpperCase(),
-                    md5b64, sha1b64, sha256b64,
-                    `{SHA}${sha1b64}`,
-                ]);
-
-                return candidateSet.has(stored);
+                const sha256Hex = createHash('sha256').update(input).digest('hex');
+                const sha256Base64 = createHash('sha256').update(input).digest('base64');
+                return [sha256Hex, sha256Hex.toUpperCase(), sha256Base64]
+                    .some((candidate) => constantTimeEquals(candidate, stored));
             };
 
-            let isPasswordValid = verifyLegacyHash(Password, storedPassword);
-            if (!isPasswordValid && /^\$2[aby]\$\d{2}\$/.test(storedPassword)) {
-                isPasswordValid = await bcrypt.compare(Password, storedPassword);
-            }
+            const isPasswordValid = await verifyStoredPassword(Password, storedPassword);
 
             if (!isPasswordValid) {
                 return c.json({ message: 'Invalid Admin credentials' }, 401);

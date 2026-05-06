@@ -103,14 +103,13 @@ class ConfigService {
             const isHttps = parsedUrl.protocol === 'https:';
             const httpModule = isHttps ? https : require('node:http');
 
-            const allowInsecureTls = process.env.CAA_ALLOW_INSECURE_TLS === 'true';
             const options = {
                 hostname: parsedUrl.hostname,
                 port: parsedUrl.port || (isHttps ? 443 : 80),
                 path: parsedUrl.pathname + parsedUrl.search,
                 method,
                 headers: requestHeaders,
-                rejectUnauthorized: !allowInsecureTls,
+                rejectUnauthorized: true,
                 timeout: 120000, // --max-time 120
             };
 

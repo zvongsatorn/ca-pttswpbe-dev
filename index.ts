@@ -13,6 +13,22 @@ loadEnv();
 const app = new Hono();
 const port = Number(process.env.PORT || 5000);
 
+const isAllowedOrigin = (origin: string | undefined | null): boolean => {
+    if (!origin) return true;
+
+    try {
+        const parsed = new URL(origin);
+        const hostname = parsed.hostname.toLowerCase();
+        const isLocalhost = hostname === 'localhost' || hostname === '127.0.0.1';
+        const isPttDomain = hostname === 'pttplc.com' || hostname.endsWith('.pttplc.com');
+        const isAllowedProtocol = parsed.protocol === 'https:' || (isLocalhost && parsed.protocol === 'http:');
+
+        return isAllowedProtocol && (isLocalhost || isPttDomain);
+    } catch {
+        return false;
+    }
+};
+
 app.onError((err, c) => {
     console.error(`[Global Error Handler] ${err}`);
     return c.json({
@@ -25,24 +41,13 @@ app.onError((err, c) => {
 
 app.use('/*', secureHeaders());
 app.use('/*', cors({
-    origin: (origin) => {
-        if (!origin || origin.startsWith('http://localhost') || origin.includes('pttplc.com')) {
-            return origin;
-        }
-        return undefined;
-    },
+    origin: (origin) => isAllowedOrigin(origin) ? origin : undefined,
     allowMethods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
     allowHeaders: ['Content-Type', 'Authorization'],
     credentials: true,
 }));
 app.use('/*', csrf({
-    origin: (origin) => {
-        if (!origin) return true;
-        if (origin.startsWith('http://localhost') || origin.startsWith('http://127.0.0.1') || origin.includes('pttplc.com')) {
-            return true;
-        }
-        return false;
-    }
+    origin: (origin) => isAllowedOrigin(origin)
 }));
 // Serve uploaded files statically (supports both /uploads/* and legacy /api/uploads/* links)
 app.use('/uploads/*', serveStatic({ root: './' }));
@@ -131,7 +136,7 @@ const startBackgroundJobs = () => {
             fetch: app.fetch,
             port
         });
-        
+
         console.log(`Server is running on port ${port}`);
         startBackgroundJobs();
     } catch (err) {
@@ -143,12 +148,12 @@ const startBackgroundJobs = () => {
 // Graceful Shutdown
 const shutdown = async (signal: string) => {
     console.log(`${signal} signal received. Closing server...`);
-    
+
     if (server) {
         server.close(() => {
             console.log('HTTP server closed.');
             // Close database connections if needed
-            // await db.close(); 
+            // await db.close();
             process.exit(0);
         });
     } else {

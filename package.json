@@ -8,7 +8,6 @@
         "dev": "tsx watch index.ts",
         "build": "tsc",
         "test:ftps": "cross-env NODE_ENV=dev tsx scripts/ftpsClientProbe.ts",
-        "test:pis": "tsx pis_fetch_probe.ts",
         "start:prod": "cross-env NODE_ENV=production node dist/index.js",
         "start:local": "cross-env NODE_ENV=local tsx index.ts",
         "start:test": "cross-env NODE_ENV=test tsx index.ts",
@@ -40,5 +39,12 @@
         "nodemon": "^3.1.0",
         "tsx": "^4.21.0",
         "typescript": "^5.9.3"
+    },
+    "overrides": {
+        "exceljs": {
+            "archiver": "7.0.1",
+            "uuid": "14.0.0",
+            "unzipper": "0.12.1"
+        }
     }
 }

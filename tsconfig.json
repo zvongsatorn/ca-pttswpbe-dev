@@ -26,6 +26,9 @@
     "chk.ts",
     "debug*.ts",
     "apply_sp_fix.ts",
-    "get_*.ts"
+    "get_*.ts",
+    "scripts/**",
+    "pis_fetch_probe.ts",
+    "query_*.ts"
   ]
 }

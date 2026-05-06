@@ -6,6 +6,30 @@ import { randomUUID } from 'crypto';
 import jwt from 'jsonwebtoken';
 import userGroupService from '../services/userGroupService.js';
 
+const PROFILE_PICTURE_MAX_BYTES = 5 * 1024 * 1024;
+const PROFILE_PICTURE_CONTENT_TYPES: Record<string, string> = {
+    '.jpg': 'image/jpeg',
+    '.jpeg': 'image/jpeg',
+    '.png': 'image/png',
+    '.webp': 'image/webp'
+};
+
+const isAllowedProfilePictureExtension = (extension: string): boolean => {
+    return Object.prototype.hasOwnProperty.call(PROFILE_PICTURE_CONTENT_TYPES, extension);
+};
+
+const resolveProfilePicturePath = (filename: string): string | null => {
+    const safeFilename = path.basename(filename || '');
+    if (!safeFilename || safeFilename !== filename) return null;
+
+    const extension = path.extname(safeFilename).toLowerCase();
+    if (!isAllowedProfilePictureExtension(extension)) return null;
+
+    const uploadDir = path.resolve(process.cwd(), 'uploads', 'profile_pictures');
+    const filePath = path.resolve(uploadDir, safeFilename);
+    return filePath.startsWith(`${uploadDir}${path.sep}`) ? filePath : null;
+};
+
 export const getUserOther = async (c: Context) => {
     try {
         const result = await userService.getUserOtherService();
@@ -117,20 +141,25 @@ export const uploadProfilePicture = async (c: Context) => {
         const userData = await userService.getUserWithPassword(employeeId);
         const oldFilename = userData?.ProfilePicture;
 
-        const fileName = file.name;
-        const fileBuffer = await file.arrayBuffer();
+        const fileName = String(file.name || '');
+        const extension = path.extname(fileName).toLowerCase();
+        if (!isAllowedProfilePictureExtension(extension)) {
+            return c.json({ success: false, message: 'Unsupported image file type' }, 400);
+        }
 
-        const uploadDir = path.join(process.cwd(), 'uploads', 'profile_pictures');
+        const fileBuffer = Buffer.from(await file.arrayBuffer());
+        if (fileBuffer.byteLength > PROFILE_PICTURE_MAX_BYTES) {
+            return c.json({ success: false, message: 'Image file is too large' }, 400);
+        }
+
+        const uploadDir = path.resolve(process.cwd(), 'uploads', 'profile_pictures');
         if (!fs.existsSync(uploadDir)) {
             fs.mkdirSync(uploadDir, { recursive: true });
         }
 
-        let extension = path.extname(fileName).toLowerCase();
-        if (!extension) extension = ".jpg"; // Default extension
-
         const safeName = `${randomUUID()}${extension}`;
         const filePath = path.join(uploadDir, safeName);
-        fs.writeFileSync(filePath, Buffer.from(fileBuffer));
+        fs.writeFileSync(filePath, fileBuffer);
 
         await userService.updateUserProfilePicture(employeeId, safeName);
 
@@ -187,27 +216,21 @@ export const uploadProfilePicture = async (c: Context) => {
         const filename = c.req.param('filename');
         if (!filename) return c.json({ message: 'Missing filename' }, 400);
 
-        const uploadDir = path.join(process.cwd(), 'uploads', 'profile_pictures');
-        const filePath = path.join(uploadDir, filename);
-
-        console.log(`[getProfilePicture] Request for ${filename}`);
-        console.log(`[getProfilePicture] Checking path: ${filePath}`);
+        const filePath = resolveProfilePicturePath(filename);
+        if (!filePath) return c.json({ message: 'Invalid filename' }, 400);
 
         if (!fs.existsSync(filePath)) {
-            console.warn(`[getProfilePicture] File not found: ${filePath}`);
             return c.json({ message: 'File not found' }, 404);
         }
 
         const fileBuffer = fs.readFileSync(filePath);
         const ext = path.extname(filename).toLowerCase();
-        let contentType = 'image/jpeg';
-        if (ext === '.png') contentType = 'image/png';
-        if (ext === '.webp') contentType = 'image/webp';
-        if (ext === '.gif') contentType = 'image/gif';
+        const contentType = PROFILE_PICTURE_CONTENT_TYPES[ext] || 'application/octet-stream';
 
         return c.body(fileBuffer, 200, {
             'Content-Type': contentType,
-            'Cache-Control': 'public, max-age=31536000, immutable'
+            'Cache-Control': 'public, max-age=31536000, immutable',
+            'X-Content-Type-Options': 'nosniff'
         });
     } catch (error: any) {
         console.error('Error getting profile picture:', error);
