@@ -30,6 +30,20 @@ const resolveProfilePicturePath = (filename: string): string | null => {
     return filePath.startsWith(`${uploadDir}${path.sep}`) ? filePath : null;
 };
 
+const isValidEmailAddress = (email: string): boolean => {
+    if (!email || email.length > 254 || email.includes(' ')) return false;
+
+    const atIndex = email.indexOf('@');
+    if (atIndex <= 0 || atIndex !== email.lastIndexOf('@') || atIndex === email.length - 1) return false;
+
+    const localPart = email.slice(0, atIndex);
+    const domain = email.slice(atIndex + 1);
+    if (!localPart || !domain || !domain.includes('.')) return false;
+    if (domain.startsWith('.') || domain.endsWith('.') || domain.includes('..')) return false;
+
+    return true;
+};
+
 export const getUserOther = async (c: Context) => {
     try {
         const result = await userService.getUserOtherService();
@@ -53,8 +67,7 @@ export const insertUserOther = async (c: Context) => {
             return c.json({ success: false, message: 'Missing required parameters' }, 400);
         }
 
-        const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-        if (!emailPattern.test(normalizedEmail)) {
+        if (!isValidEmailAddress(normalizedEmail)) {
             return c.json({ success: false, message: 'Invalid email format' }, 400);
         }
 
@@ -108,8 +121,7 @@ export const updateUserOther = async (c: Context) => {
             return c.json({ success: false, message: 'Missing required parameters' }, 400);
         }
 
-        const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-        if (!emailPattern.test(normalizedEmail)) {
+        if (!isValidEmailAddress(normalizedEmail)) {
             return c.json({ success: false, message: 'Invalid email format' }, 400);
         }
 

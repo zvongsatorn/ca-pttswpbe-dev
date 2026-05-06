@@ -164,21 +164,44 @@ const toNullableUnlimitedText = (value: unknown): string | null => {
     return text;
 };
 
+const stripEmailEdgeCharacters = (value: string): string => {
+    let start = 0;
+    let end = value.length;
+    const isEdge = (char: string) => char === '=' || char === "'" || char === '"' || char.trim() === '';
+    while (start < end && isEdge(value[start])) start += 1;
+    while (end > start && isEdge(value[end - 1])) end -= 1;
+    return value.slice(start, end).trim();
+};
+
+const extractEmailCandidate = (value: string): string | null => {
+    const atIndex = value.indexOf('@');
+    if (atIndex <= 0 || atIndex === value.length - 1) return null;
+
+    const emailBoundaryChars = new Set([' ', '\t', '\n', '\r', '<', '>', '"', "'", '(', ')', ';', ',']);
+    let start = atIndex - 1;
+    while (start >= 0 && !emailBoundaryChars.has(value[start])) start -= 1;
+
+    let end = atIndex + 1;
+    while (end < value.length && !emailBoundaryChars.has(value[end])) end += 1;
+
+    const candidate = value.slice(start + 1, end);
+    const domain = candidate.slice(candidate.indexOf('@') + 1);
+    const topLevelDomain = domain.slice(domain.lastIndexOf('.') + 1);
+    return domain.includes('.') && topLevelDomain.length >= 2 ? candidate : null;
+};
+
 const toNullableEmail = (value: unknown, maxLength = 100): string | null => {
     const text = cleanCellText(value);
     if (!text) return null;
 
-    const cleaned = text
-        .replace(/^mailto:/i, '')
-        .replace(/^[='"\s]+/, '')
-        .replace(/[='"\s]+$/, '')
-        .trim();
+    const withoutMailto = text.toLowerCase().startsWith('mailto:') ? text.slice(7) : text;
+    const cleaned = stripEmailEdgeCharacters(withoutMailto);
 
     if (!cleaned) return null;
 
-    const match = cleaned.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i);
-    if (match?.[0]) {
-        return match[0].slice(0, maxLength);
+    const match = extractEmailCandidate(cleaned);
+    if (match) {
+        return match.slice(0, maxLength);
     }
 
     if (cleaned.includes('@')) {

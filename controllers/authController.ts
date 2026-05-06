@@ -423,7 +423,6 @@ class AuthController {
                     forceChangePasswordNextSignIn: true,
                     password: createTemporaryPassword()
                 },
-                passwordPolicies: "None",
                 userPrincipalName: `${Date.now()}_${email.split('@')[0]}@${b2cDomain}`,
                 created_by: "SWP System"
             };

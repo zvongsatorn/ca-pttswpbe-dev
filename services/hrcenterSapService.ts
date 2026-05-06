@@ -427,28 +427,43 @@ interface FtpUploadAttempt {
     logUrl: string;
 }
 
+const stripTrailingSlashes = (value: string): string => {
+    let end = value.length;
+    while (end > 0 && value[end - 1] === '/') end -= 1;
+    return value.slice(0, end);
+};
+
+const stripLeadingSlashes = (value: string): string => {
+    let start = 0;
+    while (start < value.length && value[start] === '/') start += 1;
+    return value.slice(start);
+};
+
+const stripScheme = (value: string, scheme: 'ftp' | 'ftps'): string => {
+    const prefix = `${scheme}://`;
+    return value.toLowerCase().startsWith(prefix) ? value.slice(prefix.length) : value;
+};
+
 const normalizeFtpHost = (value: string): { host: string; scheme: 'ftp' | 'ftps' | null } => {
     const trimmed = toText(value);
     if (!trimmed) return { host: '', scheme: null };
 
-    const ftpsMatch = trimmed.match(/^ftps:\/\//i);
-    if (ftpsMatch) {
+    if (trimmed.toLowerCase().startsWith('ftps://')) {
         return {
-            host: trimmed.replace(/^ftps:\/\//i, '').replace(/\/+$/, ''),
+            host: stripTrailingSlashes(stripScheme(trimmed, 'ftps')),
             scheme: 'ftps'
         };
     }
 
-    const ftpMatch = trimmed.match(/^ftp:\/\//i);
-    if (ftpMatch) {
+    if (trimmed.toLowerCase().startsWith('ftp://')) {
         return {
-            host: trimmed.replace(/^ftp:\/\//i, '').replace(/\/+$/, ''),
+            host: stripTrailingSlashes(stripScheme(trimmed, 'ftp')),
             scheme: 'ftp'
         };
     }
 
     return {
-        host: trimmed.replace(/\/+$/, ''),
+        host: stripTrailingSlashes(trimmed),
         scheme: null
     };
 };
@@ -465,7 +480,7 @@ const buildFtpUploadAttempt = (
     dataProtection: 'P' | 'C' = 'P'
 ): FtpUploadAttempt => {
     const scheme = secure === 'implicit' ? 'ftps' : (secure ? 'ftp+tls' : 'ftp');
-    const joinedPath = path.posix.join(remoteDir, remoteFileName).replace(/^\/+/, '/');
+    const joinedPath = `/${stripLeadingSlashes(path.posix.join(remoteDir, remoteFileName))}`;
     return {
         label,
         host,
@@ -529,7 +544,7 @@ const resolveRemoteTarget = (remotefile: string, localFilePath: string): { remot
 
     const isDirOnly = normalized.endsWith('/');
     if (isDirOnly) {
-        const dir = normalized.replace(/\/+$/, '') || '/';
+        const dir = stripTrailingSlashes(normalized) || '/';
         return {
             remoteDir: dir.startsWith('/') ? dir : `/${dir}`,
             remoteFileName: localName

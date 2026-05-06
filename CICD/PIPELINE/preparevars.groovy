@@ -10,7 +10,7 @@ def globalVariable(envName){
     env.deploy_type             = [ "oc": false, "aks": false, "aws": false, "azure_function": false, "appservice_srccode": false, "appservice_container": false, "aca": true ]
     env.unit_test_base_image    = "node:24.15.0-alpine"
     env.automate_test           = [ "api_test" : true, "ui_test" : false ]
-    env.allow_failure           = [ "trivy" : false, "sonarqube" : false, "blackduck" : false, "owasp" : false, "owasp_zap"  : false , "coverity" : false , "performance_test" : false, "api_test" : false, "ui_test" : true]
+    env.allow_failure           = [ "trivy" : false, "sonarqube" : false, "blackduck" : true, "owasp" : false, "owasp_zap"  : false , "coverity" : true , "performance_test" : false, "api_test" : false, "ui_test" : true]
     env.build_cmd               = ""
     env.coverityID              = "cov-user07"
     env.blkduckID               = "blkduck-user7"

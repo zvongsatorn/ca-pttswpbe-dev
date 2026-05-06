@@ -1383,8 +1383,10 @@ export const getReport06DataService = async (
 
 const round2 = (value: number): number => Math.round((value + Number.EPSILON) * 100) / 100;
 
-const cleanReport7UnitShort = (value: unknown): string =>
-    toTrimText(value).replace(/\s*ขึ้นตรง\s*$/, '').trim();
+const cleanReport7UnitShort = (value: unknown): string => {
+    const text = toTrimText(value);
+    return text.endsWith('ขึ้นตรง') ? text.slice(0, -'ขึ้นตรง'.length).trim() : text.trim();
+};
 
 type Report7QuotaTotals = {
     q_1: number;

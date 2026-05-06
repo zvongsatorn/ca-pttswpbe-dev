@@ -3,8 +3,14 @@ import menuService from '../services/menuService.js';
 
 const REPORT_API_PREFIX = '/api/report';
 
+const stripTrailingSlashes = (value: string): string => {
+    let end = value.length;
+    while (end > 1 && value[end - 1] === '/') end -= 1;
+    return value.slice(0, end);
+};
+
 const resolveRequiredReportPaths = (requestPath: string): string[] => {
-    const cleanPath = (requestPath || '').split('?')[0].replace(/\/+$/g, '').toLowerCase();
+    const cleanPath = stripTrailingSlashes((requestPath || '').split('?')[0]).toLowerCase();
     if (!cleanPath) return [];
 
     const subPath = cleanPath.startsWith(REPORT_API_PREFIX)

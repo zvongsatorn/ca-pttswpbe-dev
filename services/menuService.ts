@@ -15,6 +15,27 @@ interface MenuItem {
     children?: MenuItem[];
 }
 
+const collapseSlashes = (value: string): string => {
+    let result = '';
+    let previousWasSlash = false;
+    for (const char of value) {
+        if (char === '/') {
+            if (!previousWasSlash) result += char;
+            previousWasSlash = true;
+        } else {
+            result += char;
+            previousWasSlash = false;
+        }
+    }
+    return result;
+};
+
+const stripTrailingSlashes = (value: string): string => {
+    let end = value.length;
+    while (end > 1 && value[end - 1] === '/') end -= 1;
+    return value.slice(0, end);
+};
+
 class MenuService {
     private normalizeRoleValue(rawRole: unknown): string {
         const role = String(rawRole ?? '').trim();
@@ -146,9 +167,9 @@ class MenuService {
             normalized = `/${normalized}`;
         }
 
-        normalized = normalized.replace(/\/{2,}/g, '/');
+        normalized = collapseSlashes(normalized);
         if (normalized.length > 1) {
-            normalized = normalized.replace(/\/+$/g, '');
+            normalized = stripTrailingSlashes(normalized);
         }
 
         return normalized.toLowerCase();

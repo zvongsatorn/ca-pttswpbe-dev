@@ -7,7 +7,8 @@ class ConfigService {
     private tokenExpiry: number = 0; // Timestamp in ms
 
     async loadConfig() {
-          }
+        await this.getConfigs(['StartYear']);
+    }
 
     async getConfig(key: string): Promise<string> {
         const details = await this.getConfigDetails(key);
