@@ -22,9 +22,14 @@
 			"method": "GET",
 			"header": [],
 			"url": {
-				"raw": "{{hostname}}-DevOps",
+				"raw": "{{hostname}}/api/system/healthz",
 				"host": [
-					"{{hostname}}-DevOps"
+					"{{hostname}}"
+				],
+				"path": [
+					"api",
+					"system",
+					"healthz"
 				]
 			}
 		},
