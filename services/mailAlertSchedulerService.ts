@@ -46,6 +46,29 @@ interface MailAlertSendResult {
     message: string;
 }
 
+interface DebugMailAlertTestParams {
+    requestedBy: string;
+    requestedEmail: string;
+    requestedEmployeeId?: string;
+    note?: string;
+    alertType?: AlertType;
+    templateType?: DebugMailTemplateType | string;
+    recipientName?: string;
+    senderName?: string;
+    unitName?: string;
+    documentNo?: string;
+    transactionNo?: string;
+    transactionTypeText?: string;
+    transactionDesc?: string;
+    transactionCount?: number;
+    transactionItems?: Array<{
+        transactionNo?: string;
+        transactionTypeText?: string;
+        transactionDesc?: string;
+    }>;
+    mkdRequestNo?: string;
+}
+
 const DEFAULT_ALERT_SYSTEM_URL = 'https://ptt-wfmwb-p01.pttplc.com/Client/login.html';
 const DEFAULT_INTERVAL_MS = 5 * 60 * 1000;
 
@@ -203,10 +226,8 @@ const getTransactionItemsByDocumentNo = async (documentNo: string): Promise<Debu
     }
 };
 
-const hydrateDebugTransactionItems = async (items: DebugTransactionItem[]): Promise<DebugTransactionItem[]> => {
-    const lookupRows = await getTransactionLookupRows(items.map((item) => item.transactionNo));
+const groupTransactionLookupRows = (lookupRows: TransactionLookupRow[]) => {
     const rowByNo = new Map<string, TransactionLookupRow[]>();
-
     for (const row of lookupRows) {
         const key = row.transactionNo;
         if (!key) continue;
@@ -214,55 +235,75 @@ const hydrateDebugTransactionItems = async (items: DebugTransactionItem[]): Prom
         arr.push(row);
         rowByNo.set(key, arr);
     }
+    return rowByNo;
+};
 
-    const hydratedRows = items.flatMap((item) => {
-        const transactionNo = String(item.transactionNo || '').trim();
-        const inputTypeText = String(item.transactionTypeText || '').trim();
-        const inputDesc = String(item.transactionDesc || '').trim();
-        const candidates = rowByNo.get(transactionNo) || [];
+const getDebugTransactionDesc = (
+    inputTypeText: string,
+    inputDesc: string,
+    candidates: TransactionLookupRow[]
+) => {
+    const typeNo = Number.parseInt(inputTypeText, 10);
+    if (Number.isFinite(typeNo)) {
+        const matchedByType = candidates.find((row) => row.transactionType === typeNo && row.transactionDesc);
+        if (matchedByType) return matchedByType.transactionDesc;
+    }
 
-        if (inputTypeText) {
-            let transactionDesc = inputDesc;
-            const typeNo = Number.parseInt(inputTypeText, 10);
+    const firstWithDesc = candidates.find((row) => row.transactionDesc);
+    return inputDesc || firstWithDesc?.transactionDesc || '-';
+};
 
-            if (Number.isFinite(typeNo)) {
-                const matchedByType = candidates.find((row) => row.transactionType === typeNo && row.transactionDesc);
-                if (matchedByType) {
-                    transactionDesc = matchedByType.transactionDesc;
-                }
-            }
+const hydrateDebugItemWithType = (
+    transactionNo: string,
+    inputTypeText: string,
+    inputDesc: string,
+    candidates: TransactionLookupRow[]
+): DebugTransactionItem[] => [{
+    transactionNo: transactionNo || '-',
+    transactionTypeText: formatTransactionTypeText(inputTypeText),
+    transactionDesc: getDebugTransactionDesc(inputTypeText, inputDesc, candidates)
+}];
 
-            if (!transactionDesc) {
-                const firstWithDesc = candidates.find((row) => row.transactionDesc);
-                if (firstWithDesc) {
-                    transactionDesc = firstWithDesc.transactionDesc;
-                }
-            }
-            return [{
-                transactionNo: transactionNo || '-',
-                transactionTypeText: formatTransactionTypeText(inputTypeText),
-                transactionDesc: transactionDesc || '-'
-            }];
-        }
-
-        if (candidates.length > 0) {
-            return candidates.map((row) => ({
-                transactionNo: transactionNo || '-',
-                transactionTypeText: formatTransactionTypeText(
-                    row.transactionType !== null ? String(row.transactionType) : '-'
-                ),
-                transactionDesc: row.transactionDesc || inputDesc || '-'
-            }));
-        }
-
+const hydrateDebugItemFromLookup = (
+    transactionNo: string,
+    inputDesc: string,
+    candidates: TransactionLookupRow[]
+): DebugTransactionItem[] => {
+    if (candidates.length === 0) {
         return [{
             transactionNo: transactionNo || '-',
             transactionTypeText: '-',
             transactionDesc: inputDesc || '-'
         }];
-    });
+    }
 
-    return hydratedRows;
+    return candidates.map((row) => ({
+        transactionNo: transactionNo || '-',
+        transactionTypeText: formatTransactionTypeText(
+            row.transactionType !== null ? String(row.transactionType) : '-'
+        ),
+        transactionDesc: row.transactionDesc || inputDesc || '-'
+    }));
+};
+
+const hydrateDebugTransactionItem = (
+    item: DebugTransactionItem,
+    rowByNo: Map<string, TransactionLookupRow[]>
+): DebugTransactionItem[] => {
+    const transactionNo = String(item.transactionNo || '').trim();
+    const inputTypeText = String(item.transactionTypeText || '').trim();
+    const inputDesc = String(item.transactionDesc || '').trim();
+    const candidates = rowByNo.get(transactionNo) || [];
+
+    return inputTypeText
+        ? hydrateDebugItemWithType(transactionNo, inputTypeText, inputDesc, candidates)
+        : hydrateDebugItemFromLookup(transactionNo, inputDesc, candidates);
+};
+
+const hydrateDebugTransactionItems = async (items: DebugTransactionItem[]): Promise<DebugTransactionItem[]> => {
+    const lookupRows = await getTransactionLookupRows(items.map((item) => item.transactionNo));
+    const rowByNo = groupTransactionLookupRows(lookupRows);
+    return items.flatMap((item) => hydrateDebugTransactionItem(item, rowByNo));
 };
 
 const getMailToggleConfig = async (configKey: MailToggleConfigKey): Promise<{ mode: SendMode; testEmail: string }> => {
@@ -656,28 +697,135 @@ export const runMailAlertSchedulerTick = async () => {
     }
 };
 
-export const sendMailAlertDebugTest = async (params: {
+const normalizeDebugTransactionItemsFromParams = (params: DebugMailAlertTestParams): DebugTransactionItem[] =>
+    (params.transactionItems || [])
+        .map((item) => ({
+            transactionNo: String(item?.transactionNo || '').trim(),
+            transactionTypeText: String(item?.transactionTypeText || '').trim(),
+            transactionDesc: String(item?.transactionDesc || '').trim()
+        }))
+        .filter((item) => item.transactionNo);
+
+const getDebugTransactionItems = async (
+    params: DebugMailAlertTestParams,
+    documentNo: string
+): Promise<DebugTransactionItem[]> => {
+    let transactionItems = normalizeDebugTransactionItemsFromParams(params);
+
+    if (transactionItems.length === 0 && documentNo) {
+        transactionItems = await getTransactionItemsByDocumentNo(documentNo);
+    }
+
+    if (transactionItems.length === 0) {
+        transactionItems.push({
+            transactionNo: (params.transactionNo || '').trim() || 'TR26040001',
+            transactionTypeText: (params.transactionTypeText || '').trim(),
+            transactionDesc: (params.transactionDesc || '').trim() || 'ทดสอบการแจ้งเตือนจากหน้า Debug'
+        });
+    }
+
+    return hydrateDebugTransactionItems(transactionItems);
+};
+
+const getMkdDebugScenario = (templateType: DebugMailTemplateType): 'REJECT' | 'HRUSER' | 'NEXT' => {
+    if (templateType === 'MKD_REJECT') return 'REJECT';
+    if (templateType === 'MKD_HRUSER') return 'HRUSER';
+    return 'NEXT';
+};
+
+const buildDebugBaseMessage = async (context: {
+    params: DebugMailAlertTestParams;
+    templateType: DebugMailTemplateType;
+    recipientName: string;
+    senderName: string;
+    unitName: string;
+    documentNo: string;
+    mkdRequestNo: string;
+    limitDate: Date;
+    unitMail: string;
+    addressLoginUrl: string;
+}): Promise<AlertMessage> => {
+    const { params, templateType, recipientName, senderName, unitName, documentNo, mkdRequestNo, limitDate, unitMail, addressLoginUrl } = context;
+
+    if (templateType === 'CALENDAR_START' || templateType === 'CALENDAR_END') {
+        const calendarType: AlertType = templateType === 'CALENDAR_END' ? 'END' : 'START';
+        return buildAlertMessage(calendarType, recipientName, limitDate, unitMail, addressLoginUrl);
+    }
+
+    if (templateType === 'TRANSACTION_SUBMIT' || templateType === 'TRANSACTION_REJECT') {
+        const hydratedTransactionItems = await getDebugTransactionItems(params, documentNo);
+        return buildTransactionLegacyMessage({
+            isReject: templateType === 'TRANSACTION_REJECT',
+            recipientName,
+            senderName,
+            transactionItems: hydratedTransactionItems,
+            documentNo: documentNo || undefined,
+            addressLoginUrl,
+            unitMail
+        });
+    }
+
+    return buildMkdLegacyMessage({
+        scenario: getMkdDebugScenario(templateType),
+        recipientName,
+        senderName,
+        fullRequestNo: mkdRequestNo,
+        unitName,
+        addressLoginUrl,
+        unitMail
+    });
+};
+
+const buildDebugMailBody = (context: {
+    baseMessage: AlertMessage;
     requestedBy: string;
     requestedEmail: string;
-    requestedEmployeeId?: string;
+    templateType: DebugMailTemplateType;
+    configKey: MailToggleConfigKey;
+    now: Date;
+    documentNo: string;
     note?: string;
-    alertType?: AlertType;
-    templateType?: DebugMailTemplateType | string;
-    recipientName?: string;
-    senderName?: string;
-    unitName?: string;
-    documentNo?: string;
-    transactionNo?: string;
-    transactionTypeText?: string;
-    transactionDesc?: string;
-    transactionCount?: number;
-    transactionItems?: Array<{
-        transactionNo?: string;
-        transactionTypeText?: string;
-        transactionDesc?: string;
-    }>;
-    mkdRequestNo?: string;
-}) => {
+}) => [
+    context.baseMessage.body,
+    '<hr>',
+    '<p><b>[DEBUG TEST]</b></p>',
+    '<p>Requested By: ' + context.requestedBy + '</p>',
+    '<p>Requested Email: ' + context.requestedEmail + '</p>',
+    '<p>Template Type: ' + context.templateType + '</p>',
+    context.documentNo ? '<p>มีคำขอหมายเลข: ' + context.documentNo + '</p>' : '',
+    '<p>Config Key: ' + context.configKey + '</p>',
+    '<p>Request Time: ' + context.now.toISOString() + '</p>',
+    context.note ? '<p>Note: ' + context.note + '</p>' : '',
+    '<p>ระบบนี้จะส่งจริงหรือไม่ ขึ้นกับ MP_Config.' + context.configKey + '</p>'
+].filter(Boolean).join('');
+
+const createDebugMailLog = async (context: {
+    params: DebugMailAlertTestParams;
+    requestedBy: string;
+    requestedEmail: string;
+    now: Date;
+    templateType: DebugMailTemplateType;
+    baseMessage: AlertMessage;
+    body: string;
+    sendResult: MailAlertSendResult;
+}) => createMailLog({
+    sendFromBy: context.requestedBy,
+    sendFromDate: context.now,
+    sendToBy: (context.params.requestedEmployeeId || '').trim() || null,
+    emailTo: context.sendResult.finalRecipient || context.requestedEmail,
+    mailSubject: context.baseMessage.subject,
+    mailBody: context.body,
+    effectiveDate: context.now,
+    isCC: 0,
+    isSend: context.sendResult.isSend,
+    remark: context.sendResult.finalRecipient ? null : 'SKIP',
+    ccRecipients: [],
+    refNo: ('DBG' + context.templateType.replace(/_/g, '').slice(0, 8) + getDateTimeKey(context.now)).slice(0, 20),
+    createBy: context.requestedBy,
+    createDate: context.now
+});
+
+export const sendMailAlertDebugTest = async (params: DebugMailAlertTestParams) => {
     const now = new Date();
     const requestedBy = (params.requestedBy || 'SYSTEM').trim() || 'SYSTEM';
     const requestedEmail = (params.requestedEmail || '').trim();
@@ -688,13 +836,6 @@ export const sendMailAlertDebugTest = async (params: {
     const senderName = (params.senderName || '').trim() || requestedBy;
     const unitName = (params.unitName || '').trim() || 'หน่วยงานทดสอบ';
     const documentNo = (params.documentNo || '').trim();
-    let transactionItems: DebugTransactionItem[] = (params.transactionItems || [])
-        .map((item) => ({
-            transactionNo: String(item?.transactionNo || '').trim(),
-            transactionTypeText: String(item?.transactionTypeText || '').trim(),
-            transactionDesc: String(item?.transactionDesc || '').trim()
-        }))
-        .filter((item) => item.transactionNo);
     const mkdRequestNo = (params.mkdRequestNo || '').trim() || 'M20260001';
 
     if (!requestedEmail) {
@@ -704,68 +845,29 @@ export const sendMailAlertDebugTest = async (params: {
     const unitMail = await configService.getConfig('UnitMail');
     const addressLoginUrl = await getAddressLoginUrl();
     const limitDate = (await getCurrentCycleLimitDate(now)) || now;
-    let baseMessage: AlertMessage;
+    const baseMessage = await buildDebugBaseMessage({
+        params,
+        templateType,
+        recipientName,
+        senderName,
+        unitName,
+        documentNo,
+        mkdRequestNo,
+        limitDate,
+        unitMail,
+        addressLoginUrl
+    });
 
-    if (templateType === 'CALENDAR_START' || templateType === 'CALENDAR_END') {
-        const calendarType: AlertType = templateType === 'CALENDAR_END' ? 'END' : 'START';
-        baseMessage = buildAlertMessage(calendarType, recipientName, limitDate, unitMail, addressLoginUrl);
-    } else if (templateType === 'TRANSACTION_SUBMIT' || templateType === 'TRANSACTION_REJECT') {
-        if (transactionItems.length === 0 && documentNo) {
-            transactionItems = await getTransactionItemsByDocumentNo(documentNo);
-        }
-
-        if (transactionItems.length === 0) {
-            const fallbackTransactionNo = (params.transactionNo || '').trim() || 'TR26040001';
-            const fallbackTransactionType = (params.transactionTypeText || '').trim();
-            const fallbackTransactionDesc = (params.transactionDesc || '').trim() || 'ทดสอบการแจ้งเตือนจากหน้า Debug';
-            transactionItems.push({
-                transactionNo: fallbackTransactionNo,
-                transactionTypeText: fallbackTransactionType,
-                transactionDesc: fallbackTransactionDesc
-            });
-        }
-
-        const hydratedTransactionItems = await hydrateDebugTransactionItems(transactionItems);
-        baseMessage = buildTransactionLegacyMessage({
-            isReject: templateType === 'TRANSACTION_REJECT',
-            recipientName,
-            senderName,
-            transactionItems: hydratedTransactionItems,
-            documentNo: documentNo || undefined,
-            addressLoginUrl,
-            unitMail
-        });
-    } else {
-        const mkdScenario = templateType === 'MKD_REJECT'
-            ? 'REJECT'
-            : templateType === 'MKD_HRUSER'
-                ? 'HRUSER'
-                : 'NEXT';
-
-        baseMessage = buildMkdLegacyMessage({
-            scenario: mkdScenario,
-            recipientName,
-            senderName,
-            fullRequestNo: mkdRequestNo,
-            unitName,
-            addressLoginUrl,
-            unitMail
-        });
-    }
-
-    const body = [
-        baseMessage.body,
-        '<hr>',
-        '<p><b>[DEBUG TEST]</b></p>',
-        `<p>Requested By: ${requestedBy}</p>`,
-        `<p>Requested Email: ${requestedEmail}</p>`,
-        `<p>Template Type: ${templateType}</p>`,
-        documentNo ? `<p>มีคำขอหมายเลข: ${documentNo}</p>` : '',
-        `<p>Config Key: ${configKey}</p>`,
-        `<p>Request Time: ${now.toISOString()}</p>`,
-        params.note ? `<p>Note: ${params.note}</p>` : '',
-        `<p>ระบบนี้จะส่งจริงหรือไม่ ขึ้นกับ MP_Config.${configKey}</p>`
-    ].filter(Boolean).join('');
+    const body = buildDebugMailBody({
+        baseMessage,
+        requestedBy,
+        requestedEmail,
+        templateType,
+        configKey,
+        now,
+        documentNo,
+        note: params.note
+    });
 
     const sendResult = await sendOneMailWithConfigGuard({
         configKey,
@@ -774,21 +876,15 @@ export const sendMailAlertDebugTest = async (params: {
         body
     });
 
-    const mailToId = await createMailLog({
-        sendFromBy: requestedBy,
-        sendFromDate: now,
-        sendToBy: (params.requestedEmployeeId || '').trim() || null,
-        emailTo: sendResult.finalRecipient || requestedEmail,
-        mailSubject: baseMessage.subject,
-        mailBody: body,
-        effectiveDate: now,
-        isCC: 0,
-        isSend: sendResult.isSend,
-        remark: sendResult.finalRecipient ? null : 'SKIP',
-        ccRecipients: [],
-        refNo: `DBG${templateType.replace(/_/g, '').slice(0, 8)}${getDateTimeKey(now)}`.slice(0, 20),
-        createBy: requestedBy,
-        createDate: now
+    const mailToId = await createDebugMailLog({
+        params,
+        requestedBy,
+        requestedEmail,
+        now,
+        templateType,
+        baseMessage,
+        body,
+        sendResult
     });
 
     return {

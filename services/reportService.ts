@@ -291,6 +291,146 @@ export const getReport03DataService = async (
     }
 };
 
+const report03SafeExec = async (label: string, fn: () => Promise<any[]>) => {
+    try {
+        return await fn();
+    } catch (error) {
+        console.error('Error in getReport03FilterOptionsService (' + label + '):', error);
+        return [];
+    }
+};
+
+const getReport03BusinessUnitOptions = (pool: any, effectiveDate: Date) => report03SafeExec('bg', async () => {
+    const bgRequest = pool.request();
+    bgRequest.input('p_CheckDate', sql.DateTime, effectiveDate);
+    const bgResult = await bgRequest.execute('mp_BGGetByEffectivePeriod');
+    return bgResult.recordset || [];
+});
+
+const getReport03LineOptions = (
+    pool: any,
+    effectiveDate: Date,
+    employeeId: string,
+    userGroupNo: string,
+    bgNo: string
+) => report03SafeExec('line', async () => {
+    const lineRequest = pool.request();
+    lineRequest.input('UserGroupNo', sql.VarChar(2), userGroupNo);
+    lineRequest.input('EmployeeID', sql.VarChar(8), employeeId);
+    lineRequest.input('EffectiveDate', sql.DateTime, effectiveDate);
+    lineRequest.input('BGNo', sql.VarChar(3), bgNo || null);
+    const lineResult = await lineRequest.execute('mp_GetUnitLine');
+    return lineResult.recordset || [];
+});
+
+const getReport03UnitOptionsByBg = (
+    pool: any,
+    effectiveDate: Date,
+    employeeId: string,
+    userGroupNo: string,
+    bgNo: string,
+    division: string
+) => report03SafeExec('unit', async () => {
+    const unitRequest = pool.request();
+    unitRequest.input('EffectiveDate', sql.DateTime, effectiveDate);
+    unitRequest.input('BGNo', sql.VarChar(3), bgNo);
+    unitRequest.input('division', sql.VarChar(8), division || null);
+    unitRequest.input('UserGroupNO', sql.VarChar(2), userGroupNo);
+    unitRequest.input('EmployeeID', sql.VarChar(8), employeeId);
+    unitRequest.input('p_SelectType', sql.Int, 9);
+    const unitResult = await unitRequest.execute('mp_UnitGetByLineBGAndEffectivePeriod');
+    return unitResult.recordset || [];
+});
+
+const getReport03UnitOptionsByLine = (
+    pool: any,
+    effectiveDate: Date,
+    employeeId: string,
+    userGroupNo: string,
+    division: string
+) => report03SafeExec('unit', async () => {
+    const unitRequest = pool.request();
+    unitRequest.input('UserGroupNo', sql.VarChar(2), userGroupNo);
+    unitRequest.input('EmployeeID', sql.VarChar(8), employeeId);
+    unitRequest.input('OrgUnitNo', sql.VarChar(8), division || null);
+    unitRequest.input('EffectiveDate', sql.DateTime, effectiveDate);
+    unitRequest.input('p_SelectType', sql.Int, 0);
+    const unitResult = await unitRequest.execute('mp_UnitGetByLineAndEffectivePeriod');
+    return unitResult.recordset || [];
+});
+
+const getReport03UnitOptions = (
+    pool: any,
+    effectiveDate: Date,
+    employeeId: string,
+    userGroupNo: string,
+    bgNo: string,
+    division: string
+) => bgNo
+    ? getReport03UnitOptionsByBg(pool, effectiveDate, employeeId, userGroupNo, bgNo, division)
+    : getReport03UnitOptionsByLine(pool, effectiveDate, employeeId, userGroupNo, division);
+
+const hasCompleteReport03Options = (businessUnits: any[], lines: any[], units: any[]) =>
+    businessUnits.length > 0 && lines.length > 0 && units.length > 0;
+
+const addReport03FallbackBusinessUnit = (row: any, bgMap: Map<string, any>) => {
+    const bgCode = String(row.BGNo || '').trim();
+    const bgName = String(row.BGName || '').trim();
+    if (bgCode || bgName) bgMap.set(bgCode || bgName, { BGNo: bgCode, BGName: bgName });
+};
+
+const addReport03FallbackLine = (row: any, lineMap: Map<string, any>) => {
+    const lineCode = String(row.SecUnitDummy || '').trim();
+    const lineName = String(row.SecUnitDummy || '').trim();
+    if (lineCode || lineName) lineMap.set(lineCode || lineName, { OrgUnitNo: lineCode, UnitText: lineName });
+};
+
+const addReport03FallbackUnit = (row: any, unitMap: Map<string, any>) => {
+    const unitCode = String(row.OrgUnitNo || '').trim();
+    const unitName = String(row.UnitName || '').trim();
+    const unitAbbr = String(row.UnitAbbr || '').trim();
+    if (unitCode || unitName || unitAbbr) {
+        unitMap.set(unitCode || unitName, {
+            OrgUnitNo: unitCode,
+            UnitName: unitName,
+            UnitAbbr: unitAbbr,
+            UnitText: unitName || unitAbbr
+        });
+    }
+};
+
+const addReport03FallbackRow = (
+    row: any,
+    bgMap: Map<string, any>,
+    lineMap: Map<string, any>,
+    unitMap: Map<string, any>
+) => {
+    addReport03FallbackBusinessUnit(row, bgMap);
+    addReport03FallbackLine(row, lineMap);
+    addReport03FallbackUnit(row, unitMap);
+};
+
+const getReport03FallbackOptions = async (
+    effectiveDateStr: string,
+    employeeId: string,
+    userGroupNo: string,
+    bgNo: string,
+    division: string
+) => {
+    const reportRows = await getReport03DataService(effectiveDateStr, employeeId, userGroupNo, division || '', '', bgNo || '', '0');
+    const bgMap = new Map<string, any>();
+    const lineMap = new Map<string, any>();
+    const unitMap = new Map<string, any>();
+
+    reportRows.forEach((row: any) => addReport03FallbackRow(row, bgMap, lineMap, unitMap));
+
+    return {
+        businessUnits: Array.from(bgMap.values()),
+        lines: Array.from(lineMap.values()),
+        units: Array.from(unitMap.values())
+    };
+};
+
 export const getReport03FilterOptionsService = async (
     effectiveDateStr: string,
     employeeId: string,
@@ -301,111 +441,20 @@ export const getReport03FilterOptionsService = async (
     try {
         const pool = await poolPromise;
         const effectiveDate = new Date(effectiveDateStr);
+        const [businessUnits, lines, units] = await Promise.all([
+            getReport03BusinessUnitOptions(pool, effectiveDate),
+            getReport03LineOptions(pool, effectiveDate, employeeId, userGroupNo, bgNo),
+            getReport03UnitOptions(pool, effectiveDate, employeeId, userGroupNo, bgNo, division)
+        ]);
 
-        const safeExec = async (label: string, fn: () => Promise<any[]>) => {
-            try {
-                return await fn();
-            } catch (error) {
-                console.error(`Error in getReport03FilterOptionsService (${label}):`, error);
-                return [];
-            }
-        };
-
-        const businessUnits = await safeExec('bg', async () => {
-            const bgRequest = pool.request();
-            bgRequest.input('p_CheckDate', sql.DateTime, effectiveDate);
-            const bgResult = await bgRequest.execute('mp_BGGetByEffectivePeriod');
-            return bgResult.recordset || [];
-        });
-
-        const lines = await safeExec('line', async () => {
-            const lineRequest = pool.request();
-            lineRequest.input('UserGroupNo', sql.VarChar(2), userGroupNo);
-            lineRequest.input('EmployeeID', sql.VarChar(8), employeeId);
-            lineRequest.input('EffectiveDate', sql.DateTime, effectiveDate);
-            lineRequest.input('BGNo', sql.VarChar(3), bgNo || null);
-            const lineResult = await lineRequest.execute('mp_GetUnitLine');
-            return lineResult.recordset || [];
-        });
-
-        const units = await safeExec('unit', async () => {
-            const unitRequest = pool.request();
-            if (bgNo) {
-                unitRequest.input('EffectiveDate', sql.DateTime, effectiveDate);
-                unitRequest.input('BGNo', sql.VarChar(3), bgNo);
-                unitRequest.input('division', sql.VarChar(8), division || null);
-                unitRequest.input('UserGroupNO', sql.VarChar(2), userGroupNo);
-                unitRequest.input('EmployeeID', sql.VarChar(8), employeeId);
-                unitRequest.input('p_SelectType', sql.Int, 9);
-                const unitResult = await unitRequest.execute('mp_UnitGetByLineBGAndEffectivePeriod');
-                return unitResult.recordset || [];
-            }
-
-            unitRequest.input('UserGroupNo', sql.VarChar(2), userGroupNo);
-            unitRequest.input('EmployeeID', sql.VarChar(8), employeeId);
-            unitRequest.input('OrgUnitNo', sql.VarChar(8), division || null);
-            unitRequest.input('EffectiveDate', sql.DateTime, effectiveDate);
-            unitRequest.input('p_SelectType', sql.Int, 0);
-            const unitResult = await unitRequest.execute('mp_UnitGetByLineAndEffectivePeriod');
-            return unitResult.recordset || [];
-        });
-
-        // If any core part (lines or units) is empty despite having business units, 
+        // If any core part (lines or units) is empty despite having business units,
         // it means an SP potentially failed. Continue to fallback to heal the data.
-        if (businessUnits.length > 0 && lines.length > 0 && units.length > 0) {
-            return {
-                businessUnits,
-                lines,
-                units
-            };
+        if (hasCompleteReport03Options(businessUnits, lines, units)) {
+            return { businessUnits, lines, units };
         }
 
         // Fallback: derive options from report result to avoid blocking UI if combo SPs fail in some environments.
-        const reportRows = await getReport03DataService(
-            effectiveDateStr,
-            employeeId,
-            userGroupNo,
-            division || '',
-            '',
-            bgNo || '',
-            '0'
-        );
-
-        const bgMap = new Map<string, any>();
-        const lineMap = new Map<string, any>();
-        const unitMap = new Map<string, any>();
-
-        reportRows.forEach((row: any) => {
-            const bgCode = String(row.BGNo || '').trim();
-            const bgName = String(row.BGName || '').trim();
-            if (bgCode || bgName) {
-                bgMap.set(bgCode || bgName, { BGNo: bgCode, BGName: bgName });
-            }
-
-            const lineCode = String(row.SecUnitDummy || '').trim();
-            const lineName = String(row.SecUnitDummy || '').trim();
-            if (lineCode || lineName) {
-                lineMap.set(lineCode || lineName, { OrgUnitNo: lineCode, UnitText: lineName });
-            }
-
-            const unitCode = String(row.OrgUnitNo || '').trim();
-            const unitName = String(row.UnitName || '').trim();
-            const unitAbbr = String(row.UnitAbbr || '').trim();
-            if (unitCode || unitName || unitAbbr) {
-                unitMap.set(unitCode || unitName, {
-                    OrgUnitNo: unitCode,
-                    UnitName: unitName,
-                    UnitAbbr: unitAbbr,
-                    UnitText: unitName || unitAbbr
-                });
-            }
-        });
-
-        return {
-            businessUnits: Array.from(bgMap.values()),
-            lines: Array.from(lineMap.values()),
-            units: Array.from(unitMap.values())
-        };
+        return getReport03FallbackOptions(effectiveDateStr, employeeId, userGroupNo, bgNo, division);
     } catch (error) {
         console.error('Error in getReport03FilterOptionsService:', error);
         throw error;
@@ -424,143 +473,103 @@ const pickColumnName = (columns: Map<string, string>, candidates: string[]): str
     return null;
 };
 
+type MetaRow = Record<string, unknown>;
+
+const rankMetaRow = (row: MetaRow, candidate: string, nameField: string): number => {
+    const objectName = String(row[nameField] || "").toLowerCase();
+    const schemaName = String(row.schema_name || "").toLowerCase();
+    const objectExact = objectName === candidate.toLowerCase() ? 0 : 1;
+    const schemaRank = schemaName === "dbo" ? 0 : 1;
+    return objectExact * 10 + schemaRank;
+};
+
+const selectMetaRow = (rows: MetaRow[], candidates: string[], nameField: string): MetaRow | null => {
+    for (const candidate of candidates) {
+        const matched = rows
+            .filter((row) => String(row[nameField] || "").toLowerCase() === candidate.toLowerCase())
+            .sort((a, b) => rankMetaRow(a, candidate, nameField) - rankMetaRow(b, candidate, nameField));
+        if (matched.length > 0) return matched[0];
+    }
+
+    return rows[0] || null;
+};
+
+const loadObjectColumns = async (pool: any, objectName: string): Promise<Map<string, string>> => {
+    const columnsRes = await pool.request()
+        .input("objectName", sql.NVarChar(300), objectName)
+        .query(`
+            SELECT c.name
+            FROM sys.columns c
+            WHERE c.object_id = OBJECT_ID(@objectName)
+        `);
+
+    const columnRows = Array.isArray(columnsRes.recordset) ? columnsRes.recordset as MetaRow[] : [];
+    const columns = new Map<string, string>();
+    columnRows.forEach((row) => {
+        const colName = String(row.name || "").trim();
+        if (!colName) return;
+        columns.set(colName.toLowerCase(), colName);
+    });
+    return columns;
+};
+
+const buildTableMeta = async (pool: any, selected: MetaRow, nameField: string): Promise<TableMeta | null> => {
+    const schemaName = String(selected.schema_name || "").trim();
+    const tableName = String(selected[nameField] || "").trim();
+    if (!schemaName || !tableName) return null;
+
+    const objectName = `${schemaName}.${tableName}`;
+    const columns = await loadObjectColumns(pool, objectName);
+    return {
+        schemaName,
+        tableName,
+        objectName,
+        fullName: `${escapeSqlIdentifier(schemaName)}.${escapeSqlIdentifier(tableName)}`,
+        columns
+    };
+};
+
 const getTableMeta = async (
     pool: any,
     tableCandidates: string[]
 ): Promise<TableMeta | null> => {
     if (!tableCandidates.length) return null;
 
-    const inList = tableCandidates.map((name) => `'${escapeSqlString(name.toLowerCase())}'`).join(',');
-    const tableRes = await pool.request().query(`
-        SELECT s.name AS schema_name, t.name AS table_name
-        FROM sys.tables t
-        INNER JOIN sys.schemas s ON s.schema_id = t.schema_id
-        WHERE LOWER(t.name) IN (${inList})
-    `);
+    const inList = tableCandidates.map((name) => '\'' + escapeSqlString(name.toLowerCase()) + '\'').join(',');
+    const tableRes = await pool.request().query([
+        'SELECT s.name AS schema_name, t.name AS table_name',
+        'FROM sys.tables t',
+        'INNER JOIN sys.schemas s ON s.schema_id = t.schema_id',
+        'WHERE LOWER(t.name) IN (' + inList + ')'
+    ].join('\n'));
 
-    const rows = Array.isArray(tableRes.recordset) ? tableRes.recordset as Array<Record<string, unknown>> : [];
+    const rows = Array.isArray(tableRes.recordset) ? tableRes.recordset as MetaRow[] : [];
     if (!rows.length) return null;
 
-    const rankTable = (row: Record<string, unknown>, candidate: string) => {
-        const tableName = String(row.table_name || '').toLowerCase();
-        const schemaName = String(row.schema_name || '').toLowerCase();
-        const tableExact = tableName === candidate.toLowerCase() ? 0 : 1;
-        const schemaRank = schemaName === 'dbo' ? 0 : 1;
-        return tableExact * 10 + schemaRank;
-    };
-
-    let selected: Record<string, unknown> | null = null;
-    for (const candidate of tableCandidates) {
-        const matched = rows
-            .filter((row) => String(row.table_name || '').toLowerCase() === candidate.toLowerCase())
-            .sort((a, b) => rankTable(a, candidate) - rankTable(b, candidate));
-        if (matched.length > 0) {
-            selected = matched[0];
-            break;
-        }
-    }
-
-    if (!selected) selected = rows[0];
-
-    const schemaName = String(selected.schema_name || '').trim();
-    const tableName = String(selected.table_name || '').trim();
-    if (!schemaName || !tableName) return null;
-
-    const objectName = `${schemaName}.${tableName}`;
-    const columnsRes = await pool.request()
-        .input('objectName', sql.NVarChar(300), objectName)
-        .query(`
-            SELECT c.name
-            FROM sys.columns c
-            WHERE c.object_id = OBJECT_ID(@objectName)
-        `);
-
-    const columnRows = Array.isArray(columnsRes.recordset) ? columnsRes.recordset as Array<Record<string, unknown>> : [];
-    const columns = new Map<string, string>();
-    columnRows.forEach((row) => {
-        const colName = String(row.name || '').trim();
-        if (!colName) return;
-        columns.set(colName.toLowerCase(), colName);
-    });
-
-    return {
-        schemaName,
-        tableName,
-        objectName,
-        fullName: `${escapeSqlIdentifier(schemaName)}.${escapeSqlIdentifier(tableName)}`,
-        columns
-    };
+    const selected = selectMetaRow(rows, tableCandidates, 'table_name');
+    return selected ? buildTableMeta(pool, selected, 'table_name') : null;
 };
-
 const getObjectMeta = async (
     pool: any,
     objectCandidates: string[]
 ): Promise<TableMeta | null> => {
     if (!objectCandidates.length) return null;
 
-    const inList = objectCandidates.map((name) => `'${escapeSqlString(name.toLowerCase())}'`).join(',');
-    const objectRes = await pool.request().query(`
-        SELECT s.name AS schema_name, o.name AS object_name
-        FROM sys.objects o
-        INNER JOIN sys.schemas s ON s.schema_id = o.schema_id
-        WHERE LOWER(o.name) IN (${inList})
-          AND o.type IN ('U', 'V', 'IF', 'TF')
-    `);
+    const inList = objectCandidates.map((name) => '\'' + escapeSqlString(name.toLowerCase()) + '\'').join(',');
+    const objectRes = await pool.request().query([
+        'SELECT s.name AS schema_name, o.name AS object_name',
+        'FROM sys.objects o',
+        'INNER JOIN sys.schemas s ON s.schema_id = o.schema_id',
+        'WHERE LOWER(o.name) IN (' + inList + ')',
+        "AND o.type IN ('U', 'V', 'IF', 'TF')"
+    ].join('\n'));
 
-    const rows = Array.isArray(objectRes.recordset) ? objectRes.recordset as Array<Record<string, unknown>> : [];
+    const rows = Array.isArray(objectRes.recordset) ? objectRes.recordset as MetaRow[] : [];
     if (!rows.length) return null;
 
-    const rankObject = (row: Record<string, unknown>, candidate: string) => {
-        const objectName = String(row.object_name || '').toLowerCase();
-        const schemaName = String(row.schema_name || '').toLowerCase();
-        const objectExact = objectName === candidate.toLowerCase() ? 0 : 1;
-        const schemaRank = schemaName === 'dbo' ? 0 : 1;
-        return objectExact * 10 + schemaRank;
-    };
-
-    let selected: Record<string, unknown> | null = null;
-    for (const candidate of objectCandidates) {
-        const matched = rows
-            .filter((row) => String(row.object_name || '').toLowerCase() === candidate.toLowerCase())
-            .sort((a, b) => rankObject(a, candidate) - rankObject(b, candidate));
-        if (matched.length > 0) {
-            selected = matched[0];
-            break;
-        }
-    }
-
-    if (!selected) selected = rows[0];
-
-    const schemaName = String(selected.schema_name || '').trim();
-    const tableName = String(selected.object_name || '').trim();
-    if (!schemaName || !tableName) return null;
-
-    const objectName = `${schemaName}.${tableName}`;
-    const columnsRes = await pool.request()
-        .input('objectName', sql.NVarChar(300), objectName)
-        .query(`
-            SELECT c.name
-            FROM sys.columns c
-            WHERE c.object_id = OBJECT_ID(@objectName)
-        `);
-
-    const columnRows = Array.isArray(columnsRes.recordset) ? columnsRes.recordset as Array<Record<string, unknown>> : [];
-    const columns = new Map<string, string>();
-    columnRows.forEach((row) => {
-        const colName = String(row.name || '').trim();
-        if (!colName) return;
-        columns.set(colName.toLowerCase(), colName);
-    });
-
-    return {
-        schemaName,
-        tableName,
-        objectName,
-        fullName: `${escapeSqlIdentifier(schemaName)}.${escapeSqlIdentifier(tableName)}`,
-        columns
-    };
+    const selected = selectMetaRow(rows, objectCandidates, 'object_name');
+    return selected ? buildTableMeta(pool, selected, 'object_name') : null;
 };
-
 const normalizeReport08RowsToMap = (rows: Array<Record<string, unknown>>): Report08LevelMap => {
     const result: Report08LevelMap = new Map();
 
@@ -579,35 +588,37 @@ const normalizeReport08RowsToMap = (rows: Array<Record<string, unknown>>): Repor
     return result;
 };
 
-const buildReport08DateCondition = (
-    alias: string,
+const buildReport08PointDateCondition = (
+    prefix: string,
     beginDateCol: string | null,
     endDateCol: string | null,
-    effectiveDateCol: string | null,
-    mode: 'range' | 'point' = 'range'
+    effectiveDateCol: string | null
 ) => {
-    const prefix = alias ? `${alias}.` : '';
-
-    if (mode === 'point') {
-        if (beginDateCol && endDateCol) {
-            return `AND @EffectiveDate BETWEEN COALESCE(${prefix}${escapeSqlIdentifier(beginDateCol)}, @EffectiveDate) AND COALESCE(${prefix}${escapeSqlIdentifier(endDateCol)}, @EffectiveDate)`;
-        }
-
-        if (effectiveDateCol) {
-            return `AND ${prefix}${escapeSqlIdentifier(effectiveDateCol)} = @EffectiveDate`;
-        }
-
-        if (beginDateCol) {
-            return `AND COALESCE(${prefix}${escapeSqlIdentifier(beginDateCol)}, @EffectiveDate) <= @EffectiveDate`;
-        }
-
-        if (endDateCol) {
-            return `AND COALESCE(${prefix}${escapeSqlIdentifier(endDateCol)}, @EffectiveDate) >= @EffectiveDate`;
-        }
-
-        return '';
+    if (beginDateCol && endDateCol) {
+        return `AND @EffectiveDate BETWEEN COALESCE(${prefix}${escapeSqlIdentifier(beginDateCol)}, @EffectiveDate) AND COALESCE(${prefix}${escapeSqlIdentifier(endDateCol)}, @EffectiveDate)`;
     }
 
+    if (effectiveDateCol) {
+        return `AND ${prefix}${escapeSqlIdentifier(effectiveDateCol)} = @EffectiveDate`;
+    }
+
+    if (beginDateCol) {
+        return `AND COALESCE(${prefix}${escapeSqlIdentifier(beginDateCol)}, @EffectiveDate) <= @EffectiveDate`;
+    }
+
+    if (endDateCol) {
+        return `AND COALESCE(${prefix}${escapeSqlIdentifier(endDateCol)}, @EffectiveDate) >= @EffectiveDate`;
+    }
+
+    return "";
+};
+
+const buildReport08RangeDateCondition = (
+    prefix: string,
+    beginDateCol: string | null,
+    endDateCol: string | null,
+    effectiveDateCol: string | null
+) => {
     if (beginDateCol && endDateCol) {
         return `AND @ToDate >= COALESCE(${prefix}${escapeSqlIdentifier(beginDateCol)}, @FromDate) AND @FromDate <= COALESCE(${prefix}${escapeSqlIdentifier(endDateCol)}, @ToDate)`;
     }
@@ -624,9 +635,22 @@ const buildReport08DateCondition = (
         return `AND COALESCE(${prefix}${escapeSqlIdentifier(endDateCol)}, @ToDate) >= @FromDate`;
     }
 
-    return '';
+    return "";
 };
 
+const buildReport08DateCondition = (
+    alias: string,
+    beginDateCol: string | null,
+    endDateCol: string | null,
+    effectiveDateCol: string | null,
+    mode: "range" | "point" = "range"
+) => {
+    const prefix = alias ? `${alias}.` : "";
+
+    return mode === "point"
+        ? buildReport08PointDateCondition(prefix, beginDateCol, endDateCol, effectiveDateCol)
+        : buildReport08RangeDateCondition(prefix, beginDateCol, endDateCol, effectiveDateCol);
+};
 const getReport08PositionMap = async (
     pool: any,
     effectiveDate: Date
@@ -808,36 +832,30 @@ const buildRowAccessor = (row: Record<string, unknown>) => {
 
 const sumLevels = (levels: number[]) => levels.reduce((sum, current) => sum + current, 0);
 
-export const getReport04DataService = async (
-    effectiveDateStr: string,
-    employeeId: string,
-    userGroupNo: string,
-    division: string,
-    orgUnitNo: string,
-    bgNo: string
-) => {
-    try {
-        const pool = await poolPromise;
-        const request = pool.request();
-        const selectedDivisionValues = splitCsvValues(division);
-        const selectedOrgUnitValues = splitCsvValues(orgUnitNo);
-        const selectedBgValues = splitCsvValues(bgNo);
+type Report04FilterSets = {
+    selectedDivisionSet: Set<string> | null;
+    selectedOrgUnitSet: Set<string> | null;
+    selectedBgSet: Set<string> | null;
+};
 
-        const effectiveDate = new Date(effectiveDateStr);
-        request.input('EffectiveDate', sql.DateTime, effectiveDate);
-        request.input('EmployeeID', sql.VarChar(8), employeeId);
-        request.input('UserGroupNO', sql.VarChar(2), userGroupNo || null);
-        request.input('Division', sql.VarChar(8), singleOrNull(selectedDivisionValues));
-        request.input('OrgUnitNo', sql.VarChar(8), singleOrNull(selectedOrgUnitValues));
-        request.input('BGNo', sql.VarChar(3), singleOrNull(selectedBgValues));
+const getReport04FilterSets = (division: string, orgUnitNo: string, bgNo: string) => {
+    const selectedDivisionValues = splitCsvValues(division);
+    const selectedOrgUnitValues = splitCsvValues(orgUnitNo);
+    const selectedBgValues = splitCsvValues(bgNo);
 
-        const result = await request.execute('mp_ReportActualUnit');
-        const rows = Array.isArray(result.recordset) ? result.recordset : [];
-        const selectedDivisionSet = selectedDivisionValues.length > 0 ? new Set(selectedDivisionValues) : null;
-        const selectedOrgUnitSet = selectedOrgUnitValues.length > 0 ? new Set(selectedOrgUnitValues) : null;
-        const selectedBgSet = selectedBgValues.length > 0 ? new Set(selectedBgValues) : null;
+    return {
+        selectedDivisionValues,
+        selectedOrgUnitValues,
+        selectedBgValues,
+        filters: {
+            selectedDivisionSet: selectedDivisionValues.length > 0 ? new Set(selectedDivisionValues) : null,
+            selectedOrgUnitSet: selectedOrgUnitValues.length > 0 ? new Set(selectedOrgUnitValues) : null,
+            selectedBgSet: selectedBgValues.length > 0 ? new Set(selectedBgValues) : null
+        }
+    };
+};
 
-        const filteredRows = rows.filter((rawRow) => {
+const isReport04RowIncluded = (rawRow: unknown, filters: Report04FilterSets) => {
             const row = (rawRow && typeof rawRow === 'object') ? (rawRow as Record<string, unknown>) : {};
             const { text } = buildRowAccessor(row);
 
@@ -857,13 +875,13 @@ export const getReport04DataService = async (
             const rowOrgUnit = text('OrgUnitNo', 'org_unit_no', 'unit_code');
 
             return (
-                matchesSelectedSet(selectedBgSet, [rowBg]) &&
-                matchesSelectedSet(selectedDivisionSet, [rowDivision]) &&
-                matchesSelectedSet(selectedOrgUnitSet, [rowOrgUnit])
+                matchesSelectedSet(filters.selectedBgSet, [rowBg]) &&
+                matchesSelectedSet(filters.selectedDivisionSet, [rowDivision]) &&
+                matchesSelectedSet(filters.selectedOrgUnitSet, [rowOrgUnit])
             );
-        });
+};
 
-        return filteredRows.map((rawRow, index) => {
+const mapReport04Row = (rawRow: unknown, index: number) => {
             const row = (rawRow && typeof rawRow === 'object') ? rawRow as Record<string, unknown> : {};
             const { num, text } = buildRowAccessor(row);
 
@@ -1129,11 +1147,161 @@ export const getReport04DataService = async (
                 remark: text('remark', 'Remark', 'Note'),
                 log: text('note', 'new_note', 'TransactionDesc', 'log')
             };
-        }).filter((row) => row.unit_code || row.unit_name || row.unit_short);
+};
+
+export const getReport04DataService = async (
+    effectiveDateStr: string,
+    employeeId: string,
+    userGroupNo: string,
+    division: string,
+    orgUnitNo: string,
+    bgNo: string
+) => {
+    try {
+        const pool = await poolPromise;
+        const request = pool.request();
+        const { selectedDivisionValues, selectedOrgUnitValues, selectedBgValues, filters } = getReport04FilterSets(
+            division,
+            orgUnitNo,
+            bgNo
+        );
+
+        const effectiveDate = new Date(effectiveDateStr);
+        request.input('EffectiveDate', sql.DateTime, effectiveDate);
+        request.input('EmployeeID', sql.VarChar(8), employeeId);
+        request.input('UserGroupNO', sql.VarChar(2), userGroupNo || null);
+        request.input('Division', sql.VarChar(8), singleOrNull(selectedDivisionValues));
+        request.input('OrgUnitNo', sql.VarChar(8), singleOrNull(selectedOrgUnitValues));
+        request.input('BGNo', sql.VarChar(3), singleOrNull(selectedBgValues));
+
+        const result = await request.execute('mp_ReportActualUnit');
+        const rows = Array.isArray(result.recordset) ? result.recordset : [];
+        return rows
+            .filter((rawRow) => isReport04RowIncluded(rawRow, filters))
+            .map((rawRow, index) => mapReport04Row(rawRow, index))
+            .filter((row) => row.unit_code || row.unit_name || row.unit_short);
     } catch (error) {
         console.error('Error in getReport04DataService:', error);
         throw error;
     }
+};
+
+type Report05CarryState = {
+    lastUnitShort: string;
+    lastUnitCode: string;
+    lastUnitName: string;
+    lastLineCode: string;
+    lastLineOfWork: string;
+    lastBusinessCode: string;
+    lastBusinessUnit: string;
+    lastDataset: string;
+};
+
+const createReport05CarryState = (): Report05CarryState => ({
+    lastUnitShort: '',
+    lastUnitCode: '',
+    lastUnitName: '',
+    lastLineCode: '',
+    lastLineOfWork: '',
+    lastBusinessCode: '',
+    lastBusinessUnit: '',
+    lastDataset: 'ปกติ'
+});
+
+const isReport05RowIncluded = (
+    rawRow: unknown,
+    selectedDivisionSet: Set<string> | null,
+    selectedOrgUnitSet: Set<string> | null
+) => {
+    const row = (rawRow && typeof rawRow === 'object') ? (rawRow as Record<string, unknown>) : {};
+    const { text } = buildRowAccessor(row);
+    const rowDivision = text(
+        'ParentOrgUnitNo',
+        'line_of_work',
+        'GrandName2',
+        'GrandName',
+        'GrandParent',
+        'SecUnitDummy',
+        'Division',
+        'OrgUnitLine',
+        'LineCode',
+        'LineNo'
+    );
+    const rowOrgUnit = text('OrgUnitNo', 'org_unit_no', 'unit_code');
+
+    return matchesSelectedSet(selectedDivisionSet, [rowDivision]) &&
+        matchesSelectedSet(selectedOrgUnitSet, [rowOrgUnit]);
+};
+
+const getReport05FrameValues = (num: (...aliases: string[]) => number) => {
+    const frame21 = num('amount1', 'q_21');
+    const frame1820 = num('amount2', 'q_18_20');
+    const frame1617 = num('amount3', 'q_16_17');
+    const frame1415 = num('amount4', 'q_14_15');
+    const frame1113 = num('amount5', 'q_11_13');
+    const frame910 = num('amount6', 'q_9_10');
+    const frameUnder8 = num('amount7', 'q_8', 'q_4_8');
+    const frameTotal = num('tamount', 'amount', 'total_amount') || (
+        frame21 + frame1820 + frame1617 + frame1415 + frame1113 + frame910 + frameUnder8
+    );
+
+    return { frame21, frame1820, frame1617, frame1415, frame1113, frame910, frameUnder8, frameTotal };
+};
+
+const updateReport05Carry = (carry: Report05CarryState, raw: Record<string, string>, datasetSource: unknown, dataset: string) => {
+    if (raw.unitShort) carry.lastUnitShort = raw.unitShort;
+    if (raw.unitCode) carry.lastUnitCode = raw.unitCode;
+    if (raw.unitName) carry.lastUnitName = raw.unitName;
+    if (raw.lineCode) carry.lastLineCode = raw.lineCode;
+    if (raw.lineOfWork) carry.lastLineOfWork = raw.lineOfWork;
+    if (raw.businessCode) carry.lastBusinessCode = raw.businessCode;
+    if (raw.businessUnit) carry.lastBusinessUnit = raw.businessUnit;
+    if (datasetSource !== undefined && datasetSource !== null && datasetSource !== '') carry.lastDataset = dataset;
+};
+
+const mapReport05Row = (rawRow: unknown, index: number, carry: Report05CarryState) => {
+    const row = (rawRow && typeof rawRow === 'object') ? (rawRow as Record<string, unknown>) : {};
+    const { num, text } = buildRowAccessor(row);
+    const frames = getReport05FrameValues(num);
+    const raw = {
+        unitShort: text('UnitAbbr', 'DisplayName', 'unit_short'),
+        unitCode: text('OrgUnitNo', 'unit_code'),
+        unitName: text('UnitName', 'unit_name', 'UnitAbbr', 'DisplayName'),
+        lineCode: text('ParentOrgUnitNo', 'line_of_work_code', 'parent_org_unit_no'),
+        lineOfWork: text('line_of_work', 'ParentOrgUnitNo', 'GrandName2', 'GrandName', 'GrandParent', 'SecUnitDummy'),
+        businessCode: text('BGNo', 'bg_no', 'business_unit_code'),
+        businessUnit: text('business_unit', 'BGName', 'BGNo')
+    };
+    const datasetSource = row.typecal ?? row.TypeCal;
+    const hasDatasetSource = datasetSource !== undefined && datasetSource !== null && datasetSource !== '';
+    const dataset = hasDatasetSource ? mapTypecalToDataset(datasetSource) : carry.lastDataset;
+
+    const mappedRow = {
+        key: 'r5-' + (index + 1),
+        unit_short: raw.unitShort || carry.lastUnitShort,
+        unit_code: raw.unitCode || carry.lastUnitCode,
+        unit_name: raw.unitName || carry.lastUnitName,
+        date: toDisplayDate(row.EffectiveDate ?? row.effectivedate),
+        frame_21: frames.frame21,
+        frame_18_20: frames.frame1820,
+        frame_16_17: frames.frame1617,
+        frame_14_15: frames.frame1415,
+        frame_11_13: frames.frame1113,
+        frame_9_10: frames.frame910,
+        frame_under_8: frames.frameUnder8,
+        frame_total: frames.frameTotal,
+        operator: text('CreateByName', 'operator'),
+        remark: text('remark', 'Remark', 'note'),
+        log: text('log', 'new_note', 'TransactionDesc'),
+        line_of_work_code: raw.lineCode || carry.lastLineCode,
+        line_of_work: raw.lineOfWork || carry.lastLineOfWork,
+        business_unit_code: raw.businessCode || carry.lastBusinessCode,
+        business_unit: raw.businessUnit || carry.lastBusinessUnit,
+        dataset
+    };
+
+    updateReport05Carry(carry, raw, datasetSource, dataset);
+    return mappedRow;
 };
 
 export const getReport05DataService = async (
@@ -1149,16 +1317,12 @@ export const getReport05DataService = async (
         const request = pool.request();
         const selectedDivisionValues = splitCsvValues(division);
         const selectedOrgUnitValues = splitCsvValues(orgUnitNo);
+        const fromDate = new Date(fromDateStr);
+        const toDate = new Date(toDateStr);
 
-        const fromDateRaw = new Date(fromDateStr);
-        const toDateRaw = new Date(toDateStr);
-
-        if (Number.isNaN(fromDateRaw.getTime()) || Number.isNaN(toDateRaw.getTime())) {
+        if (Number.isNaN(fromDate.getTime()) || Number.isNaN(toDate.getTime())) {
             throw new Error('Invalid report5 date range');
         }
-
-        const fromDate = fromDateRaw;
-        const toDate = toDateRaw;
 
         request.input('FromDate', sql.DateTime, fromDate);
         request.input('ToDate', sql.DateTime, toDate);
@@ -1171,115 +1335,11 @@ export const getReport05DataService = async (
         const rows = Array.isArray(result.recordset) ? result.recordset : [];
         const selectedDivisionSet = selectedDivisionValues.length > 0 ? new Set(selectedDivisionValues) : null;
         const selectedOrgUnitSet = selectedOrgUnitValues.length > 0 ? new Set(selectedOrgUnitValues) : null;
+        const carry = createReport05CarryState();
 
-        const filteredRows = rows.filter((rawRow) => {
-            const row = (rawRow && typeof rawRow === 'object') ? (rawRow as Record<string, unknown>) : {};
-            const { text } = buildRowAccessor(row);
-
-            const rowDivision = text(
-                'ParentOrgUnitNo',
-                'line_of_work',
-                'GrandName2',
-                'GrandName',
-                'GrandParent',
-                'SecUnitDummy',
-                'Division',
-                'OrgUnitLine',
-                'LineCode',
-                'LineNo'
-            );
-            const rowOrgUnit = text('OrgUnitNo', 'org_unit_no', 'unit_code');
-
-            return (
-                matchesSelectedSet(selectedDivisionSet, [rowDivision]) &&
-                matchesSelectedSet(selectedOrgUnitSet, [rowOrgUnit])
-            );
-        });
-
-        let lastUnitShort = '';
-        let lastUnitCode = '';
-        let lastUnitName = '';
-        let lastLineCode = '';
-        let lastLineOfWork = '';
-        let lastBusinessCode = '';
-        let lastBusinessUnit = '';
-        let lastDataset = 'ปกติ';
-
-        return filteredRows.map((rawRow, index) => {
-                const row = (rawRow && typeof rawRow === 'object') ? (rawRow as Record<string, unknown>) : {};
-                const { num, text } = buildRowAccessor(row);
-
-                const frame21 = num('amount1', 'q_21');
-                const frame1820 = num('amount2', 'q_18_20');
-                const frame1617 = num('amount3', 'q_16_17');
-                const frame1415 = num('amount4', 'q_14_15');
-                const frame1113 = num('amount5', 'q_11_13');
-                const frame910 = num('amount6', 'q_9_10');
-                const frameUnder8 = num('amount7', 'q_8', 'q_4_8');
-                const total = num('tamount', 'amount', 'total_amount') || (
-                    frame21 +
-                    frame1820 +
-                    frame1617 +
-                    frame1415 +
-                    frame1113 +
-                    frame910 +
-                    frameUnder8
-                );
-
-                const unitShortRaw = text('UnitAbbr', 'DisplayName', 'unit_short');
-                const unitCodeRaw = text('OrgUnitNo', 'unit_code');
-                const unitNameRaw = text('UnitName', 'unit_name', 'UnitAbbr', 'DisplayName');
-                const lineCodeRaw = text('ParentOrgUnitNo', 'line_of_work_code', 'parent_org_unit_no');
-                const lineOfWorkRaw = text('line_of_work', 'ParentOrgUnitNo', 'GrandName2', 'GrandName', 'GrandParent', 'SecUnitDummy');
-                const businessCodeRaw = text('BGNo', 'bg_no', 'business_unit_code');
-                const businessUnitRaw = text('business_unit', 'BGName', 'BGNo');
-                const operatorRaw = text('CreateByName', 'operator');
-                const datasetSource = row.typecal ?? row.TypeCal;
-                const hasDatasetSource = datasetSource !== undefined && datasetSource !== null && datasetSource !== '';
-
-                const unit_short = unitShortRaw || lastUnitShort;
-                const unit_code = unitCodeRaw || lastUnitCode;
-                const unit_name = unitNameRaw || lastUnitName;
-                const line_of_work_code = lineCodeRaw || lastLineCode;
-                const line_of_work = lineOfWorkRaw || lastLineOfWork;
-                const business_unit_code = businessCodeRaw || lastBusinessCode;
-                const business_unit = businessUnitRaw || lastBusinessUnit;
-                const operator = operatorRaw;
-                const dataset = hasDatasetSource ? mapTypecalToDataset(datasetSource) : lastDataset;
-
-                if (unitShortRaw) lastUnitShort = unitShortRaw;
-                if (unitCodeRaw) lastUnitCode = unitCodeRaw;
-                if (unitNameRaw) lastUnitName = unitNameRaw;
-                if (lineCodeRaw) lastLineCode = lineCodeRaw;
-                if (lineOfWorkRaw) lastLineOfWork = lineOfWorkRaw;
-                if (businessCodeRaw) lastBusinessCode = businessCodeRaw;
-                if (businessUnitRaw) lastBusinessUnit = businessUnitRaw;
-                if (hasDatasetSource) lastDataset = dataset;
-
-                return {
-                    key: `r5-${index + 1}`,
-                    unit_short,
-                    unit_code,
-                    unit_name,
-                    date: toDisplayDate(row.EffectiveDate ?? row.effectivedate),
-                    frame_21: frame21,
-                    frame_18_20: frame1820,
-                    frame_16_17: frame1617,
-                    frame_14_15: frame1415,
-                    frame_11_13: frame1113,
-                    frame_9_10: frame910,
-                    frame_under_8: frameUnder8,
-                    frame_total: total,
-                    operator,
-                    remark: text('remark', 'Remark', 'note'),
-                    log: text('log', 'new_note', 'TransactionDesc'),
-                    line_of_work_code,
-                    line_of_work,
-                    business_unit_code,
-                    business_unit,
-                    dataset
-                };
-            });
+        return rows
+            .filter((rawRow) => isReport05RowIncluded(rawRow, selectedDivisionSet, selectedOrgUnitSet))
+            .map((rawRow, index) => mapReport05Row(rawRow, index, carry));
     } catch (error) {
         console.error('Error in getReport05DataService:', error);
         throw error;
@@ -1401,6 +1461,298 @@ type Report7QuotaTotals = {
     q_10: number;
 };
 
+type Report7LandscapeTotals = { vp: number; dm: number; sr: number; jr: number };
+
+const mapReport07BaseRow = (rawRow: unknown, index: number) => {
+    const row = (rawRow && typeof rawRow === 'object') ? rawRow as Record<string, unknown> : {};
+    const q1 = toNumberOrZero(row.frame_staff_21);
+    const q2 = toNumberOrZero(row.frame_staff_18_20);
+    const q3 = toNumberOrZero(row.frame_staff_16_17);
+    const q4 = toNumberOrZero(row.frame_staff_14_15);
+    const q5 = toNumberOrZero(row.frame_staff_11_13);
+    const q6 = toNumberOrZero(row.frame_staff_9_10);
+    const q7 = toNumberOrZero(row.frame_staff_under_8);
+    const qTotal = toNumberOrZero(row.frame_staff_total) || (q1 + q2 + q3 + q4 + q5 + q6 + q7);
+    const m1 = toNumberOrZero(row.people_normal_21);
+    const m2 = toNumberOrZero(row.people_normal_18_20);
+    const m3 = toNumberOrZero(row.people_normal_16_17);
+    const m4 = toNumberOrZero(row.people_normal_14_15);
+    const m5 = toNumberOrZero(row.people_normal_11_13);
+    const m6 = toNumberOrZero(row.people_normal_9_10);
+    const m7 = toNumberOrZero(row.people_normal_under_8);
+    const mTotal = toNumberOrZero(row.people_normal_total) || (m1 + m2 + m3 + m4 + m5 + m6 + m7);
+    const t1 = toNumberOrZero(row.vacancy_21);
+    const t2 = toNumberOrZero(row.vacancy_18_20);
+    const t3 = toNumberOrZero(row.vacancy_16_17);
+    const t4 = toNumberOrZero(row.vacancy_14_15);
+    const t5 = toNumberOrZero(row.vacancy_11_13);
+    const t6 = toNumberOrZero(row.vacancy_9_10);
+    const t7 = toNumberOrZero(row.vacancy_under_8);
+    const vacancyTotal = toNumberOrZero(row.vacancy_total) || (t1 + t2 + t3 + t4 + t5 + t6 + t7);
+    const recruitTotal = toNumberOrZero(row.recruit_total);
+
+    return {
+        key: 'r7-' + (index + 1),
+        org_unit_no: toTrimText(row.unit_code),
+        parent_org_unit_no: toTrimText(row.line_of_work),
+        lvl: 0,
+        bg_no: '',
+        business_unit: toTrimText(row.business_unit),
+        unit_level: '',
+        unit_level_name: toTrimText(row.level),
+        unit_short: toTrimText(row.unit_short),
+        unit_name: toTrimText(row.unit_name),
+        q_1: q1,
+        q_2: q2,
+        q_3: q3,
+        q_4: q4,
+        q_5: q5,
+        q_6: q6,
+        q_7: q7,
+        q_total: qTotal,
+        m_1: m1,
+        m_2: m2,
+        m_3: m3,
+        m_4: m4,
+        m_5: m5,
+        m_6: m6,
+        m_7: m7,
+        m_total: mTotal,
+        f_1: 0,
+        f_2: 0,
+        f_3: 0,
+        f_4: 0,
+        f_5: 0,
+        f_6: 0,
+        f_7: 0,
+        f_total: recruitTotal,
+        t_1: t1,
+        t_2: t2,
+        t_3: t3,
+        t_4: t4,
+        t_5: t5,
+        t_6: t6,
+        t_7: t7,
+        total: vacancyTotal,
+        q_8: toNumberOrZero(row.contact_out),
+        q_10: toNumberOrZero(row.contact_out_sub),
+        remark: toTrimText(row.remark)
+    };
+};
+
+const getReport07QuotaMap = async (pool: any, effectiveDate: Date): Promise<Map<string, Report7QuotaTotals>> => {
+    const quotaRequest = pool.request();
+    quotaRequest.input('EffectiveDate', sql.DateTime, effectiveDate);
+    const quotaRes = await quotaRequest.query(`
+        SELECT
+            OrgUnitNo,
+            SUM(ISNULL(L9907, 0)) AS q_1,
+            SUM(ISNULL(L9906, 0)) AS q_2,
+            SUM(ISNULL(L9905, 0)) AS q_3,
+            SUM(ISNULL(L9904, 0)) AS q_4,
+            SUM(ISNULL(L9903, 0)) AS q_5,
+            SUM(ISNULL(L9902, 0)) AS q_6,
+            SUM(ISNULL(L9901, 0)) AS q_7,
+            SUM(ISNULL(L9907, 0) + ISNULL(L9906, 0) + ISNULL(L9905, 0) + ISNULL(L9904, 0)
+                + ISNULL(L9903, 0) + ISNULL(L9902, 0) + ISNULL(L9901, 0)) AS q_total,
+            SUM(ISNULL(L9908, 0)) AS q_8,
+            SUM(ISNULL(L9910, 0)) AS q_10
+        FROM MP_QuotaN
+        WHERE EffectiveDate = DATEADD(month, DATEDIFF(month, 0, @EffectiveDate), 0)
+        GROUP BY OrgUnitNo
+    `);
+    const quotaMap = new Map<string, Report7QuotaTotals>();
+    const quotaRows = Array.isArray(quotaRes.recordset) ? quotaRes.recordset : [];
+    quotaRows.forEach((raw: unknown) => {
+        const row = (raw && typeof raw === 'object') ? (raw as Record<string, unknown>) : {};
+        const { num, text } = buildRowAccessor(row);
+        const orgUnitNo = text('OrgUnitNo');
+        if (!orgUnitNo) return;
+        quotaMap.set(orgUnitNo, {
+            q_1: num('q_1'),
+            q_2: num('q_2'),
+            q_3: num('q_3'),
+            q_4: num('q_4'),
+            q_5: num('q_5'),
+            q_6: num('q_6'),
+            q_7: num('q_7'),
+            q_total: num('q_total'),
+            q_8: num('q_8'),
+            q_10: num('q_10')
+        });
+    });
+    return quotaMap;
+};
+
+const getReport07BgNameMap = async (pool: any, effectiveDate: Date) => {
+    const bgNameRequest = pool.request();
+    bgNameRequest.input('EffectiveDate', sql.DateTime, effectiveDate);
+    const bgNameRes = await bgNameRequest.query(`
+        SELECT BGNo, BGName
+        FROM MP_BG
+        WHERE @EffectiveDate BETWEEN BeginDate AND EndDate
+    `);
+    const bgNameMap = new Map<string, string>();
+    const bgRows = Array.isArray(bgNameRes.recordset) ? bgNameRes.recordset : [];
+    bgRows.forEach((raw: unknown) => {
+        const row = (raw && typeof raw === 'object') ? (raw as Record<string, unknown>) : {};
+        const { text } = buildRowAccessor(row);
+        const code = text('BGNo');
+        const name = text('BGName');
+        if (code && name) bgNameMap.set(code, name);
+    });
+    return bgNameMap;
+};
+
+const getReport07LandscapeContext = async (pool: any, effectiveDate: Date) => {
+    const request = pool.request();
+    request.input('EffectiveDate', sql.DateTime, effectiveDate);
+    const landscapeRes = await request.query(`
+        WITH ranked AS (
+            SELECT
+                OrgUnitNo,
+                CAST(vp AS decimal(18,4)) AS vp,
+                CAST(dm AS decimal(18,4)) AS dm,
+                CAST(sr AS decimal(18,4)) AS sr,
+                CAST(jr AS decimal(18,4)) AS jr,
+                BeginDate,
+                EndDate,
+                ROW_NUMBER() OVER (
+                    PARTITION BY OrgUnitNo
+                    ORDER BY BeginDate DESC, EndDate DESC
+                ) AS rn
+            FROM MP_Landscape
+            WHERE @EffectiveDate BETWEEN BeginDate AND EndDate
+        )
+        SELECT OrgUnitNo, vp, dm, sr, jr
+        FROM ranked
+        WHERE rn = 1
+    `);
+
+    const landscapeMap = new Map<string, Report7LandscapeTotals>();
+    let defaultLandscape: Report7LandscapeTotals | null = null;
+    const landscapeRows = Array.isArray(landscapeRes.recordset) ? landscapeRes.recordset : [];
+    landscapeRows.forEach((raw: unknown) => {
+        const row = (raw && typeof raw === 'object') ? (raw as Record<string, unknown>) : {};
+        const { num, text } = buildRowAccessor(row);
+        const orgUnitNo = text('OrgUnitNo');
+        const landscapeValue = { vp: num('vp'), dm: num('dm'), sr: num('sr'), jr: num('jr') };
+
+        if (!orgUnitNo) {
+            defaultLandscape = landscapeValue;
+            return;
+        }
+        landscapeMap.set(orgUnitNo, landscapeValue);
+    });
+
+    return { landscapeMap, defaultLandscape };
+};
+
+const getReport07QuotaValues = (row: Record<string, unknown>, quota?: Report7QuotaTotals) => ({
+    q1: quota?.q_1 ?? toNumberOrZero(row.q_1),
+    q2: quota?.q_2 ?? toNumberOrZero(row.q_2),
+    q3: quota?.q_3 ?? toNumberOrZero(row.q_3),
+    q4: quota?.q_4 ?? toNumberOrZero(row.q_4),
+    q5: quota?.q_5 ?? toNumberOrZero(row.q_5),
+    q6: quota?.q_6 ?? toNumberOrZero(row.q_6),
+    q7: quota?.q_7 ?? toNumberOrZero(row.q_7),
+    qTotal: quota?.q_total ?? toNumberOrZero(row.q_total),
+    contractOut: quota?.q_8 ?? toNumberOrZero(row.q_8),
+    subContract: quota?.q_10 ?? toNumberOrZero(row.q_10)
+});
+
+const getReport07ManpowerValues = (row: Record<string, unknown>) => ({
+    m1: toNumberOrZero(row.m_1),
+    m2: toNumberOrZero(row.m_2),
+    m3: toNumberOrZero(row.m_3),
+    m4: toNumberOrZero(row.m_4),
+    m5: toNumberOrZero(row.m_5),
+    m6: toNumberOrZero(row.m_6),
+    m7: toNumberOrZero(row.m_7),
+    mTotal: toNumberOrZero(row.m_total),
+    recruitTotal: toNumberOrZero(row.f_total)
+});
+
+const getReport07ShapeValues = (quota: ReturnType<typeof getReport07QuotaValues>, landscape: Report7LandscapeTotals | null | undefined) => {
+    const mpVp = landscape?.vp ?? 0;
+    const mpDm = landscape?.dm ?? 0;
+    const mpSr = landscape?.sr ?? 0;
+    const mpJr = landscape?.jr ?? 0;
+    const calculated = calculateReport7ShapeGapMetrics({
+        q_4: quota.q4,
+        q_5: quota.q5,
+        q_6: quota.q6,
+        q_7: quota.q7,
+        q_total: quota.qTotal,
+        contract_out: quota.contractOut,
+        mp_vp: mpVp,
+        mp_dm: mpDm,
+        mp_sr: mpSr,
+        mp_jr: mpJr
+    });
+
+    return { mpVp, mpDm, mpSr, mpJr, calculated };
+};
+
+const enrichReport07Row = (
+    rawRow: unknown,
+    quotaMap: Map<string, Report7QuotaTotals>,
+    bgNameMap: Map<string, string>,
+    landscapeMap: Map<string, Report7LandscapeTotals>,
+    defaultLandscape: Report7LandscapeTotals | null
+) => {
+    const row = (rawRow && typeof rawRow === 'object') ? (rawRow as Record<string, unknown>) : {};
+    const orgUnitNo = toTrimText(row.org_unit_no);
+    const bgNoCode = toTrimText(row.bg_no);
+    const quota = getReport07QuotaValues(row, quotaMap.get(orgUnitNo));
+    const manpower = getReport07ManpowerValues(row);
+    const shape = getReport07ShapeValues(quota, landscapeMap.get(orgUnitNo) || defaultLandscape);
+    const vacancyTotal = quota.qTotal - manpower.mTotal - manpower.recruitTotal;
+
+    return {
+        ...row,
+        business_unit: bgNameMap.get(bgNoCode) || toTrimText(row.business_unit) || bgNoCode,
+        unit_short: cleanReport7UnitShort(row.unit_short),
+        q_1: quota.q1,
+        q_2: quota.q2,
+        q_3: quota.q3,
+        q_4: quota.q4,
+        q_5: quota.q5,
+        q_6: quota.q6,
+        q_7: quota.q7,
+        q_total: quota.qTotal,
+        t_1: quota.q1 - manpower.m1,
+        t_2: quota.q2 - manpower.m2,
+        t_3: quota.q3 - manpower.m3,
+        t_4: quota.q4 - manpower.m4,
+        t_5: quota.q5 - manpower.m5,
+        t_6: quota.q6 - manpower.m6,
+        t_7: quota.q7 - manpower.m7,
+        total: vacancyTotal,
+        q_8: quota.contractOut,
+        q_10: quota.subContract,
+        frame_contract_out: quota.contractOut,
+        frame_sub_contract: quota.subContract,
+        recruit_total: manpower.recruitTotal,
+        vacancy_total: vacancyTotal,
+        mp_vp: round2(shape.mpVp),
+        mp_dm: round2(shape.mpDm),
+        mp_sr: round2(shape.mpSr),
+        mp_jr: round2(shape.mpJr),
+        mp_total: round2(shape.mpVp + shape.mpDm + shape.mpSr + shape.mpJr),
+        shape_vp: round2(shape.calculated.shape_vp),
+        shape_dm: round2(shape.calculated.shape_dm),
+        shape_sr: round2(shape.calculated.shape_sr),
+        shape_jr: round2(shape.calculated.shape_jr),
+        shape_total: round2(shape.calculated.shape_total),
+        gap_vp: round2(shape.calculated.gap_vp),
+        gap_dm: round2(shape.calculated.gap_dm),
+        gap_sr: round2(shape.calculated.gap_sr),
+        gap_jr: round2(shape.calculated.gap_jr),
+        gap_total: round2(shape.calculated.gap_total)
+    };
+};
+
 export const getReport07DataService = async (
     effectiveDateStr: string,
     employeeId: string,
@@ -1411,291 +1763,107 @@ export const getReport07DataService = async (
 ) => {
     try {
         const report4Rows = await getReport04DataService(effectiveDateStr, employeeId, userGroupNo, division, orgUnitNo, bgNo);
-        const baseRows = report4Rows.map((rawRow, index) => {
-            const row = (rawRow && typeof rawRow === 'object') ? rawRow as Record<string, unknown> : {};
-            const q1 = toNumberOrZero(row.frame_staff_21);
-            const q2 = toNumberOrZero(row.frame_staff_18_20);
-            const q3 = toNumberOrZero(row.frame_staff_16_17);
-            const q4 = toNumberOrZero(row.frame_staff_14_15);
-            const q5 = toNumberOrZero(row.frame_staff_11_13);
-            const q6 = toNumberOrZero(row.frame_staff_9_10);
-            const q7 = toNumberOrZero(row.frame_staff_under_8);
-            const qTotal = toNumberOrZero(row.frame_staff_total) || (q1 + q2 + q3 + q4 + q5 + q6 + q7);
-
-            const m1 = toNumberOrZero(row.people_normal_21);
-            const m2 = toNumberOrZero(row.people_normal_18_20);
-            const m3 = toNumberOrZero(row.people_normal_16_17);
-            const m4 = toNumberOrZero(row.people_normal_14_15);
-            const m5 = toNumberOrZero(row.people_normal_11_13);
-            const m6 = toNumberOrZero(row.people_normal_9_10);
-            const m7 = toNumberOrZero(row.people_normal_under_8);
-            const mTotal = toNumberOrZero(row.people_normal_total) || (m1 + m2 + m3 + m4 + m5 + m6 + m7);
-
-            const t1 = toNumberOrZero(row.vacancy_21);
-            const t2 = toNumberOrZero(row.vacancy_18_20);
-            const t3 = toNumberOrZero(row.vacancy_16_17);
-            const t4 = toNumberOrZero(row.vacancy_14_15);
-            const t5 = toNumberOrZero(row.vacancy_11_13);
-            const t6 = toNumberOrZero(row.vacancy_9_10);
-            const t7 = toNumberOrZero(row.vacancy_under_8);
-            const vacancyTotal = toNumberOrZero(row.vacancy_total) || (t1 + t2 + t3 + t4 + t5 + t6 + t7);
-            const recruitTotal = toNumberOrZero(row.recruit_total);
-
-            return {
-                key: `r7-${index + 1}`,
-                org_unit_no: toTrimText(row.unit_code),
-                parent_org_unit_no: toTrimText(row.line_of_work),
-                lvl: 0,
-                bg_no: '',
-                business_unit: toTrimText(row.business_unit),
-                unit_level: '',
-                unit_level_name: toTrimText(row.level),
-                unit_short: toTrimText(row.unit_short),
-                unit_name: toTrimText(row.unit_name),
-
-                q_1: q1,
-                q_2: q2,
-                q_3: q3,
-                q_4: q4,
-                q_5: q5,
-                q_6: q6,
-                q_7: q7,
-                q_total: qTotal,
-                m_1: m1,
-                m_2: m2,
-                m_3: m3,
-                m_4: m4,
-                m_5: m5,
-                m_6: m6,
-                m_7: m7,
-                m_total: mTotal,
-                f_1: 0,
-                f_2: 0,
-                f_3: 0,
-                f_4: 0,
-                f_5: 0,
-                f_6: 0,
-                f_7: 0,
-                f_total: recruitTotal,
-                t_1: t1,
-                t_2: t2,
-                t_3: t3,
-                t_4: t4,
-                t_5: t5,
-                t_6: t6,
-                t_7: t7,
-                total: vacancyTotal,
-                q_8: toNumberOrZero(row.contact_out),
-                q_10: toNumberOrZero(row.contact_out_sub),
-                remark: toTrimText(row.remark)
-            };
-        });
+        const baseRows = report4Rows.map((rawRow, index) => mapReport07BaseRow(rawRow, index));
         const effectiveDate = new Date(effectiveDateStr);
         const pool = await poolPromise;
+        const [quotaMap, bgNameMap, landscapeContext] = await Promise.all([
+            getReport07QuotaMap(pool, effectiveDate),
+            getReport07BgNameMap(pool, effectiveDate),
+            getReport07LandscapeContext(pool, effectiveDate)
+        ]);
 
-        const quotaRequest = pool.request();
-        quotaRequest.input('EffectiveDate', sql.DateTime, effectiveDate);
-        const quotaRes = await quotaRequest.query(`
-            SELECT
-                OrgUnitNo,
-                SUM(ISNULL(L9907, 0)) AS q_1,
-                SUM(ISNULL(L9906, 0)) AS q_2,
-                SUM(ISNULL(L9905, 0)) AS q_3,
-                SUM(ISNULL(L9904, 0)) AS q_4,
-                SUM(ISNULL(L9903, 0)) AS q_5,
-                SUM(ISNULL(L9902, 0)) AS q_6,
-                SUM(ISNULL(L9901, 0)) AS q_7,
-                SUM(ISNULL(L9907, 0) + ISNULL(L9906, 0) + ISNULL(L9905, 0) + ISNULL(L9904, 0)
-                    + ISNULL(L9903, 0) + ISNULL(L9902, 0) + ISNULL(L9901, 0)) AS q_total,
-                SUM(ISNULL(L9908, 0)) AS q_8,
-                SUM(ISNULL(L9910, 0)) AS q_10
-            FROM MP_QuotaN
-            WHERE EffectiveDate = DATEADD(month, DATEDIFF(month, 0, @EffectiveDate), 0)
-            GROUP BY OrgUnitNo
-        `);
-        const quotaMap = new Map<string, Report7QuotaTotals>();
-        const quotaRows = Array.isArray(quotaRes.recordset) ? quotaRes.recordset : [];
-        quotaRows.forEach((raw) => {
-            const row = (raw && typeof raw === 'object') ? (raw as Record<string, unknown>) : {};
-            const { num, text } = buildRowAccessor(row);
-            const orgUnitNo = text('OrgUnitNo');
-            if (!orgUnitNo) return;
-            quotaMap.set(orgUnitNo, {
-                q_1: num('q_1'),
-                q_2: num('q_2'),
-                q_3: num('q_3'),
-                q_4: num('q_4'),
-                q_5: num('q_5'),
-                q_6: num('q_6'),
-                q_7: num('q_7'),
-                q_total: num('q_total'),
-                q_8: num('q_8'),
-                q_10: num('q_10')
-            });
-        });
-
-        const bgNameRequest = pool.request();
-        bgNameRequest.input('EffectiveDate', sql.DateTime, effectiveDate);
-        const bgNameRes = await bgNameRequest.query(`
-            SELECT BGNo, BGName
-            FROM MP_BG
-            WHERE @EffectiveDate BETWEEN BeginDate AND EndDate
-        `);
-        const bgNameMap = new Map<string, string>();
-        const bgRows = Array.isArray(bgNameRes.recordset) ? bgNameRes.recordset : [];
-        bgRows.forEach((raw) => {
-            const row = (raw && typeof raw === 'object') ? (raw as Record<string, unknown>) : {};
-            const { text } = buildRowAccessor(row);
-            const code = text('BGNo');
-            const name = text('BGName');
-            if (!code || !name) return;
-            bgNameMap.set(code, name);
-        });
-
-        const request = pool.request();
-        request.input('EffectiveDate', sql.DateTime, effectiveDate);
-
-        const landscapeRes = await request.query(`
-            WITH ranked AS (
-                SELECT
-                    OrgUnitNo,
-                    CAST(vp AS decimal(18,4)) AS vp,
-                    CAST(dm AS decimal(18,4)) AS dm,
-                    CAST(sr AS decimal(18,4)) AS sr,
-                    CAST(jr AS decimal(18,4)) AS jr,
-                    BeginDate,
-                    EndDate,
-                    ROW_NUMBER() OVER (
-                        PARTITION BY OrgUnitNo
-                        ORDER BY BeginDate DESC, EndDate DESC
-                    ) AS rn
-                FROM MP_Landscape
-                WHERE @EffectiveDate BETWEEN BeginDate AND EndDate
-            )
-            SELECT OrgUnitNo, vp, dm, sr, jr
-            FROM ranked
-            WHERE rn = 1
-        `);
-
-        const landscapeMap = new Map<string, { vp: number; dm: number; sr: number; jr: number }>();
-        let defaultLandscape: { vp: number; dm: number; sr: number; jr: number } | null = null;
-        const landscapeRows = Array.isArray(landscapeRes.recordset) ? landscapeRes.recordset : [];
-        landscapeRows.forEach((raw) => {
-            const row = (raw && typeof raw === 'object') ? (raw as Record<string, unknown>) : {};
-            const { num, text } = buildRowAccessor(row);
-            const orgUnitNo = text('OrgUnitNo');
-            const landscapeValue = {
-                vp: num('vp'),
-                dm: num('dm'),
-                sr: num('sr'),
-                jr: num('jr')
-            };
-
-            // Business rule: if OrgUnitNo is empty in MP_Landscape,
-            // that row is treated as default for all units.
-            if (!orgUnitNo) {
-                defaultLandscape = landscapeValue;
-                return;
-            }
-
-            landscapeMap.set(orgUnitNo, landscapeValue);
-        });
-
-        const enrichedRows = baseRows.map((rawRow) => {
-            const row = (rawRow && typeof rawRow === 'object') ? (rawRow as Record<string, unknown>) : {};
-            const orgUnitNo = toTrimText(row.org_unit_no);
-            const bgNoCode = toTrimText(row.bg_no);
-            const landscape = landscapeMap.get(orgUnitNo) || defaultLandscape;
-            const quota = quotaMap.get(orgUnitNo);
-
-            const q1 = quota?.q_1 ?? toNumberOrZero(row.q_1);
-            const q2 = quota?.q_2 ?? toNumberOrZero(row.q_2);
-            const q3 = quota?.q_3 ?? toNumberOrZero(row.q_3);
-            const q4 = quota?.q_4 ?? toNumberOrZero(row.q_4);
-            const q5 = quota?.q_5 ?? toNumberOrZero(row.q_5);
-            const q6 = quota?.q_6 ?? toNumberOrZero(row.q_6);
-            const q7 = quota?.q_7 ?? toNumberOrZero(row.q_7);
-            const qTotal = quota?.q_total ?? toNumberOrZero(row.q_total);
-            const contractOut = quota?.q_8 ?? toNumberOrZero(row.q_8);
-            const subContract = quota?.q_10 ?? toNumberOrZero(row.q_10);
-
-            const m1 = toNumberOrZero(row.m_1);
-            const m2 = toNumberOrZero(row.m_2);
-            const m3 = toNumberOrZero(row.m_3);
-            const m4 = toNumberOrZero(row.m_4);
-            const m5 = toNumberOrZero(row.m_5);
-            const m6 = toNumberOrZero(row.m_6);
-            const m7 = toNumberOrZero(row.m_7);
-            const mTotal = toNumberOrZero(row.m_total);
-            const recruitTotal = toNumberOrZero(row.f_total);
-
-            const mpVp = landscape?.vp ?? 0;
-            const mpDm = landscape?.dm ?? 0;
-            const mpSr = landscape?.sr ?? 0;
-            const mpJr = landscape?.jr ?? 0;
-            const mpTotal = mpVp + mpDm + mpSr + mpJr;
-            const calculated = calculateReport7ShapeGapMetrics({
-                q_4: q4,
-                q_5: q5,
-                q_6: q6,
-                q_7: q7,
-                q_total: qTotal,
-                contract_out: contractOut,
-                mp_vp: mpVp,
-                mp_dm: mpDm,
-                mp_sr: mpSr,
-                mp_jr: mpJr
-            });
-
-            return {
-                ...row,
-                business_unit: bgNameMap.get(bgNoCode) || toTrimText(row.business_unit) || bgNoCode,
-                unit_short: cleanReport7UnitShort(row.unit_short),
-                q_1: q1,
-                q_2: q2,
-                q_3: q3,
-                q_4: q4,
-                q_5: q5,
-                q_6: q6,
-                q_7: q7,
-                q_total: qTotal,
-                t_1: q1 - m1,
-                t_2: q2 - m2,
-                t_3: q3 - m3,
-                t_4: q4 - m4,
-                t_5: q5 - m5,
-                t_6: q6 - m6,
-                t_7: q7 - m7,
-                total: qTotal - mTotal - recruitTotal,
-                q_8: contractOut,
-                q_10: subContract,
-                frame_contract_out: contractOut,
-                frame_sub_contract: subContract,
-                recruit_total: recruitTotal,
-                vacancy_total: qTotal - mTotal - recruitTotal,
-                mp_vp: round2(mpVp),
-                mp_dm: round2(mpDm),
-                mp_sr: round2(mpSr),
-                mp_jr: round2(mpJr),
-                mp_total: round2(mpTotal),
-                shape_vp: round2(calculated.shape_vp),
-                shape_dm: round2(calculated.shape_dm),
-                shape_sr: round2(calculated.shape_sr),
-                shape_jr: round2(calculated.shape_jr),
-                shape_total: round2(calculated.shape_total),
-                gap_vp: round2(calculated.gap_vp),
-                gap_dm: round2(calculated.gap_dm),
-                gap_sr: round2(calculated.gap_sr),
-                gap_jr: round2(calculated.gap_jr),
-                gap_total: round2(calculated.gap_total)
-            };
-        });
-
-        return enrichedRows;
+        return baseRows.map((row) => enrichReport07Row(
+            row,
+            quotaMap,
+            bgNameMap,
+            landscapeContext.landscapeMap,
+            landscapeContext.defaultLandscape
+        ));
     } catch (error) {
         console.error('Error in getReport07DataService:', error);
         throw error;
     }
+};
+
+const getReport08BgNameByCode = async (
+    pool: sql.ConnectionPool,
+    structureDate: Date,
+    selectedBgValues: string[]
+) => {
+    const bgNameByCode = new Map<string, string>();
+    if (selectedBgValues.length === 0) return bgNameByCode;
+
+    const bgReq = pool.request();
+    bgReq.input('EffectiveDate', sql.DateTime, structureDate);
+    const bgRes = await bgReq.query(`
+        SELECT BGNo, BGName
+        FROM MP_BG
+        WHERE @EffectiveDate BETWEEN BeginDate AND EndDate
+    `);
+    const bgRows = Array.isArray(bgRes.recordset) ? bgRes.recordset : [];
+    bgRows.forEach((raw) => {
+        const row = (raw && typeof raw === 'object') ? (raw as Record<string, unknown>) : {};
+        const code = toTrimText(row.BGNo);
+        const name = toTrimText(row.BGName);
+        if (code && name) bgNameByCode.set(code, name);
+    });
+
+    return bgNameByCode;
+};
+
+const getReport08SelectedBgNameSet = (
+    selectedBgValues: string[],
+    bgNameByCode: Map<string, string>
+): Set<string> | null => {
+    if (selectedBgValues.length === 0) return null;
+
+    return new Set(
+        selectedBgValues
+            .map((code) => bgNameByCode.get(code) || '')
+            .map((name) => toTrimText(name))
+            .filter((name) => name.length > 0)
+    );
+};
+
+const getReport08RowText = (row: Record<string, unknown>, ...aliases: string[]) => {
+    const lowerMap = new Map<string, unknown>();
+    Object.entries(row).forEach(([key, value]) => lowerMap.set(key.toLowerCase(), value));
+    for (const alias of aliases) {
+        const value = lowerMap.get(alias.toLowerCase());
+        if (value !== undefined && value !== null && value !== '') return toTrimText(value);
+    }
+    return '';
+};
+
+const isReport08RowSelected = (
+    rawRow: unknown,
+    selectedBgCodeSet: Set<string> | null,
+    selectedBgNameSet: Set<string> | null,
+    selectedDivisionSet: Set<string> | null,
+    bgNameByCode: Map<string, string>
+) => {
+    const row = (rawRow && typeof rawRow === 'object') ? (rawRow as Record<string, unknown>) : {};
+    const rowBgNo = getReport08RowText(row, 'BGNo', 'bg_no', 'bgNo');
+    const rowBgName = getReport08RowText(row, 'BGName', 'business_unit', 'Group1', 'group1');
+    const rowDivision = getReport08RowText(
+        row,
+        'SecUnitDummy',
+        'ParentOrgUnitNo',
+        'line_of_work',
+        'Division',
+        'OrgUnitLine',
+        'LineCode',
+        'LineNo',
+        'OrgUnitNo'
+    );
+
+    const rowBgNameFromCode = rowBgNo ? (bgNameByCode.get(rowBgNo) || '') : '';
+    const matchBg =
+        (!selectedBgCodeSet && !selectedBgNameSet) ||
+        matchesSelectedSet(selectedBgCodeSet, [rowBgNo]) ||
+        matchesSelectedSet(selectedBgNameSet, [rowBgName, rowBgNameFromCode]);
+    const matchDivision = matchesSelectedSet(selectedDivisionSet, [rowDivision]);
+    return matchBg && matchDivision;
 };
 
 export const getReport08DataService = async (
@@ -1725,69 +1893,15 @@ export const getReport08DataService = async (
         const structureRes = await structureReq.execute('mp_Report01Get');
         const flatRows = Array.isArray(structureRes.recordset) ? structureRes.recordset : [];
 
-        const bgNameByCode = new Map<string, string>();
-        if (selectedBgValues.length > 0) {
-            const bgReq = pool.request();
-            bgReq.input('EffectiveDate', sql.DateTime, structureDate);
-            const bgRes = await bgReq.query(`
-                SELECT BGNo, BGName
-                FROM MP_BG
-                WHERE @EffectiveDate BETWEEN BeginDate AND EndDate
-            `);
-            const bgRows = Array.isArray(bgRes.recordset) ? bgRes.recordset : [];
-            bgRows.forEach((raw) => {
-                const row = (raw && typeof raw === 'object') ? (raw as Record<string, unknown>) : {};
-                const code = toTrimText(row.BGNo);
-                const name = toTrimText(row.BGName);
-                if (!code || !name) return;
-                bgNameByCode.set(code, name);
-            });
-        }
-        const selectedBgNameSet = selectedBgValues.length > 0
-            ? new Set(
-                selectedBgValues
-                    .map((code) => bgNameByCode.get(code) || '')
-                    .map((name) => toTrimText(name))
-                    .filter((name) => name.length > 0)
-            )
-            : null;
-
-        const getRowText = (row: Record<string, unknown>, ...aliases: string[]) => {
-            const lowerMap = new Map<string, unknown>();
-            Object.entries(row).forEach(([key, value]) => lowerMap.set(key.toLowerCase(), value));
-            for (const alias of aliases) {
-                const value = lowerMap.get(alias.toLowerCase());
-                if (value !== undefined && value !== null && value !== '') {
-                    return toTrimText(value);
-                }
-            }
-            return '';
-        };
-
-        const filteredRows = flatRows.filter((rawRow) => {
-            const row = (rawRow && typeof rawRow === 'object') ? (rawRow as Record<string, unknown>) : {};
-            const rowBgNo = getRowText(row, 'BGNo', 'bg_no', 'bgNo');
-            const rowBgName = getRowText(row, 'BGName', 'business_unit', 'Group1', 'group1');
-            const rowDivision = getRowText(
-                row,
-                'SecUnitDummy',
-                'ParentOrgUnitNo',
-                'line_of_work',
-                'Division',
-                'OrgUnitLine',
-                'LineCode',
-                'LineNo',
-                'OrgUnitNo'
-            );
-
-            const rowBgNameFromCode = rowBgNo ? (bgNameByCode.get(rowBgNo) || '') : '';
-            const matchBg =
-                (!selectedBgCodeSet && !selectedBgNameSet) ||
-                matchesSelectedSet(selectedBgCodeSet, [rowBgNo]) ||
-                matchesSelectedSet(selectedBgNameSet, [rowBgName, rowBgNameFromCode]);
-            const matchDivision = matchesSelectedSet(selectedDivisionSet, [rowDivision]);
-            return matchBg && matchDivision;
-        });
+        const bgNameByCode = await getReport08BgNameByCode(pool, structureDate, selectedBgValues);
+        const selectedBgNameSet = getReport08SelectedBgNameSet(selectedBgValues, bgNameByCode);
+        const filteredRows = flatRows.filter((rawRow) => isReport08RowSelected(
+            rawRow,
+            selectedBgCodeSet,
+            selectedBgNameSet,
+            selectedDivisionSet,
+            bgNameByCode
+        ));
 
         const [positionMap, costMap] = await Promise.all([
             getReport08PositionMap(pool, structureDate),
@@ -1960,94 +2074,87 @@ const getReport09RetirementLevelFilter = async (
     }
 };
 
-const getReport09RetirementMap = async (
-    pool: any,
-    effectiveYear: number,
-    structureDate: Date,
-    structureIsSecondment: number | null
-): Promise<Report09OrgYearMap> => {
+const getReport09RetirementYearRange = (effectiveYear: number) => {
     const displayYears = buildReport09Years(effectiveYear);
-    const fromYear = displayYears[0];
-    const toYear = displayYears[displayYears.length - 1];
+    return {
+        fromYear: displayYears[0],
+        toYear: displayYears[displayYears.length - 1]
+    };
+};
 
-    const infoMeta = await getTableMeta(pool, REPORT09_INFO_TABLE_CANDIDATES);
-    const positionMeta = await getTableMeta(pool, REPORT09_POSITION_TABLE_CANDIDATES);
-    const unitMeta = await getObjectMeta(pool, REPORT09_UNIT_FN_CANDIDATES);
-    if (!infoMeta || !positionMeta) return new Map();
+type Report09RetirementColumns = {
+    retireYearCol: string;
+    infoEmployeeCol: string | null;
+    infoSecondmentTextCol: string | null;
+    infoPosCol: string;
+    positionIdCol: string;
+    orgCol: string;
+    orgTypeCol: string;
+    levelCol: string | null;
+    bsTypeCol: string;
+    unitBgCol: string | null;
+    unitNameCol: string | null;
+    unitAbbrCol: string | null;
+    signPosCol: string | null;
+    employeeCol: string | null;
+};
 
+const getReport09RetirementColumns = (infoMeta: any, positionMeta: any, unitMeta: any): Report09RetirementColumns | null => {
     const retireYearCol = pickColumnName(infoMeta.columns, REPORT09_RETIRE_YEAR_COL_CANDIDATES);
-    const infoEmployeeCol = pickColumnName(infoMeta.columns, REPORT09_INFO_EMPLOYEE_COL_CANDIDATES);
-    const infoSecondmentTextCol = pickColumnName(infoMeta.columns, REPORT09_INFO_SECONDMENT_TEXT_COL_CANDIDATES);
     const infoPosCol = pickColumnName(infoMeta.columns, REPORT09_INFO_POSITION_COL_CANDIDATES);
     const positionIdCol = pickColumnName(positionMeta.columns, REPORT09_POSITION_ID_COL_CANDIDATES);
     const orgCol = pickColumnName(positionMeta.columns, REPORT09_ORG_COL_CANDIDATES);
     const orgTypeCol = pickColumnName(positionMeta.columns, REPORT09_ORG_TYPE_COL_CANDIDATES);
-    const levelCol = pickColumnName(positionMeta.columns, REPORT09_LEVEL_COL_CANDIDATES);
     const bsTypeCol = pickColumnName(positionMeta.columns, REPORT09_BS_TYPE_COL_CANDIDATES);
-    if (!retireYearCol || !infoPosCol || !positionIdCol || !orgCol || !orgTypeCol || !bsTypeCol) return new Map();
 
-    const unitBgCol = pickColumnName(unitMeta?.columns || new Map<string, string>(), REPORT09_UNIT_BG_COL_CANDIDATES);
-    const unitNameCol = pickColumnName(unitMeta?.columns || new Map<string, string>(), REPORT09_UNIT_NAME_COL_CANDIDATES);
-    const unitAbbrCol = pickColumnName(unitMeta?.columns || new Map<string, string>(), REPORT09_UNIT_ABBR_COL_CANDIDATES);
+    if (!retireYearCol || !infoPosCol || !positionIdCol || !orgCol || !orgTypeCol || !bsTypeCol) {
+        return null;
+    }
 
-    const signPosCol = pickColumnName(positionMeta.columns, REPORT09_SIGN_POS_COL_CANDIDATES);
-    const employeeCol = pickColumnName(positionMeta.columns, REPORT09_EMPLOYEE_COL_CANDIDATES);
+    return {
+        retireYearCol,
+        infoEmployeeCol: pickColumnName(infoMeta.columns, REPORT09_INFO_EMPLOYEE_COL_CANDIDATES),
+        infoSecondmentTextCol: pickColumnName(infoMeta.columns, REPORT09_INFO_SECONDMENT_TEXT_COL_CANDIDATES),
+        infoPosCol,
+        positionIdCol,
+        orgCol,
+        orgTypeCol,
+        levelCol: pickColumnName(positionMeta.columns, REPORT09_LEVEL_COL_CANDIDATES),
+        bsTypeCol,
+        unitBgCol: pickColumnName(unitMeta?.columns || new Map<string, string>(), REPORT09_UNIT_BG_COL_CANDIDATES),
+        unitNameCol: pickColumnName(unitMeta?.columns || new Map<string, string>(), REPORT09_UNIT_NAME_COL_CANDIDATES),
+        unitAbbrCol: pickColumnName(unitMeta?.columns || new Map<string, string>(), REPORT09_UNIT_ABBR_COL_CANDIDATES),
+        signPosCol: pickColumnName(positionMeta.columns, REPORT09_SIGN_POS_COL_CANDIDATES),
+        employeeCol: pickColumnName(positionMeta.columns, REPORT09_EMPLOYEE_COL_CANDIDATES)
+    };
+};
 
-    const signPosCondition = signPosCol
-        ? `AND pos.${escapeSqlIdentifier(signPosCol)} = '100'`
-        : '';
-    const infoSecondmentCondition = infoSecondmentTextCol
-        ? `AND info.${escapeSqlIdentifier(infoSecondmentTextCol)} IN ('Employee', 'EMPLOYEE', 'employee')`
-        : '';
-    const countDistinctEmployeeExpr = infoEmployeeCol
-        ? `info.${escapeSqlIdentifier(infoEmployeeCol)}`
-        : employeeCol
-            ? `pos.${escapeSqlIdentifier(employeeCol)}`
-            : '';
-    const countExpr = countDistinctEmployeeExpr
-        ? `COUNT(DISTINCT ${countDistinctEmployeeExpr})`
-        : 'COUNT(1)';
+const getReport09RetirementEmployeeExpr = (columns: Report09RetirementColumns) => {
+    if (columns.infoEmployeeCol) return `info.${escapeSqlIdentifier(columns.infoEmployeeCol)}`;
+    if (columns.employeeCol) return `pos.${escapeSqlIdentifier(columns.employeeCol)}`;
+    return '';
+};
 
-    const orgKeyExpr = structureIsSecondment === 0
-        ? `
-            CASE
-                WHEN ISNULL(unit.IsSecondment, 0) = 1
-                     AND rt.Reportto IS NOT NULL
-                     AND rt.Reportto <> ''
-                    THEN rt.Reportto
-                ELSE pos.${escapeSqlIdentifier(orgCol)}
-            END
-        `
-        : `pos.${escapeSqlIdentifier(orgCol)}`;
+const getReport09RetirementCountExpr = (sourceEmployeeExpr: string) =>
+    sourceEmployeeExpr ? `COUNT(DISTINCT ${sourceEmployeeExpr})` : 'COUNT(1)';
 
-    const mappedOrgForUnitJoinExpr = structureIsSecondment === 0
-        ? `
-            CASE
-                WHEN ISNULL(unit.IsSecondment, 0) = 1
-                     AND rt.Reportto IS NOT NULL
-                     AND rt.Reportto <> ''
-                    THEN rt.Reportto
-                ELSE pos.${escapeSqlIdentifier(orgCol)}
-            END
-        `
-        : `pos.${escapeSqlIdentifier(orgCol)}`;
+const getReport09RetirementOrgExpr = (
+    orgCol: string,
+    structureIsSecondment: number | null
+) => structureIsSecondment === 0
+    ? `
+        CASE
+            WHEN ISNULL(unit.IsSecondment, 0) = 1
+                 AND rt.Reportto IS NOT NULL
+                 AND rt.Reportto <> ''
+                THEN rt.Reportto
+            ELSE pos.${escapeSqlIdentifier(orgCol)}
+        END
+    `
+    : `pos.${escapeSqlIdentifier(orgCol)}`;
 
-    const joinStructureForMapping = `
-        LEFT JOIN fn_InterfaceUnit(@EffectiveDate) unit
-            ON unit.OrgUnitNo = pos.${escapeSqlIdentifier(orgCol)}
-        LEFT JOIN fn_InterfaceReportto(@EffectiveDate) rt
-            ON rt.OrgUnitNo = pos.${escapeSqlIdentifier(orgCol)}
-        LEFT JOIN fn_InterfaceUnit(@EffectiveDate) mappedUnit
-            ON mappedUnit.OrgUnitNo = ${mappedOrgForUnitJoinExpr}
-        `;
-
-    const sourceEmployeeExpr = infoEmployeeCol
-        ? `info.${escapeSqlIdentifier(infoEmployeeCol)}`
-        : employeeCol
-            ? `pos.${escapeSqlIdentifier(employeeCol)}`
-            : '';
-
-    const effectiveRetireYearExpr = sourceEmployeeExpr
+const getReport09RetirementDelaySql = (sourceEmployeeExpr: string, retireYearCol: string) => ({
+    effectiveRetireYearExpr: sourceEmployeeExpr
         ? `
             CASE
                 WHEN delay.delay_year = ${REPORT09_NON_COUNT_DELAY_YEAR}
@@ -2057,9 +2164,8 @@ const getReport09RetirementMap = async (
                 ELSE info.${escapeSqlIdentifier(retireYearCol)}
             END
         `
-        : `info.${escapeSqlIdentifier(retireYearCol)}`;
-
-    const joinDelayForOverride = sourceEmployeeExpr
+        : `info.${escapeSqlIdentifier(retireYearCol)}`,
+    joinDelayForOverride: sourceEmployeeExpr
         ? `
         LEFT JOIN (
             SELECT employee_id, delay_year
@@ -2081,43 +2187,105 @@ const getReport09RetirementMap = async (
         ) delay
             ON delay.employee_id = ${sourceEmployeeExpr}
         `
+        : ''
+});
+
+const getReport09RetirementFilterConditions = (
+    columns: Report09RetirementColumns,
+    allowedLevelGroupNos: string[]
+) => {
+    const signPosCondition = columns.signPosCol ? `AND pos.${escapeSqlIdentifier(columns.signPosCol)} = '100'` : '';
+    const infoSecondmentCondition = columns.infoSecondmentTextCol
+        ? `AND info.${escapeSqlIdentifier(columns.infoSecondmentTextCol)} IN ('Employee', 'EMPLOYEE', 'employee')`
+        : '';
+    const allowedLevelGroupList = allowedLevelGroupNos.map((value) => `'${escapeSqlString(value)}'`).join(',');
+    const levelFilterCondition = columns.levelCol && allowedLevelGroupNos.length > 0
+        ? `AND pos.${escapeSqlIdentifier(columns.levelCol)} IN (${allowedLevelGroupList})`
         : '';
 
-    const { allowedLevelGroupNos } = await getReport09RetirementLevelFilter(pool, effectiveYear);
-    const levelFilterCondition = levelCol && allowedLevelGroupNos.length > 0
-        ? `AND pos.${escapeSqlIdentifier(levelCol)} IN (${allowedLevelGroupNos.map((value) => `'${escapeSqlString(value)}'`).join(',')})`
-        : '';
+    return { signPosCondition, infoSecondmentCondition, levelFilterCondition };
+};
 
-    const unitBgExpr = unitBgCol
-        ? `unit.${escapeSqlIdentifier(unitBgCol)}`
-        : `''`;
-    const mappedUnitBgExpr = unitBgCol
-        ? `mappedUnit.${escapeSqlIdentifier(unitBgCol)}`
-        : `''`;
-    const unitNameExpr = unitNameCol
-        ? `UPPER(unit.${escapeSqlIdentifier(unitNameCol)})`
-        : `''`;
-    const unitAbbrExpr = unitAbbrCol
-        ? `UPPER(unit.${escapeSqlIdentifier(unitAbbrCol)})`
-        : `''`;
+const getReport09RetirementBucketExpr = (columns: Report09RetirementColumns) => {
+    const unitBgExpr = columns.unitBgCol ? `unit.${escapeSqlIdentifier(columns.unitBgCol)}` : `''`;
+    const mappedUnitBgExpr = columns.unitBgCol ? `mappedUnit.${escapeSqlIdentifier(columns.unitBgCol)}` : `''`;
+    const unitNameExpr = columns.unitNameCol ? `UPPER(unit.${escapeSqlIdentifier(columns.unitNameCol)})` : `''`;
+    const unitAbbrExpr = columns.unitAbbrCol ? `UPPER(unit.${escapeSqlIdentifier(columns.unitAbbrCol)})` : `''`;
     const hoConditions = [
-        unitBgCol ? `${unitBgExpr} = '905'` : '',
-        unitNameCol ? `${unitNameExpr} IN (N'HO', N'HEAD OFFICE', N'สำนักงานใหญ่')` : '',
-        unitAbbrCol ? `${unitAbbrExpr} = N'HO'` : ''
+        columns.unitBgCol ? `${unitBgExpr} = '905'` : '',
+        columns.unitNameCol ? `${unitNameExpr} IN (N'HO', N'HEAD OFFICE', N'สำนักงานใหญ่')` : '',
+        columns.unitAbbrCol ? `${unitAbbrExpr} = N'HO'` : ''
     ].filter(Boolean);
-    const isHoExpr = hoConditions.length > 0
-        ? `(${hoConditions.join(' OR ')})`
-        : '1 = 0';
-    const report09BucketExpr = `
+    const isHoExpr = hoConditions.length > 0 ? `(${hoConditions.join(' OR ')})` : '1 = 0';
+
+    return `
         CASE
             WHEN ${isHoExpr} THEN 2
             WHEN ${mappedUnitBgExpr} = '905'
-                 AND pos.${escapeSqlIdentifier(bsTypeCol)} IS NULL THEN 2
-            WHEN pos.${escapeSqlIdentifier(orgTypeCol)} = 2
-                 AND pos.${escapeSqlIdentifier(bsTypeCol)} = 2 THEN 2
+                 AND pos.${escapeSqlIdentifier(columns.bsTypeCol)} IS NULL THEN 2
+            WHEN pos.${escapeSqlIdentifier(columns.orgTypeCol)} = 2
+                 AND pos.${escapeSqlIdentifier(columns.bsTypeCol)} = 2 THEN 2
             ELSE 1
         END
     `;
+};
+
+const addReport09RetirementRow = (map: Report09OrgYearMap, row: Record<string, unknown>) => {
+    const orgUnitId = normalizeReport09OrgUnitKey(row.org_unit_id);
+    const retireYear = toNumberOrZero(row.retire_year);
+    const bsType = toNumberOrZero(row.bs_type) === 2 ? 2 : 1;
+    const count = toNumberOrZero(row.retire_count);
+    if (!orgUnitId || !retireYear || count <= 0) return;
+
+    if (!map.has(orgUnitId)) map.set(orgUnitId, new Map());
+    const perOrg = map.get(orgUnitId)!;
+    const current = perOrg.get(retireYear) || { support: 0, bu: 0 };
+    if (bsType === 2) current.support += count;
+    else current.bu += count;
+    perOrg.set(retireYear, current);
+};
+
+const buildReport09RetirementMap = (recordset: unknown): Report09OrgYearMap => {
+    const rows = Array.isArray(recordset) ? recordset as Array<Record<string, unknown>> : [];
+    const map: Report09OrgYearMap = new Map();
+    rows.forEach((row) => addReport09RetirementRow(map, row));
+    return map;
+};
+
+const getReport09RetirementMap = async (
+    pool: any,
+    effectiveYear: number,
+    structureDate: Date,
+    structureIsSecondment: number | null
+): Promise<Report09OrgYearMap> => {
+    const { fromYear, toYear } = getReport09RetirementYearRange(effectiveYear);
+
+    const infoMeta = await getTableMeta(pool, REPORT09_INFO_TABLE_CANDIDATES);
+    const positionMeta = await getTableMeta(pool, REPORT09_POSITION_TABLE_CANDIDATES);
+    const unitMeta = await getObjectMeta(pool, REPORT09_UNIT_FN_CANDIDATES);
+    if (!infoMeta || !positionMeta) return new Map();
+
+    const columns = getReport09RetirementColumns(infoMeta, positionMeta, unitMeta);
+    if (!columns) return new Map();
+
+    const sourceEmployeeExpr = getReport09RetirementEmployeeExpr(columns);
+    const countExpr = getReport09RetirementCountExpr(sourceEmployeeExpr);
+    const orgKeyExpr = getReport09RetirementOrgExpr(columns.orgCol, structureIsSecondment);
+    const mappedOrgForUnitJoinExpr = getReport09RetirementOrgExpr(columns.orgCol, structureIsSecondment);
+
+    const joinStructureForMapping = `
+        LEFT JOIN fn_InterfaceUnit(@EffectiveDate) unit
+            ON unit.OrgUnitNo = pos.${escapeSqlIdentifier(columns.orgCol)}
+        LEFT JOIN fn_InterfaceReportto(@EffectiveDate) rt
+            ON rt.OrgUnitNo = pos.${escapeSqlIdentifier(columns.orgCol)}
+        LEFT JOIN fn_InterfaceUnit(@EffectiveDate) mappedUnit
+            ON mappedUnit.OrgUnitNo = ${mappedOrgForUnitJoinExpr}
+        `;
+
+    const { effectiveRetireYearExpr, joinDelayForOverride } = getReport09RetirementDelaySql(sourceEmployeeExpr, columns.retireYearCol);
+    const { allowedLevelGroupNos } = await getReport09RetirementLevelFilter(pool, effectiveYear);
+    const { signPosCondition, infoSecondmentCondition, levelFilterCondition } = getReport09RetirementFilterConditions(columns, allowedLevelGroupNos);
+    const report09BucketExpr = getReport09RetirementBucketExpr(columns);
 
     const query = `
         SELECT
@@ -2127,7 +2295,7 @@ const getReport09RetirementMap = async (
             ${countExpr} AS retire_count
         FROM ${infoMeta.fullName} info
         INNER JOIN ${positionMeta.fullName} pos
-            ON pos.${escapeSqlIdentifier(positionIdCol)} = info.${escapeSqlIdentifier(infoPosCol)}
+            ON pos.${escapeSqlIdentifier(columns.positionIdCol)} = info.${escapeSqlIdentifier(columns.infoPosCol)}
         ${joinDelayForOverride}
         ${joinStructureForMapping}
         WHERE ${effectiveRetireYearExpr} BETWEEN @FromYear AND @ToYear
@@ -2147,28 +2315,158 @@ const getReport09RetirementMap = async (
         .input('EffectiveDate', sql.DateTime, structureDate)
         .query(query);
 
-    const rows = Array.isArray(result.recordset) ? result.recordset as Array<Record<string, unknown>> : [];
-    const map: Report09OrgYearMap = new Map();
-
-    rows.forEach((row) => {
-        const orgUnitId = normalizeReport09OrgUnitKey(row.org_unit_id);
-        const retireYear = toNumberOrZero(row.retire_year);
-        const bsType = toNumberOrZero(row.bs_type) === 2 ? 2 : 1;
-        const count = toNumberOrZero(row.retire_count);
-        if (!orgUnitId || !retireYear || count <= 0) return;
-
-        if (!map.has(orgUnitId)) map.set(orgUnitId, new Map());
-        const perOrg = map.get(orgUnitId)!;
-        const current = perOrg.get(retireYear) || { support: 0, bu: 0 };
-
-        if (bsType === 2) current.support += count;
-        else current.bu += count;
-
-        perOrg.set(retireYear, current);
-    });
-
-    return map;
+    return buildReport09RetirementMap(result.recordset);
 };
+
+const getReport09AuditYearContext = (effectiveYear: number) => {
+    const safeEffectiveYear = toNumberOrZero(effectiveYear) || (new Date().getFullYear() + 543);
+    const effectiveYearAD = safeEffectiveYear > 2500 ? safeEffectiveYear - 543 : safeEffectiveYear;
+    const displayYears = buildReport09Years(safeEffectiveYear);
+
+    return {
+        safeEffectiveYear,
+        structureDate: new Date(`${effectiveYearAD}-01-01T00:00:00`),
+        displayYears,
+        fromYear: displayYears[0],
+        toYear: displayYears[displayYears.length - 1]
+    };
+};
+
+type Report09AuditColumns = {
+    retireYearCol: string;
+    infoEmployeeCol: string | null;
+    infoSecondmentTextCol: string | null;
+    infoPosCol: string;
+    positionIdCol: string;
+    orgCol: string;
+    orgTypeCol: string;
+    levelCol: string | null;
+    bsTypeCol: string;
+    unitBgCol: string | null;
+    unitNameCol: string | null;
+    unitAbbrCol: string | null;
+    signPosCol: string | null;
+    employeeCol: string | null;
+};
+
+const getReport09AuditColumns = (infoMeta: any, positionMeta: any, unitMeta: any): Report09AuditColumns => {
+    const retireYearCol = pickColumnName(infoMeta.columns, REPORT09_RETIRE_YEAR_COL_CANDIDATES);
+    const infoPosCol = pickColumnName(infoMeta.columns, REPORT09_INFO_POSITION_COL_CANDIDATES);
+    const positionIdCol = pickColumnName(positionMeta.columns, REPORT09_POSITION_ID_COL_CANDIDATES);
+    const orgCol = pickColumnName(positionMeta.columns, REPORT09_ORG_COL_CANDIDATES);
+    const orgTypeCol = pickColumnName(positionMeta.columns, REPORT09_ORG_TYPE_COL_CANDIDATES);
+    const bsTypeCol = pickColumnName(positionMeta.columns, REPORT09_BS_TYPE_COL_CANDIDATES);
+
+    if (!retireYearCol || !infoPosCol || !positionIdCol || !orgCol || !orgTypeCol || !bsTypeCol) {
+        throw new Error('Report09 required columns are unavailable');
+    }
+
+    return {
+        retireYearCol,
+        infoEmployeeCol: pickColumnName(infoMeta.columns, REPORT09_INFO_EMPLOYEE_COL_CANDIDATES),
+        infoSecondmentTextCol: pickColumnName(infoMeta.columns, REPORT09_INFO_SECONDMENT_TEXT_COL_CANDIDATES),
+        infoPosCol,
+        positionIdCol,
+        orgCol,
+        orgTypeCol,
+        levelCol: pickColumnName(positionMeta.columns, REPORT09_LEVEL_COL_CANDIDATES),
+        bsTypeCol,
+        unitBgCol: pickColumnName(unitMeta?.columns || new Map<string, string>(), REPORT09_UNIT_BG_COL_CANDIDATES),
+        unitNameCol: pickColumnName(unitMeta?.columns || new Map<string, string>(), REPORT09_UNIT_NAME_COL_CANDIDATES),
+        unitAbbrCol: pickColumnName(unitMeta?.columns || new Map<string, string>(), REPORT09_UNIT_ABBR_COL_CANDIDATES),
+        signPosCol: pickColumnName(positionMeta.columns, REPORT09_SIGN_POS_COL_CANDIDATES),
+        employeeCol: pickColumnName(positionMeta.columns, REPORT09_EMPLOYEE_COL_CANDIDATES)
+    };
+};
+
+const getReport09AuditEmployeeExpr = (columns: Report09AuditColumns) => {
+    if (columns.infoEmployeeCol) {
+        return `LTRIM(RTRIM(CAST(info.${escapeSqlIdentifier(columns.infoEmployeeCol)} AS nvarchar(64))))`;
+    }
+    if (columns.employeeCol) {
+        return `LTRIM(RTRIM(CAST(pos.${escapeSqlIdentifier(columns.employeeCol)} AS nvarchar(64))))`;
+    }
+    return `LTRIM(RTRIM(CAST(pos.${escapeSqlIdentifier(columns.positionIdCol)} AS nvarchar(64))))`;
+};
+
+const getReport09AuditMappedOrgExpr = (originalOrgExpr: string, structureIsSecondment: number) => structureIsSecondment === 0
+    ? `
+        CASE
+            WHEN ISNULL(srcUnit.IsSecondment, 0) = 1
+                 AND rt.Reportto IS NOT NULL
+                 AND LTRIM(RTRIM(CAST(rt.Reportto AS nvarchar(32)))) <> ''
+                THEN LTRIM(RTRIM(CAST(rt.Reportto AS nvarchar(32))))
+            ELSE ${originalOrgExpr}
+        END
+    `
+    : originalOrgExpr;
+
+const getReport09AuditPassExprs = (columns: Report09AuditColumns, allowedLevelGroupNos: string[]) => {
+    const employeeConditionExpr = columns.infoSecondmentTextCol
+        ? `CASE WHEN UPPER(LTRIM(RTRIM(CAST(info.${escapeSqlIdentifier(columns.infoSecondmentTextCol)} AS nvarchar(64))))) = 'EMPLOYEE' THEN 1 ELSE 0 END`
+        : '1';
+    const signPosConditionExpr = columns.signPosCol
+        ? `CASE WHEN TRY_CONVERT(int, pos.${escapeSqlIdentifier(columns.signPosCol)}) = 100 THEN 1 ELSE 0 END`
+        : '1';
+    const allowedLevelGroupList = allowedLevelGroupNos.map((value) => `'${escapeSqlString(value)}'`).join(',');
+    const levelConditionExpr = columns.levelCol && allowedLevelGroupNos.length > 0
+        ? `CASE WHEN LTRIM(RTRIM(CAST(pos.${escapeSqlIdentifier(columns.levelCol)} AS nvarchar(16)))) IN (${allowedLevelGroupList}) THEN 1 ELSE 0 END`
+        : '1';
+
+    return { employeeConditionExpr, signPosConditionExpr, levelConditionExpr };
+};
+
+const getReport09AuditUnitExprs = (columns: Report09AuditColumns, mappedOrgExpr: string) => ({
+    unitBgExpr: columns.unitBgCol
+        ? `LTRIM(RTRIM(CAST(srcUnit.${escapeSqlIdentifier(columns.unitBgCol)} AS nvarchar(32))))`
+        : `''`,
+    mappedUnitBgExpr: columns.unitBgCol
+        ? `LTRIM(RTRIM(CAST(mappedUnit.${escapeSqlIdentifier(columns.unitBgCol)} AS nvarchar(32))))`
+        : `''`,
+    unitNameExpr: columns.unitNameCol
+        ? `UPPER(LTRIM(RTRIM(CAST(srcUnit.${escapeSqlIdentifier(columns.unitNameCol)} AS nvarchar(255)))))`
+        : `''`,
+    unitAbbrExpr: columns.unitAbbrCol
+        ? `UPPER(LTRIM(RTRIM(CAST(srcUnit.${escapeSqlIdentifier(columns.unitAbbrCol)} AS nvarchar(255)))))`
+        : `''`,
+    mappedUnitNameExpr: columns.unitNameCol
+        ? `LTRIM(RTRIM(CAST(mappedUnit.${escapeSqlIdentifier(columns.unitNameCol)} AS nvarchar(255))))`
+        : mappedOrgExpr,
+    mappedUnitAbbrExpr: columns.unitAbbrCol
+        ? `LTRIM(RTRIM(CAST(mappedUnit.${escapeSqlIdentifier(columns.unitAbbrCol)} AS nvarchar(255))))`
+        : mappedOrgExpr
+});
+
+const getReport09AuditHoExpr = (columns: Report09AuditColumns, unitExprs: ReturnType<typeof getReport09AuditUnitExprs>) => {
+    const hoConditions = [
+        columns.unitBgCol ? `${unitExprs.unitBgExpr} = '905'` : '',
+        columns.unitNameCol ? `${unitExprs.unitNameExpr} IN (N'HO', N'HEAD OFFICE', N'สำนักงานใหญ่')` : '',
+        columns.unitAbbrCol ? `${unitExprs.unitAbbrExpr} = N'HO'` : ''
+    ].filter(Boolean);
+
+    return hoConditions.length > 0 ? `(${hoConditions.join(' OR ')})` : '1 = 0';
+};
+
+const mapReport09AuditRows = (recordset: unknown): Report09AuditRow[] => (Array.isArray(recordset) ? recordset : [])
+    .map((row: Record<string, unknown>): Report09AuditRow => ({
+        stage_code: toTrimText(row.stage_code),
+        stage_name: toTrimText(row.stage_name),
+        org_unit_id: normalizeReport09OrgUnitKey(row.org_unit_id),
+        unit_abbr: toTrimText(row.unit_abbr),
+        unit_name: toTrimText(row.unit_name),
+        retire_year: toNumberOrZero(row.retire_year),
+        bs_type: toTrimText(row.bs_type) === 'Support' ? 'Support' : 'BU',
+        position_rows: toNumberOrZero(row.position_rows),
+        employee_count: toNumberOrZero(row.employee_count)
+    }));
+
+const getReport09AuditStageDescriptions = () => [
+    { stage_code: '01', stage_name: 'ช่วงปีเกษียณ', description: 'Join infodata + InterfacePosition และปีเกษียณอยู่ในช่วง 5 ปีที่แสดง โดยใช้ MP_Delay override แล้ว' },
+    { stage_code: '02', stage_name: 'เฉพาะ Employee', description: 'ผ่านเงื่อนไข infodata.Secondment_text = Employee' },
+    { stage_code: '03', stage_name: 'เฉพาะ SignPos=100', description: 'ผ่านเงื่อนไข SignPos = 100 ถ้าตารางมี column นี้' },
+    { stage_code: '04', stage_name: 'เฉพาะ Level ที่ใช้คำนวณ', description: 'ผ่าน LevelGroupNo ตาม MP_BUSupportRateRemark และ MP_LevelGroup' },
+    { stage_code: '05', stage_name: 'มีหน่วยงานหลัง map secondment', description: 'ผ่านทุกเงื่อนไขสุดท้าย และมี OrgUnit หลัง map secondment ไป Reportto' }
+];
 
 export const getReport09AuditService = async (
     effectiveYear: number
@@ -2182,12 +2480,7 @@ export const getReport09AuditService = async (
     };
     rows: Report09AuditRow[];
 }> => {
-    const safeEffectiveYear = toNumberOrZero(effectiveYear) || (new Date().getFullYear() + 543);
-    const effectiveYearAD = safeEffectiveYear > 2500 ? safeEffectiveYear - 543 : safeEffectiveYear;
-    const structureDate = new Date(`${effectiveYearAD}-01-01T00:00:00`);
-    const displayYears = buildReport09Years(safeEffectiveYear);
-    const fromYear = displayYears[0];
-    const toYear = displayYears[displayYears.length - 1];
+    const { safeEffectiveYear, structureDate, displayYears, fromYear, toYear } = getReport09AuditYearContext(effectiveYear);
     const structureIsSecondment = 0;
     const pool = await poolPromise;
 
@@ -2197,98 +2490,33 @@ export const getReport09AuditService = async (
     if (!infoMeta || !positionMeta) {
         throw new Error('Report09 source tables are unavailable');
     }
+    const columns = getReport09AuditColumns(infoMeta, positionMeta, unitMeta);
 
-    const retireYearCol = pickColumnName(infoMeta.columns, REPORT09_RETIRE_YEAR_COL_CANDIDATES);
-    const infoEmployeeCol = pickColumnName(infoMeta.columns, REPORT09_INFO_EMPLOYEE_COL_CANDIDATES);
-    const infoSecondmentTextCol = pickColumnName(infoMeta.columns, REPORT09_INFO_SECONDMENT_TEXT_COL_CANDIDATES);
-    const infoPosCol = pickColumnName(infoMeta.columns, REPORT09_INFO_POSITION_COL_CANDIDATES);
-    const positionIdCol = pickColumnName(positionMeta.columns, REPORT09_POSITION_ID_COL_CANDIDATES);
-    const orgCol = pickColumnName(positionMeta.columns, REPORT09_ORG_COL_CANDIDATES);
-    const orgTypeCol = pickColumnName(positionMeta.columns, REPORT09_ORG_TYPE_COL_CANDIDATES);
-    const levelCol = pickColumnName(positionMeta.columns, REPORT09_LEVEL_COL_CANDIDATES);
-    const bsTypeCol = pickColumnName(positionMeta.columns, REPORT09_BS_TYPE_COL_CANDIDATES);
-    if (!retireYearCol || !infoPosCol || !positionIdCol || !orgCol || !orgTypeCol || !bsTypeCol) {
-        throw new Error('Report09 required columns are unavailable');
-    }
-
-    const unitBgCol = pickColumnName(unitMeta?.columns || new Map<string, string>(), REPORT09_UNIT_BG_COL_CANDIDATES);
-    const unitNameCol = pickColumnName(unitMeta?.columns || new Map<string, string>(), REPORT09_UNIT_NAME_COL_CANDIDATES);
-    const unitAbbrCol = pickColumnName(unitMeta?.columns || new Map<string, string>(), REPORT09_UNIT_ABBR_COL_CANDIDATES);
-    const signPosCol = pickColumnName(positionMeta.columns, REPORT09_SIGN_POS_COL_CANDIDATES);
-    const employeeCol = pickColumnName(positionMeta.columns, REPORT09_EMPLOYEE_COL_CANDIDATES);
-
-    const sourceEmployeeExpr = infoEmployeeCol
-        ? `LTRIM(RTRIM(CAST(info.${escapeSqlIdentifier(infoEmployeeCol)} AS nvarchar(64))))`
-        : employeeCol
-            ? `LTRIM(RTRIM(CAST(pos.${escapeSqlIdentifier(employeeCol)} AS nvarchar(64))))`
-            : `LTRIM(RTRIM(CAST(pos.${escapeSqlIdentifier(positionIdCol)} AS nvarchar(64))))`;
+    const sourceEmployeeExpr = getReport09AuditEmployeeExpr(columns);
     const employeeKeyExpr = `NULLIF(${sourceEmployeeExpr}, '')`;
-    const originalOrgExpr = `LTRIM(RTRIM(CAST(pos.${escapeSqlIdentifier(orgCol)} AS nvarchar(32))))`;
-    const mappedOrgExpr = structureIsSecondment === 0
-        ? `
-            CASE
-                WHEN ISNULL(srcUnit.IsSecondment, 0) = 1
-                     AND rt.Reportto IS NOT NULL
-                     AND LTRIM(RTRIM(CAST(rt.Reportto AS nvarchar(32)))) <> ''
-                    THEN LTRIM(RTRIM(CAST(rt.Reportto AS nvarchar(32))))
-                ELSE ${originalOrgExpr}
-            END
-        `
-        : originalOrgExpr;
+    const originalOrgExpr = `LTRIM(RTRIM(CAST(pos.${escapeSqlIdentifier(columns.orgCol)} AS nvarchar(32))))`;
+    const mappedOrgExpr = getReport09AuditMappedOrgExpr(originalOrgExpr, structureIsSecondment);
     const effectiveRetireYearExpr = `
         CASE
             WHEN delay.delay_year = ${REPORT09_NON_COUNT_DELAY_YEAR}
-                THEN TRY_CONVERT(int, info.${escapeSqlIdentifier(retireYearCol)})
+                THEN TRY_CONVERT(int, info.${escapeSqlIdentifier(columns.retireYearCol)})
             WHEN delay.delay_year IS NOT NULL
                 THEN delay.delay_year
-            ELSE TRY_CONVERT(int, info.${escapeSqlIdentifier(retireYearCol)})
+            ELSE TRY_CONVERT(int, info.${escapeSqlIdentifier(columns.retireYearCol)})
         END
     `;
-    const employeeConditionExpr = infoSecondmentTextCol
-        ? `CASE WHEN UPPER(LTRIM(RTRIM(CAST(info.${escapeSqlIdentifier(infoSecondmentTextCol)} AS nvarchar(64))))) = 'EMPLOYEE' THEN 1 ELSE 0 END`
-        : '1';
-    const signPosConditionExpr = signPosCol
-        ? `CASE WHEN TRY_CONVERT(int, pos.${escapeSqlIdentifier(signPosCol)}) = 100 THEN 1 ELSE 0 END`
-        : '1';
 
     const { selectedLevelGroupNo, allowedLevelGroupNos } = await getReport09RetirementLevelFilter(pool, safeEffectiveYear);
-    const levelConditionExpr = levelCol && allowedLevelGroupNos.length > 0
-        ? `CASE WHEN LTRIM(RTRIM(CAST(pos.${escapeSqlIdentifier(levelCol)} AS nvarchar(16)))) IN (${allowedLevelGroupNos.map((value) => `'${escapeSqlString(value)}'`).join(',')}) THEN 1 ELSE 0 END`
-        : '1';
-
-    const unitBgExpr = unitBgCol
-        ? `LTRIM(RTRIM(CAST(srcUnit.${escapeSqlIdentifier(unitBgCol)} AS nvarchar(32))))`
-        : `''`;
-    const mappedUnitBgExpr = unitBgCol
-        ? `LTRIM(RTRIM(CAST(mappedUnit.${escapeSqlIdentifier(unitBgCol)} AS nvarchar(32))))`
-        : `''`;
-    const unitNameExpr = unitNameCol
-        ? `UPPER(LTRIM(RTRIM(CAST(srcUnit.${escapeSqlIdentifier(unitNameCol)} AS nvarchar(255)))))`
-        : `''`;
-    const unitAbbrExpr = unitAbbrCol
-        ? `UPPER(LTRIM(RTRIM(CAST(srcUnit.${escapeSqlIdentifier(unitAbbrCol)} AS nvarchar(255)))))`
-        : `''`;
-    const mappedUnitNameExpr = unitNameCol
-        ? `LTRIM(RTRIM(CAST(mappedUnit.${escapeSqlIdentifier(unitNameCol)} AS nvarchar(255))))`
-        : mappedOrgExpr;
-    const mappedUnitAbbrExpr = unitAbbrCol
-        ? `LTRIM(RTRIM(CAST(mappedUnit.${escapeSqlIdentifier(unitAbbrCol)} AS nvarchar(255))))`
-        : mappedOrgExpr;
-    const hoConditions = [
-        unitBgCol ? `${unitBgExpr} = '905'` : '',
-        unitNameCol ? `${unitNameExpr} IN (N'HO', N'HEAD OFFICE', N'สำนักงานใหญ่')` : '',
-        unitAbbrCol ? `${unitAbbrExpr} = N'HO'` : ''
-    ].filter(Boolean);
-    const isHoExpr = hoConditions.length > 0
-        ? `(${hoConditions.join(' OR ')})`
-        : '1 = 0';
+    const { employeeConditionExpr, signPosConditionExpr, levelConditionExpr } = getReport09AuditPassExprs(columns, allowedLevelGroupNos);
+    const unitExprs = getReport09AuditUnitExprs(columns, mappedOrgExpr);
+    const isHoExpr = getReport09AuditHoExpr(columns, unitExprs);
     const report09BucketExpr = `
         CASE
             WHEN ${isHoExpr} THEN N'Support'
-            WHEN ${mappedUnitBgExpr} = '905'
-                 AND NULLIF(LTRIM(RTRIM(CAST(pos.${escapeSqlIdentifier(bsTypeCol)} AS nvarchar(32)))), '') IS NULL THEN N'Support'
-            WHEN TRY_CONVERT(int, pos.${escapeSqlIdentifier(orgTypeCol)}) = 2
-                 AND TRY_CONVERT(int, pos.${escapeSqlIdentifier(bsTypeCol)}) = 2 THEN N'Support'
+            WHEN ${unitExprs.mappedUnitBgExpr} = '905'
+                 AND NULLIF(LTRIM(RTRIM(CAST(pos.${escapeSqlIdentifier(columns.bsTypeCol)} AS nvarchar(32)))), '') IS NULL THEN N'Support'
+            WHEN TRY_CONVERT(int, pos.${escapeSqlIdentifier(columns.orgTypeCol)}) = 2
+                 AND TRY_CONVERT(int, pos.${escapeSqlIdentifier(columns.bsTypeCol)}) = 2 THEN N'Support'
             ELSE N'BU'
         END
     `;
@@ -2315,10 +2543,10 @@ export const getReport09AuditService = async (
         base AS (
             SELECT
                 ${employeeKeyExpr} AS employee_key,
-                LTRIM(RTRIM(CAST(pos.${escapeSqlIdentifier(positionIdCol)} AS nvarchar(64)))) AS position_key,
+                LTRIM(RTRIM(CAST(pos.${escapeSqlIdentifier(columns.positionIdCol)} AS nvarchar(64)))) AS position_key,
                 ${mappedOrgExpr} AS org_unit_id,
-                ${mappedUnitAbbrExpr} AS unit_abbr,
-                ${mappedUnitNameExpr} AS unit_name,
+                ${unitExprs.mappedUnitAbbrExpr} AS unit_abbr,
+                ${unitExprs.mappedUnitNameExpr} AS unit_name,
                 ${effectiveRetireYearExpr} AS retire_year,
                 ${report09BucketExpr} AS bs_type,
                 ${employeeConditionExpr} AS pass_employee,
@@ -2326,8 +2554,8 @@ export const getReport09AuditService = async (
                 ${levelConditionExpr} AS pass_level
             FROM ${infoMeta.fullName} info
             INNER JOIN ${positionMeta.fullName} pos
-                ON LTRIM(RTRIM(CAST(pos.${escapeSqlIdentifier(positionIdCol)} AS nvarchar(64)))) =
-                   LTRIM(RTRIM(CAST(info.${escapeSqlIdentifier(infoPosCol)} AS nvarchar(64))))
+                ON LTRIM(RTRIM(CAST(pos.${escapeSqlIdentifier(columns.positionIdCol)} AS nvarchar(64)))) =
+                   LTRIM(RTRIM(CAST(info.${escapeSqlIdentifier(columns.infoPosCol)} AS nvarchar(64))))
             LEFT JOIN delay
                 ON delay.employee_id = ${sourceEmployeeExpr}
             LEFT JOIN fn_InterfaceUnit(@EffectiveDate) srcUnit
@@ -2378,18 +2606,7 @@ export const getReport09AuditService = async (
         .input('EffectiveDate', sql.DateTime, structureDate)
         .query(query);
 
-    const rows = (Array.isArray(result.recordset) ? result.recordset : [])
-        .map((row: Record<string, unknown>): Report09AuditRow => ({
-            stage_code: toTrimText(row.stage_code),
-            stage_name: toTrimText(row.stage_name),
-            org_unit_id: normalizeReport09OrgUnitKey(row.org_unit_id),
-            unit_abbr: toTrimText(row.unit_abbr),
-            unit_name: toTrimText(row.unit_name),
-            retire_year: toNumberOrZero(row.retire_year),
-            bs_type: toTrimText(row.bs_type) === 'Support' ? 'Support' : 'BU',
-            position_rows: toNumberOrZero(row.position_rows),
-            employee_count: toNumberOrZero(row.employee_count)
-        }));
+    const rows = mapReport09AuditRows(result.recordset);
 
     return {
         metadata: {
@@ -2397,13 +2614,7 @@ export const getReport09AuditService = async (
             displayYears,
             selectedLevelGroupNo,
             allowedLevelGroupNos,
-            stageDescriptions: [
-                { stage_code: '01', stage_name: 'ช่วงปีเกษียณ', description: 'Join infodata + InterfacePosition และปีเกษียณอยู่ในช่วง 5 ปีที่แสดง โดยใช้ MP_Delay override แล้ว' },
-                { stage_code: '02', stage_name: 'เฉพาะ Employee', description: 'ผ่านเงื่อนไข infodata.Secondment_text = Employee' },
-                { stage_code: '03', stage_name: 'เฉพาะ SignPos=100', description: 'ผ่านเงื่อนไข SignPos = 100 ถ้าตารางมี column นี้' },
-                { stage_code: '04', stage_name: 'เฉพาะ Level ที่ใช้คำนวณ', description: 'ผ่าน LevelGroupNo ตาม MP_BUSupportRateRemark และ MP_LevelGroup' },
-                { stage_code: '05', stage_name: 'มีหน่วยงานหลัง map secondment', description: 'ผ่านทุกเงื่อนไขสุดท้าย และมี OrgUnit หลัง map secondment ไป Reportto' }
-            ]
+            stageDescriptions: getReport09AuditStageDescriptions()
         },
         rows
     };
@@ -2805,6 +3016,102 @@ const addReport09OrgYearValues = (
     });
 };
 
+const resolveReport09DisplayedAncestor = (
+    orgUnitId: string,
+    structureOrgUnitIds: Set<string>,
+    parentByOrgUnitId: Map<string, string>
+): string => {
+    let current = orgUnitId;
+    const visited = new Set<string>();
+
+    while (current && !visited.has(current)) {
+        if (structureOrgUnitIds.has(current)) return current;
+        visited.add(current);
+        current = parentByOrgUnitId.get(current) || '';
+    }
+
+    return '';
+};
+
+const normalizeReportUnitLabel = (value: unknown): string => String(value ?? '')
+    .replace(/^>\s*/, '')
+    .replace(/^→\s*/, '')
+    .replace(/ขึ้นตรง$/, '')
+    .trim();
+
+const resolveReportUnitName = (label: unknown, unitNameByLabel: Map<string, string>): string => {
+    const raw = String(label ?? '').trim();
+    if (!raw) return '';
+    return unitNameByLabel.get(raw) || unitNameByLabel.get(normalizeReportUnitLabel(raw)) || '';
+};
+
+const sumReportTreeTotals = (node: any, sumNodeFn: (target: any, source: any) => void): any => {
+    if (!node.children || node.children.length === 0) return node;
+    node.children.forEach((child: any) => sumReportTreeTotals(child, sumNodeFn));
+    node.children.forEach((child: any) => sumNodeFn(node, child));
+    return node;
+};
+
+const compactLegacyReportUnit = (unit: unknown): string => String(unit || '').replace(/ /g, '');
+
+const isLegacyLeadChild = (childNode: any, parentNode: any) =>
+    compactLegacyReportUnit(childNode.unit) === compactLegacyReportUnit(parentNode.unit) + 'ขึ้นตรง';
+
+const prefixLegacyReportGroupNode = (node: any) => {
+    if (node.key.startsWith('gp2-')) {
+        node.unit = '> ' + String(node.unit || '').trim();
+        return;
+    }
+    if (node.key.startsWith('gp-')) {
+        node.unit = String(node.unit || '').trim();
+    }
+};
+
+const renameLegacyReportLeadChildren = (childNode: any) => {
+    if (childNode.key.startsWith('gp2-')) {
+        childNode.unit = '> ' + String(childNode.unit || '').trim();
+    }
+
+    const prefix = childNode.key.startsWith('gp2-') ? '→ ' : '> ';
+    const originalParentName = String(childNode.unit || '').replace('> ', '').trim();
+    childNode.children.forEach((grandChild: any) => {
+        const currentName = String(grandChild.unit || '').trim();
+        if (currentName.endsWith('ขึ้นตรง') && currentName !== originalParentName + 'ขึ้นตรง') {
+            grandChild.unit = prefix + currentName.replace('ขึ้นตรง', '');
+        }
+    });
+};
+
+const refineLegacyReportChildNode = (node: any, childNode: any, childIndex: number) => {
+    if (childNode.children.length === 1 && isLegacyLeadChild(childNode.children[0], childNode)) {
+        node.children.splice(childIndex, 1, childNode.children[0]);
+        return;
+    }
+
+    if (childNode.children.length === 0) {
+        delete childNode.children;
+        prefixLegacyReportGroupNode(childNode);
+        return;
+    }
+
+    renameLegacyReportLeadChildren(childNode);
+};
+
+const cleanupLegacyReportTree = (node: any): void => {
+    if (!node.children) return;
+
+    for (let i = node.children.length - 1; i >= 0; i--) {
+        const childNode = node.children[i];
+        if (!childNode.children) continue;
+
+        cleanupLegacyReportTree(childNode);
+        childNode.children = childNode.children.filter((grandChild: any) =>
+            !(grandChild._isHiddenLegacy && isLegacyLeadChild(grandChild, childNode))
+        );
+        refineLegacyReportChildNode(node, childNode, i);
+    }
+};
+
 const rollupReport09SourceMapToStructure = async (
     pool: any,
     structureRows: any[],
@@ -2839,46 +3146,36 @@ const rollupReport09SourceMapToStructure = async (
     });
 
     const rolledMap: Report09OrgYearMap = new Map();
-    const resolveDisplayedAncestor = (orgUnitId: string) => {
-        let current = orgUnitId;
-        const visited = new Set<string>();
-
-        while (current && !visited.has(current)) {
-            if (structureOrgUnitIds.has(current)) return current;
-            visited.add(current);
-            current = parentByOrgUnitId.get(current) || '';
-        }
-
-        return '';
-    };
 
     sourceMap.forEach((yearMap, orgUnitId) => {
-        const targetOrgUnitId = resolveDisplayedAncestor(orgUnitId) || orgUnitId;
+        const targetOrgUnitId = resolveReport09DisplayedAncestor(orgUnitId, structureOrgUnitIds, parentByOrgUnitId) || orgUnitId;
         addReport09OrgYearValues(rolledMap, targetOrgUnitId, yearMap);
     });
 
     return rolledMap;
 };
 
-const buildReport09Tree = (
-    flatData: any[],
-    sourceMap: Report09OrgYearMap,
-    displayYears: number[],
-    yearRateMap: Report09YearRateMap
-) => {
-    const resultTree: any[] = [];
-    const group1Map = new Map<string, any>();
-    const group2Map = new Map<string, any>();
-    const group3Map = new Map<string, any>();
-    const unitNameByLabel = new Map<string, string>();
-    let keyCounter = 1;
+type Report09KeyCounter = { value: number };
 
-    const normalizeUnitLabel = (value: unknown) => String(value ?? '')
-        .replace(/^>\s*/, '')
-        .replace(/^→\s*/, '')
-        .replace(/ขึ้นตรง$/, '')
-        .trim();
+type Report09TreeContext = {
+    resultTree: any[];
+    group1Map: Map<string, any>;
+    group2Map: Map<string, any>;
+    group3Map: Map<string, any>;
+    unitNameByLabel: Map<string, string>;
+    keyCounter: Report09KeyCounter;
+    sourceMap: Report09OrgYearMap;
+    displayYears: number[];
+    yearRateMap: Report09YearRateMap;
+};
 
+const nextReport09TreeKey = (prefix: string, keyCounter: Report09KeyCounter) => {
+    const key = prefix + '-' + keyCounter.value;
+    keyCounter.value += 1;
+    return key;
+};
+
+const collectReport09UnitNameAliases = (flatData: any[], unitNameByLabel: Map<string, string>) => {
     flatData.forEach((raw) => {
         const row = (raw && typeof raw === 'object') ? (raw as Record<string, unknown>) : {};
         const unitName = toTrimText(row.UnitName || row.unit_name || row.unitname);
@@ -2889,8 +3186,8 @@ const buildReport09Tree = (
         const candidates = [
             rawAbbr,
             rawDisplay,
-            normalizeUnitLabel(rawAbbr),
-            normalizeUnitLabel(rawDisplay)
+            normalizeReportUnitLabel(rawAbbr),
+            normalizeReportUnitLabel(rawDisplay)
         ].filter(Boolean);
 
         candidates.forEach((label) => {
@@ -2899,102 +3196,179 @@ const buildReport09Tree = (
             }
         });
     });
+};
 
-    const resolveUnitName = (label: unknown) => {
-        const raw = toTrimText(label);
-        if (!raw) return '';
-        return unitNameByLabel.get(raw) || unitNameByLabel.get(normalizeUnitLabel(raw)) || '';
+const createReport09TreeNode = (
+    prefix: string,
+    label: string,
+    displayYears: number[],
+    unitNameByLabel: Map<string, string>,
+    keyCounter: Report09KeyCounter
+) => ({
+    key: nextReport09TreeKey(prefix, keyCounter),
+    unit: label,
+    unit_name: resolveReportUnitName(label, unitNameByLabel) || label,
+    ...createEmptyReport09Node(displayYears),
+    children: []
+});
+
+const createReport09LeafNode = (
+    row: Record<string, unknown>,
+    orgUnitId: string,
+    context: Report09TreeContext
+) => {
+    const leafLabel = toTrimText(row.DisplayName) || toTrimText(row.UnitAbbr) || orgUnitId || '-';
+    const leafUnitName = toTrimText(row.UnitName || row.unit_name || row.unitname)
+        || resolveReportUnitName(leafLabel, context.unitNameByLabel)
+        || leafLabel;
+    const leafData: Record<string, unknown> = {
+        key: nextReport09TreeKey('r', context.keyCounter),
+        unit: leafLabel,
+        unit_name: leafUnitName,
+        ...createEmptyReport09Node(context.displayYears),
+        _isHiddenLegacy: row.IsBelongTo == 1 || row.IsBelongTo === true || row.IsBelongTo === '1'
     };
 
-    flatData.forEach((raw) => {
-        const row = (raw && typeof raw === 'object') ? (raw as Record<string, unknown>) : {};
-        const bgName = toTrimText(row.GroupBGName);
-        if (!bgName) return;
-
-        const grandParent = toTrimText(row.GrandParent);
-        const grandParent2 = toTrimText(row.GrandParent2);
-        const orgUnitId = getReport09OrgUnitNo(row);
-
-        const leafLabel = toTrimText(row.DisplayName) || toTrimText(row.UnitAbbr) || orgUnitId || '-';
-        const leafUnitName = toTrimText(row.UnitName || row.unit_name || row.unitname)
-            || resolveUnitName(leafLabel)
-            || leafLabel;
-
-        const leafData: Record<string, unknown> = {
-            key: `r-${keyCounter++}`,
-            unit: leafLabel,
-            unit_name: leafUnitName,
-            ...createEmptyReport09Node(displayYears),
-            _isHiddenLegacy: row.IsBelongTo == 1 || row.IsBelongTo === true || row.IsBelongTo === '1'
-        };
-
-        displayYears.forEach((year) => {
-            const values = getReport09OrgYearValue(sourceMap, orgUnitId, year);
-            leafData[`y${year}_sup`] = values.support;
-            leafData[`y${year}_bu`] = values.bu;
-        });
-
-        const { cutSupport, cutBu } = calcReport09CutTotalsByOrg(sourceMap, orgUnitId, displayYears, yearRateMap);
-        leafData.cut_support = cutSupport;
-        leafData.cut_bu = cutBu;
-        leafData.cut_total = cutSupport + cutBu;
-
-        if (!group1Map.has(bgName)) {
-            const bgNode = {
-                key: `bg-${keyCounter++}`,
-                unit: bgName,
-                unit_name: bgName,
-                ...createEmptyReport09Node(displayYears),
-                children: []
-            };
-            group1Map.set(bgName, bgNode);
-            resultTree.push(bgNode);
-        }
-
-        let targetNode = group1Map.get(bgName);
-
-        if (grandParent) {
-            const group2KeyId = `${bgName}-${grandParent}`;
-            if (!group2Map.has(group2KeyId)) {
-                const gpNode = {
-                    key: `gp-${keyCounter++}`,
-                    unit: grandParent,
-                    unit_name: resolveUnitName(grandParent) || grandParent,
-                    ...createEmptyReport09Node(displayYears),
-                    children: []
-                };
-                group2Map.set(group2KeyId, gpNode);
-                targetNode.children.push(gpNode);
-            }
-            targetNode = group2Map.get(group2KeyId);
-
-            if (grandParent2 && grandParent2 !== grandParent) {
-                const group3KeyId = `${bgName}-${grandParent}-${grandParent2}`;
-                if (!group3Map.has(group3KeyId)) {
-                    const gp2Node = {
-                        key: `gp2-${keyCounter++}`,
-                        unit: grandParent2,
-                        unit_name: resolveUnitName(grandParent2) || grandParent2,
-                        ...createEmptyReport09Node(displayYears),
-                        children: []
-                    };
-                    group3Map.set(group3KeyId, gp2Node);
-                    targetNode.children.push(gp2Node);
-                }
-                targetNode = group3Map.get(group3KeyId);
-            }
-        }
-
-        targetNode.children.push(leafData);
+    context.displayYears.forEach((year) => {
+        const values = getReport09OrgYearValue(context.sourceMap, orgUnitId, year);
+        leafData['y' + year + '_sup'] = values.support;
+        leafData['y' + year + '_bu'] = values.bu;
     });
 
-    const sumTotalRecursive = (node: any) => {
-        if (!node.children || node.children.length === 0) return node;
-        node.children.forEach((child: any) => sumTotalRecursive(child));
-        node.children.forEach((child: any) => sumNode(node, child));
-        return node;
+    const { cutSupport, cutBu } = calcReport09CutTotalsByOrg(
+        context.sourceMap,
+        orgUnitId,
+        context.displayYears,
+        context.yearRateMap
+    );
+    leafData.cut_support = cutSupport;
+    leafData.cut_bu = cutBu;
+    leafData.cut_total = cutSupport + cutBu;
+
+    return leafData;
+};
+
+const getReport09BgNode = (bgName: string, context: Report09TreeContext) => {
+    if (!context.group1Map.has(bgName)) {
+        const bgNode = {
+            key: nextReport09TreeKey('bg', context.keyCounter),
+            unit: bgName,
+            unit_name: bgName,
+            ...createEmptyReport09Node(context.displayYears),
+            children: []
+        };
+        context.group1Map.set(bgName, bgNode);
+        context.resultTree.push(bgNode);
+    }
+
+    return context.group1Map.get(bgName);
+};
+
+const getReport09LeafParentNode = (
+    bgName: string,
+    grandParent: string,
+    grandParent2: string,
+    context: Report09TreeContext
+) => {
+    let targetNode = getReport09BgNode(bgName, context);
+    if (!grandParent) return targetNode;
+
+    const group2KeyId = bgName + '-' + grandParent;
+    if (!context.group2Map.has(group2KeyId)) {
+        const gpNode = createReport09TreeNode(
+            'gp',
+            grandParent,
+            context.displayYears,
+            context.unitNameByLabel,
+            context.keyCounter
+        );
+        context.group2Map.set(group2KeyId, gpNode);
+        targetNode.children.push(gpNode);
+    }
+    targetNode = context.group2Map.get(group2KeyId);
+
+    if (!grandParent2 || grandParent2 === grandParent) return targetNode;
+
+    const group3KeyId = bgName + '-' + grandParent + '-' + grandParent2;
+    if (!context.group3Map.has(group3KeyId)) {
+        const gp2Node = createReport09TreeNode(
+            'gp2',
+            grandParent2,
+            context.displayYears,
+            context.unitNameByLabel,
+            context.keyCounter
+        );
+        context.group3Map.set(group3KeyId, gp2Node);
+        targetNode.children.push(gp2Node);
+    }
+
+    return context.group3Map.get(group3KeyId);
+};
+
+const addReport09RowToTree = (raw: any, context: Report09TreeContext) => {
+    const row = (raw && typeof raw === 'object') ? (raw as Record<string, unknown>) : {};
+    const bgName = toTrimText(row.GroupBGName);
+    if (!bgName) return;
+
+    const grandParent = toTrimText(row.GrandParent);
+    const grandParent2 = toTrimText(row.GrandParent2);
+    const orgUnitId = getReport09OrgUnitNo(row);
+    const leafData = createReport09LeafNode(row, orgUnitId, context);
+    const targetNode = getReport09LeafParentNode(bgName, grandParent, grandParent2, context);
+    targetNode.children.push(leafData);
+};
+
+const promoteSingleReport09GpChildren = (bgNode: any) => {
+    if (!bgNode.children) return;
+    const gpChildren = bgNode.children.filter((child: any) => child.key && child.key.startsWith('gp-'));
+    if (gpChildren.length !== 1) return;
+
+    const gpNode = gpChildren[0];
+    if (gpNode.children && gpNode.children.length > 0) {
+        const idx = bgNode.children.indexOf(gpNode);
+        bgNode.children.splice(idx, 1, ...gpNode.children);
+    }
+};
+
+const fillReport09MissingUnitNames = (node: any, unitNameByLabel: Map<string, string>) => {
+    if (!node || typeof node !== 'object') return;
+
+    const current = toTrimText(node.unit_name);
+    const label = toTrimText(node.unit);
+    const resolved = resolveReportUnitName(label, unitNameByLabel);
+    if ((!current || current === label) && resolved) {
+        node.unit_name = resolved;
+    } else if (!current && label) {
+        node.unit_name = label;
+    }
+
+    if (Array.isArray(node.children)) {
+        node.children.forEach((child: any) => fillReport09MissingUnitNames(child, unitNameByLabel));
+    }
+};
+
+const buildReport09Tree = (
+    flatData: any[],
+    sourceMap: Report09OrgYearMap,
+    displayYears: number[],
+    yearRateMap: Report09YearRateMap
+) => {
+    const context: Report09TreeContext = {
+        resultTree: [],
+        group1Map: new Map<string, any>(),
+        group2Map: new Map<string, any>(),
+        group3Map: new Map<string, any>(),
+        unitNameByLabel: new Map<string, string>(),
+        keyCounter: { value: 1 },
+        sourceMap,
+        displayYears,
+        yearRateMap
     };
-    resultTree.forEach((bgNode) => sumTotalRecursive(bgNode));
+
+    collectReport09UnitNameAliases(flatData, context.unitNameByLabel);
+    flatData.forEach((raw) => addReport09RowToTree(raw, context));
+
+    context.resultTree.forEach((bgNode) => sumReportTreeTotals(bgNode, sumNode));
 
     const grandTotal = {
         key: 'total',
@@ -3002,93 +3376,21 @@ const buildReport09Tree = (
         unit_name: 'รวมทุกธุรกิจ',
         ...createEmptyReport09Node(displayYears)
     };
-    resultTree.forEach((node) => sumNode(grandTotal, node));
-    resultTree.push(grandTotal);
+    context.resultTree.forEach((node) => sumNode(grandTotal, node));
+    context.resultTree.push(grandTotal);
 
     // Match Report01 legacy grouping behaviors:
     // - hide specific "ขึ้นตรง" rows when flagged by IsBelongTo
     // - promote single lead-child rows
     // - keep gp/gp2 label styles and flatten one-gp groups
-    const cleanupTree = (node: any) => {
-        if (!node.children) return;
+    context.resultTree.forEach((bgNode) => cleanupLegacyReportTree(bgNode));
+    context.resultTree.forEach((bgNode) => promoteSingleReport09GpChildren(bgNode));
+    context.resultTree.forEach((bgNode) => fillReport09MissingUnitNames(bgNode, context.unitNameByLabel));
+    adjustReport09DisplayedRowsToOwnOnly(context.resultTree, displayYears);
+    recalculateReport09CutsForDisplayedRows(context.resultTree, displayYears, yearRateMap);
+    recalculateReport09SummaryCutsFromDisplayedRows(context.resultTree);
 
-        for (let i = node.children.length - 1; i >= 0; i--) {
-            const childNode = node.children[i];
-            if (!childNode.children) continue;
-
-            cleanupTree(childNode);
-
-            childNode.children = childNode.children.filter((grandChild: any) => {
-                const childName = String(childNode.unit || '').replace(/ /g, '');
-                const grandChildName = String(grandChild.unit || '').replace(/ /g, '');
-                const isLeadChild = grandChildName === `${childName}ขึ้นตรง`;
-                const isHidden = grandChild._isHiddenLegacy && isLeadChild;
-                return !isHidden;
-            });
-
-            if (
-                childNode.children.length === 1 &&
-                String(childNode.children[0].unit || '').replace(/ /g, '') === `${String(childNode.unit || '').replace(/ /g, '')}ขึ้นตรง`
-            ) {
-                node.children.splice(i, 1, childNode.children[0]);
-            } else if (childNode.children.length === 0) {
-                delete childNode.children;
-                if (childNode.key.startsWith('gp2-')) {
-                    childNode.unit = `> ${String(childNode.unit || '').trim()}`;
-                } else if (childNode.key.startsWith('gp-')) {
-                    childNode.unit = String(childNode.unit || '').trim();
-                }
-            } else {
-                if (childNode.key.startsWith('gp2-')) {
-                    childNode.unit = `> ${String(childNode.unit || '').trim()}`;
-                }
-
-                const prefix = childNode.key.startsWith('gp2-') ? '→ ' : '> ';
-                childNode.children.forEach((grandChild: any) => {
-                    const currentName = String(grandChild.unit || '').trim();
-                    const originalParentName = String(childNode.unit || '').replace('> ', '').trim();
-                    if (currentName.endsWith('ขึ้นตรง') && currentName !== `${originalParentName}ขึ้นตรง`) {
-                        grandChild.unit = prefix + currentName.replace('ขึ้นตรง', '');
-                    }
-                });
-            }
-        }
-    };
-    resultTree.forEach((bgNode) => cleanupTree(bgNode));
-
-    // Report01 rule: when a BG has only one gp- group, hide gp header and promote children.
-    resultTree.forEach((bgNode) => {
-        if (!bgNode.children) return;
-        const gpChildren = bgNode.children.filter((c: any) => c.key && c.key.startsWith('gp-'));
-        if (gpChildren.length === 1) {
-            const gpNode = gpChildren[0];
-            if (gpNode.children && gpNode.children.length > 0) {
-                const idx = bgNode.children.indexOf(gpNode);
-                bgNode.children.splice(idx, 1, ...gpNode.children);
-            }
-        }
-    });
-
-    const fillMissingUnitNames = (node: any) => {
-        if (!node || typeof node !== 'object') return;
-        const current = toTrimText(node.unit_name);
-        const label = toTrimText(node.unit);
-        const resolved = resolveUnitName(label);
-        if ((!current || current === label) && resolved) {
-            node.unit_name = resolved;
-        } else if (!current && label) {
-            node.unit_name = label;
-        }
-        if (Array.isArray(node.children)) {
-            node.children.forEach((child: any) => fillMissingUnitNames(child));
-        }
-    };
-    resultTree.forEach((bgNode) => fillMissingUnitNames(bgNode));
-    adjustReport09DisplayedRowsToOwnOnly(resultTree, displayYears);
-    recalculateReport09CutsForDisplayedRows(resultTree, displayYears, yearRateMap);
-    recalculateReport09SummaryCutsFromDisplayedRows(resultTree);
-
-    return resultTree;
+    return context.resultTree;
 };
 
 export const getReport09DataService = async (
@@ -3214,6 +3516,71 @@ export const getReport10SummaryDataService = async (
     }
 };
 
+const mapReport10ExportRow = (rawRow: unknown, index: number) => {
+    const row = (rawRow && typeof rawRow === "object") ? (rawRow as Record<string, unknown>) : {};
+    const { num, text } = buildRowAccessor(row);
+
+    const levelCode = text("LevelGroupNo", "levelgroupno", "LevelCode", "levelcode");
+    const levelName = text("LevelName", "levelname");
+    const orgType = num("OrgType", "orgtype");
+    const poolRsFlag = num("PoolRSFlag", "poolrsflag");
+    const strgFlag = num("StrgFlag", "strgflag");
+    const bsType = num("BSType", "bstype");
+    const specFlag = num("SpecFlag", "specflag");
+    const isSecondment = orgType === 2;
+    const isSpecific = specFlag === 1;
+    let frameType = "ปตท";
+    if (poolRsFlag === 1) {
+        frameType = "pool";
+    } else if (orgType === 2) {
+        frameType = "Secondment";
+    }
+    let businessSupport = "-";
+    if (bsType === 1) {
+        businessSupport = "Business";
+    } else if (bsType === 2) {
+        businessSupport = "Support";
+    }
+    let groupType = "PTT";
+    if (isSecondment) {
+        groupType = "SECONDMENT";
+    } else if (isSpecific) {
+        groupType = "SPEC";
+    }
+
+    return {
+        key: `r10e-${index + 1}`,
+        level_group: mapReport10LevelGroup(levelCode, levelName),
+        level_group_no: levelCode,
+        level_name: levelName,
+        position_name: text("POSNAME", "posname"),
+        position_short_name: levelName,
+        unit_name: text("UnitName", "unitname"),
+        parent_unit_name: text("ParentUnitName", "parentunitname"),
+        unit_level_no: levelCode,
+        unit_level_name: levelName,
+        org_unit_id: text("OrgUnitNo", "orgunitno", "OrgUnitID", "orgunitid"),
+        position_id: text("POSCODE", "poscode"),
+        employee_id: text("EmployeeID", "employeeid"),
+        info_employee_id: text("InfoEmployeeID", "infoemployeeid"),
+        full_name: text("FULLNAMETH", "fullnameth"),
+        job_band: text("JobBand", "jobband"),
+        jg: text("JobBand", "jobband"),
+        org_flag: num("OrgFlag", "orgflag"),
+        org_type: orgType,
+        pool_rs_flag: poolRsFlag,
+        sign_pos: text("SignPos", "signpos"),
+        strg_flag: strgFlag,
+        bs_type: bsType,
+        spec_flag: specFlag,
+        frame_type: frameType,
+        strategic: strgFlag === 1 ? "Y" : "N",
+        business_support: businessSupport,
+        specific_rate: specFlag === 1 ? "Y" : "N",
+        group_type: groupType
+    };
+};
+
 export const getReport10ExportDataService = async (
     effectiveDateStr: string,
     _employeeId: string,
@@ -3310,308 +3677,259 @@ export const getReport10ExportDataService = async (
         `);
         const rows = Array.isArray(result.recordset) ? result.recordset : [];
 
-        return rows.map((rawRow, index) => {
-            const row = (rawRow && typeof rawRow === 'object') ? (rawRow as Record<string, unknown>) : {};
-            const { num, text } = buildRowAccessor(row);
-
-            const levelCode = text('LevelGroupNo', 'levelgroupno', 'LevelCode', 'levelcode');
-            const levelName = text('LevelName', 'levelname');
-            const orgType = num('OrgType', 'orgtype');
-            const poolRsFlag = num('PoolRSFlag', 'poolrsflag');
-            const strgFlag = num('StrgFlag', 'strgflag');
-            const bsType = num('BSType', 'bstype');
-            const specFlag = num('SpecFlag', 'specflag');
-            const isSecondment = orgType === 2;
-            const isSpecific = specFlag === 1;
-
-            return {
-                key: `r10e-${index + 1}`,
-                level_group: mapReport10LevelGroup(levelCode, levelName),
-                level_group_no: levelCode,
-                level_name: levelName,
-                position_name: text('POSNAME', 'posname'),
-                position_short_name: levelName,
-                unit_name: text('UnitName', 'unitname'),
-                parent_unit_name: text('ParentUnitName', 'parentunitname'),
-                unit_level_no: levelCode,
-                unit_level_name: levelName,
-                org_unit_id: text('OrgUnitNo', 'orgunitno', 'OrgUnitID', 'orgunitid'),
-                position_id: text('POSCODE', 'poscode'),
-                employee_id: text('EmployeeID', 'employeeid'),
-                info_employee_id: text('InfoEmployeeID', 'infoemployeeid'),
-                full_name: text('FULLNAMETH', 'fullnameth'),
-                job_band: text('JobBand', 'jobband'),
-                jg: text('JobBand', 'jobband'),
-                org_flag: num('OrgFlag', 'orgflag'),
-                org_type: orgType,
-                pool_rs_flag: poolRsFlag,
-                sign_pos: text('SignPos', 'signpos'),
-                strg_flag: strgFlag,
-                bs_type: bsType,
-                spec_flag: specFlag,
-                frame_type: poolRsFlag === 1 ? 'pool' : (orgType === 2 ? 'Secondment' : 'ปตท'),
-                strategic: strgFlag === 1 ? 'Y' : 'N',
-                business_support: bsType === 1 ? 'Business' : (bsType === 2 ? 'Support' : '-'),
-                specific_rate: specFlag === 1 ? 'Y' : 'N',
-                group_type: isSecondment ? 'SECONDMENT' : (isSpecific ? 'SPEC' : 'PTT')
-            };
-        }).filter((row) => isReport10IncludedLevel(row.level_group_no, row.level_name));
+        return rows.map(mapReport10ExportRow)
+            .filter((row) => isReport10IncludedLevel(row.level_group_no, row.level_name));
     } catch (error) {
         console.error('Error in getReport10ExportDataService:', error);
         throw error;
     }
 };
 
-function buildReport08Tree(
-    flatData: any[],
-    positionMap: Report08LevelMap,
-    costMap: Report08LevelMap
-) {
-    const resultTree: any[] = [];
-    const group1Map = new Map();
-    const group2Map = new Map();
-    const group3Map = new Map();
-    const unitNameByLabel = new Map<string, string>();
-    let keyCounter = 1;
+type Report08TreeContext = {
+    resultTree: any[];
+    group1Map: Map<any, any>;
+    group2Map: Map<string, any>;
+    group3Map: Map<string, any>;
+    unitNameByLabel: Map<string, string>;
+    keyCounter: { value: number };
+    positionMap: Report08LevelMap;
+    costMap: Report08LevelMap;
+};
 
-    const readRowValue = (row: Record<string, unknown>, ...aliases: string[]) => {
-        const lowerMap = new Map<string, unknown>();
-        Object.entries(row).forEach(([key, value]) => lowerMap.set(key.toLowerCase(), value));
-        for (const alias of aliases) {
-            const value = lowerMap.get(alias.toLowerCase());
-            if (value !== undefined && value !== null && value !== '') {
-                return value;
-            }
-        }
-        return undefined;
-    };
+const readReport08TreeRowValue = (row: Record<string, unknown>, ...aliases: string[]) => {
+    const lowerMap = new Map<string, unknown>();
+    Object.entries(row).forEach(([key, value]) => lowerMap.set(key.toLowerCase(), value));
+    for (const alias of aliases) {
+        const value = lowerMap.get(alias.toLowerCase());
+        if (value !== undefined && value !== null && value !== '') return value;
+    }
+    return undefined;
+};
 
-    const hasReport01PeopleFields = (row: Record<string, unknown>) => {
-        const aliases = [
-            'P_N_21', 'P_N_18_20', 'P_N_16_17', 'P_N_14_15', 'P_N_11_13', 'P_N_9_10', 'P_N_4_8',
-            'P_S_21', 'P_S_18_20', 'P_S_16_17', 'P_S_14_15', 'P_S_11_13', 'P_S_9_10', 'P_S_4_8'
-        ];
-        return aliases.some((alias) => readRowValue(row, alias) !== undefined);
-    };
+const hasReport01PeopleFields = (row: Record<string, unknown>) => [
+    'P_N_21', 'P_N_18_20', 'P_N_16_17', 'P_N_14_15', 'P_N_11_13', 'P_N_9_10', 'P_N_4_8',
+    'P_S_21', 'P_S_18_20', 'P_S_16_17', 'P_S_14_15', 'P_S_11_13', 'P_S_9_10', 'P_S_4_8'
+].some((alias) => readReport08TreeRowValue(row, alias) !== undefined);
 
-    const normalizeUnitLabel = (value: unknown) => String(value ?? '')
-        .replace(/^>\s*/, '')
-        .replace(/^→\s*/, '')
-        .replace(/ขึ้นตรง$/, '')
-        .trim();
-
+const collectReportUnitNameAliases = (flatData: any[], unitNameByLabel: Map<string, string>) => {
     flatData.forEach((raw) => {
-        const row = (raw && typeof raw === 'object') ? (raw as Record<string, unknown>) : {};
-        const unitName = toTrimText(readRowValue(row, 'UnitName', 'unit_name', 'unitname'));
+        const row = (raw && typeof raw === 'object') ? raw as Record<string, unknown> : {};
+        const unitName = toTrimText(readReport08TreeRowValue(row, 'UnitName', 'unit_name', 'unitname'));
         if (!unitName) return;
 
-        const rawAbbr = toTrimText(readRowValue(row, 'UnitAbbr', 'unit_abbr', 'unitabbr'));
-        const rawDisplay = toTrimText(readRowValue(row, 'DisplayName', 'display_name', 'displayname'));
-        const candidates = [
+        const rawAbbr = toTrimText(readReport08TreeRowValue(row, 'UnitAbbr', 'unit_abbr', 'unitabbr'));
+        const rawDisplay = toTrimText(readReport08TreeRowValue(row, 'DisplayName', 'display_name', 'displayname'));
+        [
             rawAbbr,
             rawDisplay,
-            normalizeUnitLabel(rawAbbr),
-            normalizeUnitLabel(rawDisplay)
-        ].filter(Boolean);
-
-        candidates.forEach((label) => {
-            if (!unitNameByLabel.has(label)) {
-                unitNameByLabel.set(label, unitName);
-            }
+            normalizeReportUnitLabel(rawAbbr),
+            normalizeReportUnitLabel(rawDisplay)
+        ].filter(Boolean).forEach((label) => {
+            if (!unitNameByLabel.has(label)) unitNameByLabel.set(label, unitName);
         });
     });
+};
 
-    const resolveUnitName = (label: unknown) => {
-        const raw = toTrimText(label);
-        if (!raw) return '';
-        return unitNameByLabel.get(raw) || unitNameByLabel.get(normalizeUnitLabel(raw)) || '';
+const getReport01PeopleLevels = (row: Record<string, unknown>) => [
+    toNumberOrZero(readReport08TreeRowValue(row, 'P_N_21')) + toNumberOrZero(readReport08TreeRowValue(row, 'P_S_21')),
+    toNumberOrZero(readReport08TreeRowValue(row, 'P_N_18_20')) + toNumberOrZero(readReport08TreeRowValue(row, 'P_S_18_20')),
+    toNumberOrZero(readReport08TreeRowValue(row, 'P_N_16_17')) + toNumberOrZero(readReport08TreeRowValue(row, 'P_S_16_17')),
+    toNumberOrZero(readReport08TreeRowValue(row, 'P_N_14_15')) + toNumberOrZero(readReport08TreeRowValue(row, 'P_S_14_15')),
+    toNumberOrZero(readReport08TreeRowValue(row, 'P_N_11_13')) + toNumberOrZero(readReport08TreeRowValue(row, 'P_S_11_13')),
+    toNumberOrZero(readReport08TreeRowValue(row, 'P_N_9_10')) + toNumberOrZero(readReport08TreeRowValue(row, 'P_S_9_10')),
+    toNumberOrZero(readReport08TreeRowValue(row, 'P_N_4_8')) + toNumberOrZero(readReport08TreeRowValue(row, 'P_S_4_8'))
+];
+
+const extractReport08OrgUnitNo = (row: Record<string, unknown>) => {
+    const raw = readReport08TreeRowValue(
+        row,
+        'OrgUnitNo',
+        'orgUnitNo',
+        'OrgUnitNO',
+        'UnitNo',
+        'unitNo',
+        'UnitCode',
+        'unitCode',
+        'OrgNo',
+        'orgNo',
+        'UnitDummy',
+        'unitDummy',
+        'SecUnitDummy',
+        'secUnitDummy'
+    );
+    const text = toTrimText(raw);
+    if (text) return text;
+
+    const fromTextFields = [
+        toTrimText(readReport08TreeRowValue(row, 'UnitText', 'unitText')),
+        toTrimText(readReport08TreeRowValue(row, 'DisplayName', 'displayName')),
+        toTrimText(readReport08TreeRowValue(row, 'UnitAbbr', 'unitAbbr'))
+    ];
+
+    for (const field of fromTextFields) {
+        const matched = field.match(/\d{7,10}/);
+        if (matched) return matched[0];
+    }
+    return '';
+};
+
+type ReportTreeKeyContext = {
+    keyCounter: { value: number };
+};
+
+const nextReportTreeKey = (prefix: string, context: ReportTreeKeyContext) =>
+    `${prefix}-${context.keyCounter.value++}`;
+
+const getOrCreateReportGroupNode = (
+    map: Map<any, any>,
+    key: any,
+    nodeFactory: () => any,
+    attachTo: any[]
+) => {
+    if (!map.has(key)) {
+        const node = nodeFactory();
+        map.set(key, node);
+        attachTo.push(node);
+    }
+    return map.get(key);
+};
+
+const createReport08GroupNode = (prefix: string, unit: unknown, unitName: string, context: Report08TreeContext) => ({
+    key: nextReportTreeKey(prefix, context),
+    unit,
+    unit_name: unitName,
+    ...createEmptyReport08Node(),
+    children: []
+});
+
+const getReport08PeopleValues = (row: Record<string, unknown>, orgUnitNo: string, context: Report08TreeContext) =>
+    hasReport01PeopleFields(row)
+        ? getReport01PeopleLevels(row)
+        : REPORT08_PEOPLE_LEVELS.map(({ levelGroupNo }) => getReport08Metric(context.positionMap, orgUnitNo, levelGroupNo));
+
+const getReport08RowLabel = (row: Record<string, unknown>, orgUnitNo: string) =>
+    toTrimText(readReport08TreeRowValue(row, 'DisplayName', 'display_name', 'displayname'))
+    || toTrimText(readReport08TreeRowValue(row, 'UnitAbbr', 'unit_abbr', 'unitabbr'))
+    || orgUnitNo
+    || '-';
+
+const getReport08RowUnitName = (row: Record<string, unknown>, rowLabel: string, context: Report08TreeContext) =>
+    toTrimText(readReport08TreeRowValue(row, 'UnitName', 'unit_name', 'unitname'))
+    || resolveReportUnitName(rowLabel, context.unitNameByLabel)
+    || rowLabel;
+
+const getReport08PeopleTotal = (useReport01People: boolean, row: Record<string, unknown>, peopleValues: number[]) => {
+    const report01PeopleTotalRaw = readReport08TreeRowValue(row, 'm_amount', 'M_Amount', 'mAmount');
+    return useReport01People && report01PeopleTotalRaw !== undefined
+        ? toNumberOrZero(report01PeopleTotalRaw)
+        : peopleValues.reduce((sum, value) => sum + value, 0);
+};
+
+const getReport08PeopleFields = (peopleValues: number[], peopleTotal: number) => ({
+    people_21: peopleValues[0] || 0,
+    people_18_20: peopleValues[1] || 0,
+    people_16_17: peopleValues[2] || 0,
+    people_14_15: peopleValues[3] || 0,
+    people_11_13: peopleValues[4] || 0,
+    people_9_10: peopleValues[5] || 0,
+    people_4_8: peopleValues[6] || 0,
+    people_total: peopleTotal
+});
+
+const getReport08ExpenseFields = (expenseValues: number[]) => ({
+    expense_21: expenseValues[0] || 0,
+    expense_18_20: expenseValues[1] || 0,
+    expense_16_17: expenseValues[2] || 0,
+    expense_14_15: expenseValues[3] || 0,
+    expense_11_13: expenseValues[4] || 0,
+    expense_9_10: expenseValues[5] || 0,
+    expense_4_8: expenseValues[6] || 0,
+    expense_total: expenseValues.reduce((sum, value) => sum + value, 0)
+});
+
+const getReport08MajorMinorFields = (row: Record<string, unknown>, orgUnitNo: string, context: Report08TreeContext) => {
+    const majorBudget = getReport08Metric(context.costMap, orgUnitNo, REPORT08_MAJOR_LEVEL);
+    const minorBudget = getReport08Metric(context.costMap, orgUnitNo, REPORT08_MINOR_LEVEL);
+    return {
+        major_points: toNumberOrZero(readReport08TreeRowValue(row, 'q_contact', 'Q_Contact', 'q_8', 'Q_8', 'L9908', 'l9908')),
+        major_budget: majorBudget,
+        minor_points: toNumberOrZero(readReport08TreeRowValue(row, 'q_subcontact', 'Q_SubContact', 'q_10', 'Q_10', 'L9910', 'l9910')),
+        minor_budget: minorBudget,
+        majorMinorBudgetTotal: majorBudget + minorBudget
     };
+};
 
-    const getReport01PeopleLevels = (row: Record<string, unknown>) => {
-        const n21 = toNumberOrZero(readRowValue(row, 'P_N_21'));
-        const n1820 = toNumberOrZero(readRowValue(row, 'P_N_18_20'));
-        const n1617 = toNumberOrZero(readRowValue(row, 'P_N_16_17'));
-        const n1415 = toNumberOrZero(readRowValue(row, 'P_N_14_15'));
-        const n1113 = toNumberOrZero(readRowValue(row, 'P_N_11_13'));
-        const n910 = toNumberOrZero(readRowValue(row, 'P_N_9_10'));
-        const n48 = toNumberOrZero(readRowValue(row, 'P_N_4_8'));
+const isReport08HiddenLegacy = (rawRow: any) =>
+    rawRow.IsBelongTo == 1 || rawRow.IsBelongTo === true || rawRow.IsBelongTo === '1';
 
-        const s21 = toNumberOrZero(readRowValue(row, 'P_S_21'));
-        const s1820 = toNumberOrZero(readRowValue(row, 'P_S_18_20'));
-        const s1617 = toNumberOrZero(readRowValue(row, 'P_S_16_17'));
-        const s1415 = toNumberOrZero(readRowValue(row, 'P_S_14_15'));
-        const s1113 = toNumberOrZero(readRowValue(row, 'P_S_11_13'));
-        const s910 = toNumberOrZero(readRowValue(row, 'P_S_9_10'));
-        const s48 = toNumberOrZero(readRowValue(row, 'P_S_4_8'));
+const createReport08LeafRow = (
+    rawRow: any,
+    row: Record<string, unknown>,
+    orgUnitNo: string,
+    context: Report08TreeContext
+) => {
+    const useReport01People = hasReport01PeopleFields(row);
+    const peopleValues = getReport08PeopleValues(row, orgUnitNo, context);
+    const expenseValues = REPORT08_PEOPLE_LEVELS.map(({ levelGroupNo }) => getReport08Metric(context.costMap, orgUnitNo, levelGroupNo));
+    const expenseFields = getReport08ExpenseFields(expenseValues);
+    const majorMinorFields = getReport08MajorMinorFields(row, orgUnitNo, context);
+    const rowLabel = getReport08RowLabel(row, orgUnitNo);
 
-        return [
-            n21 + s21,
-            n1820 + s1820,
-            n1617 + s1617,
-            n1415 + s1415,
-            n1113 + s1113,
-            n910 + s910,
-            n48 + s48
-        ];
+    return {
+        key: nextReportTreeKey('r', context),
+        unit: rowLabel,
+        unit_name: getReport08RowUnitName(row, rowLabel, context),
+        ...getReport08PeopleFields(peopleValues, getReport08PeopleTotal(useReport01People, row, peopleValues)),
+        ...expenseFields,
+        major_points: majorMinorFields.major_points,
+        major_budget: majorMinorFields.major_budget,
+        minor_points: majorMinorFields.minor_points,
+        minor_budget: majorMinorFields.minor_budget,
+        total_grand_expense: expenseFields.expense_total + majorMinorFields.majorMinorBudgetTotal,
+        _isHiddenLegacy: isReport08HiddenLegacy(rawRow)
     };
+};
 
-    const extractOrgUnitNo = (row: Record<string, unknown>) => {
-        const raw = readRowValue(
-            row,
-            'OrgUnitNo',
-            'orgUnitNo',
-            'OrgUnitNO',
-            'UnitNo',
-            'unitNo',
-            'UnitCode',
-            'unitCode',
-            'OrgNo',
-            'orgNo',
-            'UnitDummy',
-            'unitDummy',
-            'SecUnitDummy',
-            'secUnitDummy'
-        );
-        const text = toTrimText(raw);
-        if (text) return text;
+const getReport08LeafParentNode = (bgName: any, grandParent: any, grandParent2: any, context: Report08TreeContext) => {
+    let targetNode = getOrCreateReportGroupNode(
+        context.group1Map,
+        bgName,
+        () => createReport08GroupNode('bg', bgName, toTrimText(bgName), context),
+        context.resultTree
+    );
 
-        const fromTextFields = [
-            toTrimText(readRowValue(row, 'UnitText', 'unitText')),
-            toTrimText(readRowValue(row, 'DisplayName', 'displayName')),
-            toTrimText(readRowValue(row, 'UnitAbbr', 'unitAbbr'))
-        ];
+    if (!grandParent) return targetNode;
 
-        for (const field of fromTextFields) {
-            const matched = field.match(/[0-9]{7,10}/);
-            if (matched) return matched[0];
-        }
-        return '';
-    };
+    const group2KeyId = `${bgName}-${grandParent}`;
+    targetNode = getOrCreateReportGroupNode(
+        context.group2Map,
+        group2KeyId,
+        () => createReport08GroupNode('gp', grandParent, resolveReportUnitName(grandParent, context.unitNameByLabel) || toTrimText(grandParent), context),
+        targetNode.children
+    );
 
-    flatData.forEach((row) => {
-        const bgName = row.GroupBGName;
-        const grandParent = row.GrandParent || '';
-        const grandParent2 = row.GrandParent2 || '';
+    if (!grandParent2 || grandParent2 === grandParent) return targetNode;
 
-        if (!bgName) return;
+    const group3KeyId = `${bgName}-${grandParent}-${grandParent2}`;
+    return getOrCreateReportGroupNode(
+        context.group3Map,
+        group3KeyId,
+        () => createReport08GroupNode('gp2', grandParent2, resolveReportUnitName(grandParent2, context.unitNameByLabel) || toTrimText(grandParent2), context),
+        targetNode.children
+    );
+};
 
-        if (!group1Map.has(bgName)) {
-            const bgNode = {
-                key: `bg-${keyCounter++}`,
-                unit: bgName,
-                unit_name: toTrimText(bgName),
-                ...createEmptyReport08Node(),
-                children: []
-            };
-            group1Map.set(bgName, bgNode);
-            resultTree.push(bgNode);
-        }
+const addReport08RowToTree = (row: any, context: Report08TreeContext) => {
+    const bgName = row.GroupBGName;
+    if (!bgName) return;
 
-        let targetNode = group1Map.get(bgName);
+    const rowObj = (row && typeof row === 'object') ? row as Record<string, unknown> : {};
+    const orgUnitNo = extractReport08OrgUnitNo(rowObj);
+    const targetNode = getReport08LeafParentNode(bgName, row.GrandParent || '', row.GrandParent2 || '', context);
+    targetNode.children.push(createReport08LeafRow(row, rowObj, orgUnitNo, context));
+};
 
-        const rowObj = (row && typeof row === 'object') ? (row as Record<string, unknown>) : {};
-        const orgUnitNo = extractOrgUnitNo(rowObj);
-        const useReport01People = hasReport01PeopleFields(rowObj);
-        const peopleValues = useReport01People
-            ? getReport01PeopleLevels(rowObj)
-            : REPORT08_PEOPLE_LEVELS.map(({ levelGroupNo }) => getReport08Metric(positionMap, orgUnitNo, levelGroupNo));
-        const expenseValues = REPORT08_PEOPLE_LEVELS.map(({ levelGroupNo }) => getReport08Metric(costMap, orgUnitNo, levelGroupNo));
-
-        const peopleTotalFromLevels = peopleValues.reduce((sum, value) => sum + value, 0);
-        const report01PeopleTotalRaw = readRowValue(rowObj, 'm_amount', 'M_Amount', 'mAmount');
-        const peopleTotal = useReport01People && report01PeopleTotalRaw !== undefined
-            ? toNumberOrZero(report01PeopleTotalRaw)
-            : peopleTotalFromLevels;
-        const expenseTotal = expenseValues.reduce((sum, value) => sum + value, 0);
-        const majorPoints = toNumberOrZero(
-            readRowValue(rowObj, 'q_contact', 'Q_Contact', 'q_8', 'Q_8', 'L9908', 'l9908')
-        );
-        const majorBudget = getReport08Metric(costMap, orgUnitNo, REPORT08_MAJOR_LEVEL);
-        const minorPoints = toNumberOrZero(
-            readRowValue(rowObj, 'q_subcontact', 'Q_SubContact', 'q_10', 'Q_10', 'L9910', 'l9910')
-        );
-        const minorBudget = getReport08Metric(costMap, orgUnitNo, REPORT08_MINOR_LEVEL);
-        const totalGrandExpense = expenseTotal + majorBudget + minorBudget;
-
-        const rowLabel = toTrimText(readRowValue(rowObj, 'DisplayName', 'display_name', 'displayname'))
-            || toTrimText(readRowValue(rowObj, 'UnitAbbr', 'unit_abbr', 'unitabbr'))
-            || orgUnitNo
-            || '-';
-        const rowUnitName = toTrimText(readRowValue(rowObj, 'UnitName', 'unit_name', 'unitname'))
-            || resolveUnitName(rowLabel)
-            || rowLabel;
-
-        const rowData = {
-            key: `r-${keyCounter++}`,
-            unit: rowLabel,
-            unit_name: rowUnitName,
-            people_21: peopleValues[0] || 0,
-            people_18_20: peopleValues[1] || 0,
-            people_16_17: peopleValues[2] || 0,
-            people_14_15: peopleValues[3] || 0,
-            people_11_13: peopleValues[4] || 0,
-            people_9_10: peopleValues[5] || 0,
-            people_4_8: peopleValues[6] || 0,
-            people_total: peopleTotal,
-            expense_21: expenseValues[0] || 0,
-            expense_18_20: expenseValues[1] || 0,
-            expense_16_17: expenseValues[2] || 0,
-            expense_14_15: expenseValues[3] || 0,
-            expense_11_13: expenseValues[4] || 0,
-            expense_9_10: expenseValues[5] || 0,
-            expense_4_8: expenseValues[6] || 0,
-            expense_total: expenseTotal,
-            major_points: majorPoints,
-            major_budget: majorBudget,
-            minor_points: minorPoints,
-            minor_budget: minorBudget,
-            total_grand_expense: totalGrandExpense,
-            _isHiddenLegacy: row.IsBelongTo == 1 || row.IsBelongTo === true || row.IsBelongTo === '1'
-        };
-
-        if (grandParent) {
-            const group2KeyId = `${bgName}-${grandParent}`;
-            if (!group2Map.has(group2KeyId)) {
-                const gpNode = {
-                    key: `gp-${keyCounter++}`,
-                    unit: grandParent,
-                    unit_name: resolveUnitName(grandParent) || toTrimText(grandParent),
-                    ...createEmptyReport08Node(),
-                    children: []
-                };
-                group2Map.set(group2KeyId, gpNode);
-                targetNode.children.push(gpNode);
-            }
-            targetNode = group2Map.get(group2KeyId);
-
-            if (grandParent2 && grandParent2 !== grandParent) {
-                const group3KeyId = `${bgName}-${grandParent}-${grandParent2}`;
-                if (!group3Map.has(group3KeyId)) {
-                    const gp2Node = {
-                        key: `gp2-${keyCounter++}`,
-                        unit: grandParent2,
-                        unit_name: resolveUnitName(grandParent2) || toTrimText(grandParent2),
-                        ...createEmptyReport08Node(),
-                        children: []
-                    };
-                    group3Map.set(group3KeyId, gp2Node);
-                    targetNode.children.push(gp2Node);
-                }
-                targetNode = group3Map.get(group3KeyId);
-            }
-        }
-
-        targetNode.children.push(rowData);
-    });
-
-    const sumTotalRecursive = (node: any) => {
-        if (!node.children || node.children.length === 0) return node;
-        node.children.forEach((child: any) => sumTotalRecursive(child));
-        node.children.forEach((child: any) => sumNode(node, child));
-        return node;
-    };
-    resultTree.forEach((bgNode) => sumTotalRecursive(bgNode));
-
+const addReport08GrandTotal = (resultTree: any[]) => {
     const grandTotal = {
         key: 'total',
         unit: 'รวมทุกธุรกิจ',
@@ -3620,83 +3938,60 @@ function buildReport08Tree(
     };
     resultTree.forEach((node) => sumNode(grandTotal, node));
     resultTree.push(grandTotal);
+};
 
-    const cleanupTree = (node: any) => {
-        if (!node.children) return;
+const fillReport08MissingUnitNames = (node: any, unitNameByLabel: Map<string, string>) => {
+    if (!node || typeof node !== 'object') return;
+    const current = toTrimText(node.unit_name);
+    const unitLabel = toTrimText(node.unit);
+    const resolved = resolveReportUnitName(unitLabel, unitNameByLabel);
+    if ((!current || current === unitLabel) && resolved) {
+        node.unit_name = resolved;
+    } else if (!current && unitLabel) {
+        node.unit_name = unitLabel;
+    }
+    if (Array.isArray(node.children)) {
+        node.children.forEach((child: any) => fillReport08MissingUnitNames(child, unitNameByLabel));
+    }
+};
 
-        for (let i = node.children.length - 1; i >= 0; i--) {
-            const childNode = node.children[i];
-            if (!childNode.children) continue;
+const promoteSingleReportGpChildren = (bgNode: any) => {
+    if (!bgNode.children) return;
+    const gpChildren = bgNode.children.filter((c: any) => c.key && c.key.startsWith('gp-'));
+    if (gpChildren.length !== 1) return;
 
-            cleanupTree(childNode);
+    const gpNode = gpChildren[0];
+    if (!gpNode.children || gpNode.children.length === 0) return;
 
-            childNode.children = childNode.children.filter((grandChild: any) => {
-                const childName = String(childNode.unit || '').replace(/ /g, '');
-                const grandChildName = String(grandChild.unit || '').replace(/ /g, '');
-                const isLeadChild = grandChildName === `${childName}ขึ้นตรง`;
-                const isHidden = grandChild._isHiddenLegacy && isLeadChild;
-                return !isHidden;
-            });
+    const idx = bgNode.children.indexOf(gpNode);
+    bgNode.children.splice(idx, 1, ...gpNode.children);
+};
 
-            if (
-                childNode.children.length === 1 &&
-                String(childNode.children[0].unit || '').replace(/ /g, '') === `${String(childNode.unit || '').replace(/ /g, '')}ขึ้นตรง`
-            ) {
-                node.children.splice(i, 1, childNode.children[0]);
-            } else if (childNode.children.length === 0) {
-                delete childNode.children;
-                if (childNode.key.startsWith('gp2-')) {
-                    childNode.unit = `> ${String(childNode.unit || '').trim()}`;
-                } else if (childNode.key.startsWith('gp-')) {
-                    childNode.unit = String(childNode.unit || '').trim();
-                }
-            } else {
-                if (childNode.key.startsWith('gp2-')) {
-                    childNode.unit = `> ${String(childNode.unit || '').trim()}`;
-                }
-
-                const prefix = childNode.key.startsWith('gp2-') ? '→ ' : '> ';
-                childNode.children.forEach((grandChild: any) => {
-                    const currentName = String(grandChild.unit || '').trim();
-                    const originalParentName = String(childNode.unit || '').replace('> ', '').trim();
-                    if (currentName.endsWith('ขึ้นตรง') && currentName !== `${originalParentName}ขึ้นตรง`) {
-                        grandChild.unit = prefix + currentName.replace('ขึ้นตรง', '');
-                    }
-                });
-            }
-        }
+function buildReport08Tree(
+    flatData: any[],
+    positionMap: Report08LevelMap,
+    costMap: Report08LevelMap
+) {
+    const context: Report08TreeContext = {
+        resultTree: [],
+        group1Map: new Map(),
+        group2Map: new Map(),
+        group3Map: new Map(),
+        unitNameByLabel: new Map<string, string>(),
+        keyCounter: { value: 1 },
+        positionMap,
+        costMap
     };
-    resultTree.forEach((bgNode) => cleanupTree(bgNode));
 
-    const fillMissingUnitNames = (node: any) => {
-        if (!node || typeof node !== 'object') return;
-        const current = toTrimText(node.unit_name);
-        const unitLabel = toTrimText(node.unit);
-        const resolved = resolveUnitName(unitLabel);
-        if ((!current || current === unitLabel) && resolved) {
-            node.unit_name = resolved;
-        } else if (!current && unitLabel) {
-            node.unit_name = unitLabel;
-        }
-        if (Array.isArray(node.children)) {
-            node.children.forEach((child: any) => fillMissingUnitNames(child));
-        }
-    };
-    resultTree.forEach((bgNode) => fillMissingUnitNames(bgNode));
+    collectReportUnitNameAliases(flatData, context.unitNameByLabel);
+    flatData.forEach((row) => addReport08RowToTree(row, context));
+    context.resultTree.forEach((bgNode) => sumReportTreeTotals(bgNode, sumNode));
+    addReport08GrandTotal(context.resultTree);
+    context.resultTree.forEach((bgNode) => cleanupLegacyReportTree(bgNode));
+    context.resultTree.forEach((bgNode) => fillReport08MissingUnitNames(bgNode, context.unitNameByLabel));
+    context.resultTree.forEach((bgNode) => promoteSingleReportGpChildren(bgNode));
 
-    resultTree.forEach((bgNode) => {
-        if (!bgNode.children) return;
-        const gpChildren = bgNode.children.filter((c: any) => c.key && c.key.startsWith('gp-'));
-        if (gpChildren.length === 1) {
-            const gpNode = gpChildren[0];
-            if (gpNode.children && gpNode.children.length > 0) {
-                const idx = bgNode.children.indexOf(gpNode);
-                bgNode.children.splice(idx, 1, ...gpNode.children);
-            }
-        }
-    });
-
-    return resultTree;
+    return context.resultTree;
 }
 
 function createEmptyReport08Node() {
@@ -3735,192 +4030,212 @@ function getIndentPrefix(level: any) {
     return '';
 }
 
-function buildReport01Tree(flatData: any[]) {
-    const resultTree: any[] = [];
-    const group1Map = new Map();
-    const group2Map = new Map();
-    const group3Map = new Map();
-    let keyCounter = 1;
-    const unitNameByLabel = new Map<string, string>();
+const compactReport01Unit = (unit: string) => unit.replace(/ /g, '');
 
-    const normalizeUnitLabel = (value: unknown) => String(value ?? '')
-        .replace(/^>\s*/, '')
-        .replace(/^→\s*/, '')
-        .replace(/ขึ้นตรง$/, '')
-        .trim();
+const isReport01LeadChild = (childNode: any, parentNode: any) =>
+    compactReport01Unit(childNode.unit) === compactReport01Unit(parentNode.unit) + "ขึ้นตรง";
 
-    flatData.forEach((row) => {
-        const unitName = String(row?.UnitName || '').trim();
-        if (!unitName) return;
-
-        const rawAbbr = String(row?.UnitAbbr || '').trim();
-        const rawDisplay = String(row?.DisplayName || '').trim();
-        const candidates = [
-            rawAbbr,
-            rawDisplay,
-            normalizeUnitLabel(rawAbbr),
-            normalizeUnitLabel(rawDisplay)
-        ].filter(Boolean);
-
-        candidates.forEach((label) => {
-            if (!unitNameByLabel.has(label)) {
-                unitNameByLabel.set(label, unitName);
-            }
-        });
-    });
-
-    const resolveUnitName = (label: unknown) => {
-        const raw = String(label ?? '').trim();
-        if (!raw) return '';
-        return unitNameByLabel.get(raw) || unitNameByLabel.get(normalizeUnitLabel(raw)) || '';
-    };
-
-    flatData.forEach((row) => {
-        const bgName = row.GroupBGName;
-        // Legacy reporting used GrandParent for logical summing groups of children (like ผงญ. inside ปธง.)
-        const grandParent = row.GrandParent || "";
-        const grandParent2 = row.GrandParent2 || "";
-
-        if (!bgName) return; 
-
-        // 1. Root Group (GroupBGName)
-        if (!group1Map.has(bgName)) {
-            const bgNode = {
-                key: `bg-${keyCounter++}`,
-                unit: bgName,
-                ...createEmptyNode(),
-                unit_name: String(bgName || '').trim(),
-                children: []
-            };
-            group1Map.set(bgName, bgNode);
-            resultTree.push(bgNode);
-        }
-        let level1Node = group1Map.get(bgName);
-        let targetNode = level1Node;
-
-        const rowData = {
-            key: `r-${keyCounter++}`, 
-            unit: row.DisplayName || row.UnitAbbr,
-            unit_name: row.UnitName || resolveUnitName(row.DisplayName || row.UnitAbbr) || '',
-            // frame_staff
-            frame_staff_0: row.Q_N_21 || 0,
-            frame_staff_1: row.Q_N_18_20 || 0,
-            frame_staff_2: row.Q_N_16_17 || 0,
-            frame_staff_3: row.Q_N_14_15 || 0,
-            frame_staff_4: row.Q_N_11_13 || 0,
-            frame_staff_5: row.Q_N_9_10 || 0,
-            frame_staff_6: row.Q_N_4_8 || 0,
-            frame_staff_7: (row.Q_N_21 || 0) + (row.Q_N_18_20 || 0) + (row.Q_N_16_17 || 0) + (row.Q_N_14_15 || 0) + (row.Q_N_11_13 || 0) + (row.Q_N_9_10 || 0) + (row.Q_N_4_8 || 0),
-
-            // people_normal
-            people_normal_0: row.P_N_21 || 0,
-            people_normal_1: row.P_N_18_20 || 0,
-            people_normal_2: row.P_N_16_17 || 0,
-            people_normal_3: row.P_N_14_15 || 0,
-            people_normal_4: row.P_N_11_13 || 0,
-            people_normal_5: row.P_N_9_10 || 0,
-            people_normal_6: row.P_N_4_8 || 0,
-            people_normal_7: (row.P_N_21 || 0) + (row.P_N_18_20 || 0) + (row.P_N_16_17 || 0) + (row.P_N_14_15 || 0) + (row.P_N_11_13 || 0) + (row.P_N_9_10 || 0) + (row.P_N_4_8 || 0),
-
-            // frame_sec
-            frame_sec_0: row.Q_S_21 || 0,
-            frame_sec_1: row.Q_S_18_20 || 0,
-            frame_sec_2: row.Q_S_16_17 || 0,
-            frame_sec_3: row.Q_S_14_15 || 0,
-            frame_sec_4: row.Q_S_11_13 || 0,
-            frame_sec_5: row.Q_S_9_10 || 0,
-            frame_sec_6: row.Q_S_4_8 || 0,
-            frame_sec_7: (row.Q_S_21 || 0) + (row.Q_S_18_20 || 0) + (row.Q_S_16_17 || 0) + (row.Q_S_14_15 || 0) + (row.Q_S_11_13 || 0) + (row.Q_S_9_10 || 0) + (row.Q_S_4_8 || 0),
-
-            // people_sec
-            people_sec_0: row.P_S_21 || 0,
-            people_sec_1: row.P_S_18_20 || 0,
-            people_sec_2: row.P_S_16_17 || 0,
-            people_sec_3: row.P_S_14_15 || 0,
-            people_sec_4: row.P_S_11_13 || 0,
-            people_sec_5: row.P_S_9_10 || 0,
-            people_sec_6: row.P_S_4_8 || 0,
-            people_sec_7: (row.P_S_21 || 0) + (row.P_S_18_20 || 0) + (row.P_S_16_17 || 0) + (row.P_S_14_15 || 0) + (row.P_S_11_13 || 0) + (row.P_S_9_10 || 0) + (row.P_S_4_8 || 0),
-
-            // total_frame
-            sum_frame_normal: row.mn_amount || row.n_amount || 0,
-            sum_frame_pool: row.p_amount || 0,
-            sum_frame_trad: row.mtr_amount || row.tr_amount || 0,
-            sum_frame_newbiz: row.mnb_amount || row.nb_amount || 0,
-            sum_frame_total: row.total_amount || 0,
-
-            // total_people
-            sum_people_normal: row.m_amount || 0,
-            sum_people_pool: row.m_amount || 0,
-            sum_people_trad: 0,
-            sum_people_newbiz: 0,
-            sum_people_total: row.m_amount || row.total_amount || 0,
-
-            // other columns
-            recruit_total: row.f_amount || row.F_Amount || row.F_amount || 0,
-            vacancy_0: row.Vacant_21 || 0,
-            vacancy_1: row.Vacant_18_20 || 0,
-            vacancy_2: row.Vacant_16_17 || 0,
-            vacancy_3: row.Vacant_14_15 || 0,
-            vacancy_4: row.Vacant_11_13 || 0,
-            vacancy_5: row.Vacant_9_10 || 0,
-            vacancy_6: row.Vacant_4_8 || 0,
-            vacancy_7: (row.Vacant_21 || 0) + (row.Vacant_18_20 || 0) + (row.Vacant_16_17 || 0) + (row.Vacant_14_15 || 0) + (row.Vacant_11_13 || 0) + (row.Vacant_9_10 || 0) + (row.Vacant_4_8 || 0),
-
-            contact_out: row.q_contact || 0,
-            contact_out_sub: row.q_subcontact || 0,
-            _isHiddenLegacy: row.IsBelongTo == 1 || row.IsBelongTo === true || row.IsBelongTo === '1'
-        };
-
-        // 2. Sub Group (GrandParent)
-        if (grandParent) {
-            const group2KeyId = `${bgName}-${grandParent}`;
-            if (!group2Map.has(group2KeyId)) {
-                const gpNode = {
-                    key: `gp-${keyCounter++}`,
-                    unit: grandParent,
-                    ...createEmptyNode(),
-                    unit_name: resolveUnitName(grandParent),
-                    children: []
-                };
-                group2Map.set(group2KeyId, gpNode);
-                targetNode.children.push(gpNode);
-            }
-            targetNode = group2Map.get(group2KeyId);
-
-            // 3. Sub-Sub Group (GrandParent2)
-            if (grandParent2 && grandParent2 !== grandParent) {
-                const group3KeyId = `${bgName}-${grandParent}-${grandParent2}`;
-                if (!group3Map.has(group3KeyId)) {
-                    const gp2Node = {
-                        key: `gp2-${keyCounter++}`,
-                        unit: grandParent2,
-                        ...createEmptyNode(),
-                        unit_name: resolveUnitName(grandParent2),
-                        children: []
-                    };
-                    group3Map.set(group3KeyId, gp2Node);
-                    targetNode.children.push(gp2Node);
-                }
-                targetNode = group3Map.get(group3KeyId);
-            }
-        }
-
-        rowData.key = `r-${keyCounter++}`;
-        targetNode.children.push(rowData);
-    });
-
-    // Rollup sums matching legacy report recursively!
-    function sumTotalRecursive(node: any) {
-        if (!node.children || node.children.length === 0) return node;
-        node.children.forEach((child: any) => sumTotalRecursive(child));
-        node.children.forEach((child: any) => sumNode(node, child));
-        return node;
+const prefixReport01GroupNode = (node: any) => {
+    if (node.key.startsWith('gp2-')) {
+        node.unit = "> " + node.unit.trim();
+        return;
     }
-    resultTree.forEach(bgNode => sumTotalRecursive(bgNode));
+    if (node.key.startsWith('gp-')) {
+        node.unit = node.unit.trim();
+    }
+};
 
-    // Compute grand total record
-    let grandTotal = {
+const renameReport01VisibleLeadChildren = (childNode: any) => {
+    if (childNode.key.startsWith('gp2-')) {
+        childNode.unit = "> " + childNode.unit.trim();
+    }
+
+    const prefix = childNode.key.startsWith('gp2-') ? "→ " : "> ";
+    const originalParentName = childNode.unit.replace("> ", "").trim();
+    childNode.children.forEach((grandChild: any) => {
+        const childName = grandChild.unit.trim();
+        if (childName.endsWith("ขึ้นตรง") && childName !== originalParentName + "ขึ้นตรง") {
+            grandChild.unit = prefix + childName.replace("ขึ้นตรง", "");
+        }
+    });
+};
+
+const refineReport01ChildNode = (node: any, childNode: any, childIndex: number) => {
+    if (childNode.children.length === 1 && isReport01LeadChild(childNode.children[0], childNode)) {
+        node.children.splice(childIndex, 1, childNode.children[0]);
+        return;
+    }
+
+    if (childNode.children.length === 0) {
+        delete childNode.children;
+        prefixReport01GroupNode(childNode);
+        return;
+    }
+
+    renameReport01VisibleLeadChildren(childNode);
+};
+
+function cleanupReport01Tree(node: any) {
+    if (!node.children) return;
+
+    for (let i = node.children.length - 1; i >= 0; i--) {
+        const childNode = node.children[i];
+        if (!childNode.children) continue;
+
+        cleanupReport01Tree(childNode);
+        childNode.children = childNode.children.filter((grandChild: any) =>
+            !(grandChild._isHiddenLegacy && isReport01LeadChild(grandChild, childNode))
+        );
+        refineReport01ChildNode(node, childNode, i);
+    }
+}
+
+type Report01TreeContext = {
+    resultTree: any[];
+    group1Map: Map<any, any>;
+    group2Map: Map<string, any>;
+    group3Map: Map<string, any>;
+    unitNameByLabel: Map<string, string>;
+    keyCounter: { value: number };
+};
+
+const createReport01GroupNode = (prefix: string, unit: unknown, unitName: string, context: Report01TreeContext) => ({
+    key: nextReportTreeKey(prefix, context),
+    unit,
+    ...createEmptyNode(),
+    unit_name: unitName,
+    children: []
+});
+
+const report01SevenTotal = (row: any, keys: string[]) =>
+    keys.reduce((sum, key) => sum + (row[key] || 0), 0);
+
+const getReport01FrameStaffFields = (row: any) => ({
+    frame_staff_0: row.Q_N_21 || 0,
+    frame_staff_1: row.Q_N_18_20 || 0,
+    frame_staff_2: row.Q_N_16_17 || 0,
+    frame_staff_3: row.Q_N_14_15 || 0,
+    frame_staff_4: row.Q_N_11_13 || 0,
+    frame_staff_5: row.Q_N_9_10 || 0,
+    frame_staff_6: row.Q_N_4_8 || 0,
+    frame_staff_7: report01SevenTotal(row, ['Q_N_21', 'Q_N_18_20', 'Q_N_16_17', 'Q_N_14_15', 'Q_N_11_13', 'Q_N_9_10', 'Q_N_4_8'])
+});
+
+const getReport01PeopleNormalFields = (row: any) => ({
+    people_normal_0: row.P_N_21 || 0,
+    people_normal_1: row.P_N_18_20 || 0,
+    people_normal_2: row.P_N_16_17 || 0,
+    people_normal_3: row.P_N_14_15 || 0,
+    people_normal_4: row.P_N_11_13 || 0,
+    people_normal_5: row.P_N_9_10 || 0,
+    people_normal_6: row.P_N_4_8 || 0,
+    people_normal_7: report01SevenTotal(row, ['P_N_21', 'P_N_18_20', 'P_N_16_17', 'P_N_14_15', 'P_N_11_13', 'P_N_9_10', 'P_N_4_8'])
+});
+
+const getReport01FrameSecFields = (row: any) => ({
+    frame_sec_0: row.Q_S_21 || 0,
+    frame_sec_1: row.Q_S_18_20 || 0,
+    frame_sec_2: row.Q_S_16_17 || 0,
+    frame_sec_3: row.Q_S_14_15 || 0,
+    frame_sec_4: row.Q_S_11_13 || 0,
+    frame_sec_5: row.Q_S_9_10 || 0,
+    frame_sec_6: row.Q_S_4_8 || 0,
+    frame_sec_7: report01SevenTotal(row, ['Q_S_21', 'Q_S_18_20', 'Q_S_16_17', 'Q_S_14_15', 'Q_S_11_13', 'Q_S_9_10', 'Q_S_4_8'])
+});
+
+const getReport01PeopleSecFields = (row: any) => ({
+    people_sec_0: row.P_S_21 || 0,
+    people_sec_1: row.P_S_18_20 || 0,
+    people_sec_2: row.P_S_16_17 || 0,
+    people_sec_3: row.P_S_14_15 || 0,
+    people_sec_4: row.P_S_11_13 || 0,
+    people_sec_5: row.P_S_9_10 || 0,
+    people_sec_6: row.P_S_4_8 || 0,
+    people_sec_7: report01SevenTotal(row, ['P_S_21', 'P_S_18_20', 'P_S_16_17', 'P_S_14_15', 'P_S_11_13', 'P_S_9_10', 'P_S_4_8'])
+});
+
+const getReport01SummaryFields = (row: any) => ({
+    sum_frame_normal: row.mn_amount || row.n_amount || 0,
+    sum_frame_pool: row.p_amount || 0,
+    sum_frame_trad: row.mtr_amount || row.tr_amount || 0,
+    sum_frame_newbiz: row.mnb_amount || row.nb_amount || 0,
+    sum_frame_total: row.total_amount || 0,
+    sum_people_normal: row.m_amount || 0,
+    sum_people_pool: row.m_amount || 0,
+    sum_people_trad: 0,
+    sum_people_newbiz: 0,
+    sum_people_total: row.m_amount || row.total_amount || 0
+});
+
+const getReport01VacancyFields = (row: any) => ({
+    recruit_total: row.f_amount || row.F_Amount || row.F_amount || 0,
+    vacancy_0: row.Vacant_21 || 0,
+    vacancy_1: row.Vacant_18_20 || 0,
+    vacancy_2: row.Vacant_16_17 || 0,
+    vacancy_3: row.Vacant_14_15 || 0,
+    vacancy_4: row.Vacant_11_13 || 0,
+    vacancy_5: row.Vacant_9_10 || 0,
+    vacancy_6: row.Vacant_4_8 || 0,
+    vacancy_7: report01SevenTotal(row, ['Vacant_21', 'Vacant_18_20', 'Vacant_16_17', 'Vacant_14_15', 'Vacant_11_13', 'Vacant_9_10', 'Vacant_4_8'])
+});
+
+const createReport01RowData = (row: any, context: Report01TreeContext) => {
+    nextReportTreeKey('r', context);
+    return {
+        key: nextReportTreeKey('r', context),
+        unit: row.DisplayName || row.UnitAbbr,
+        unit_name: row.UnitName || resolveReportUnitName(row.DisplayName || row.UnitAbbr, context.unitNameByLabel) || '',
+        ...getReport01FrameStaffFields(row),
+        ...getReport01PeopleNormalFields(row),
+        ...getReport01FrameSecFields(row),
+        ...getReport01PeopleSecFields(row),
+        ...getReport01SummaryFields(row),
+        ...getReport01VacancyFields(row),
+        contact_out: row.q_contact || 0,
+        contact_out_sub: row.q_subcontact || 0,
+        _isHiddenLegacy: row.IsBelongTo == 1 || row.IsBelongTo === true || row.IsBelongTo === '1'
+    };
+};
+
+const getReport01LeafParentNode = (bgName: any, grandParent: any, grandParent2: any, context: Report01TreeContext) => {
+    let targetNode = getOrCreateReportGroupNode(
+        context.group1Map,
+        bgName,
+        () => createReport01GroupNode('bg', bgName, String(bgName || '').trim(), context),
+        context.resultTree
+    );
+
+    if (!grandParent) return targetNode;
+
+    const group2KeyId = `${bgName}-${grandParent}`;
+    targetNode = getOrCreateReportGroupNode(
+        context.group2Map,
+        group2KeyId,
+        () => createReport01GroupNode('gp', grandParent, resolveReportUnitName(grandParent, context.unitNameByLabel), context),
+        targetNode.children
+    );
+
+    if (!grandParent2 || grandParent2 === grandParent) return targetNode;
+
+    const group3KeyId = `${bgName}-${grandParent}-${grandParent2}`;
+    return getOrCreateReportGroupNode(
+        context.group3Map,
+        group3KeyId,
+        () => createReport01GroupNode('gp2', grandParent2, resolveReportUnitName(grandParent2, context.unitNameByLabel), context),
+        targetNode.children
+    );
+};
+
+const addReport01RowToTree = (row: any, context: Report01TreeContext) => {
+    const bgName = row.GroupBGName;
+    if (!bgName) return;
+
+    const targetNode = getReport01LeafParentNode(bgName, row.GrandParent || "", row.GrandParent2 || "", context);
+    targetNode.children.push(createReport01RowData(row, context));
+};
+
+const addReport01GrandTotal = (resultTree: any[]) => {
+    const grandTotal = {
         key: 'total',
         unit: 'รวมทุกธุรกิจ',
         ...createEmptyNode(),
@@ -3928,80 +4243,26 @@ function buildReport01Tree(flatData: any[]) {
     };
     resultTree.forEach(node => sumNode(grandTotal, node));
     resultTree.push(grandTotal);
+};
 
-    // Format names to match Legacy Design exactly (Recursive Cleanup)
-    function cleanupTree(node: any) {
-        if (!node.children) return;
+function buildReport01Tree(flatData: any[]) {
+    const context: Report01TreeContext = {
+        resultTree: [],
+        group1Map: new Map(),
+        group2Map: new Map(),
+        group3Map: new Map(),
+        unitNameByLabel: new Map<string, string>(),
+        keyCounter: { value: 1 }
+    };
 
-        for (let i = node.children.length - 1; i >= 0; i--) {
-            let childNode = node.children[i];
+    collectReportUnitNameAliases(flatData, context.unitNameByLabel);
+    flatData.forEach((row) => addReport01RowToTree(row, context));
+    context.resultTree.forEach((bgNode) => sumReportTreeTotals(bgNode, sumNode));
+    addReport01GrandTotal(context.resultTree);
+    context.resultTree.forEach(bgNode => cleanupReport01Tree(bgNode));
+    context.resultTree.forEach(bgNode => promoteSingleReportGpChildren(bgNode));
 
-            if (childNode.children) {
-                // Recursively clean sub-folders first
-                cleanupTree(childNode);
-
-                // 1. Remove logically hidden leaf nodes
-                childNode.children = childNode.children.filter((grandChild: any) => {
-                    const isLeadChild = grandChild.unit.replace(/ /g, '') === childNode.unit.replace(/ /g, '') + "ขึ้นตรง";
-                    const isHidden = grandChild._isHiddenLegacy && isLeadChild;
-                    return !isHidden;
-                });
-
-                // 2. Refine node structures
-                if (childNode.children.length === 1 && childNode.children[0].unit.replace(/ /g, '') === childNode.unit.replace(/ /g, '') + "ขึ้นตรง") {
-                    // Folder exactly contains Lead Child! Promote it & remove folder wrapper
-                    node.children.splice(i, 1, childNode.children[0]);
-                } else if (childNode.children.length === 0) {
-                    // Empty Folders drop their array to become solid header rows (e.g. ผตญ.)
-                    delete childNode.children;
-                    // For Level 3 folders like > ผงญ. format them correctly
-                    if (childNode.key.startsWith('gp2-')) {
-                        childNode.unit = "> " + childNode.unit.trim();
-                    } else if (childNode.key.startsWith('gp-')) {
-                        // GrandParent groups that became empty keep their exact string
-                        childNode.unit = childNode.unit.trim(); 
-                    }
-                } else {
-                    // Multiple visible children: Rename sub-leaf names to > or arrow
-                    // For GrandParent2 (sub-sub-groups) it behaves like a folder, so mark its name with "> "
-                    if (childNode.key.startsWith('gp2-')) {
-                        childNode.unit = "> " + childNode.unit.trim();
-                    }
-                    
-                    const prefix = childNode.key.startsWith('gp2-') ? "→ " : "> ";
-                    childNode.children.forEach((grandChild: any) => {
-                        let cName = grandChild.unit.trim();
-                        let originalParentName = childNode.unit.replace("> ", "").trim();
-                        
-                        if (cName.endsWith("ขึ้นตรง") && cName !== originalParentName + "ขึ้นตรง") {
-                            grandChild.unit = prefix + cName.replace("ขึ้นตรง", "");
-                        }
-                    });
-                }
-            }
-        }
-    }
-
-    resultTree.forEach(bgNode => cleanupTree(bgNode));
-
-    // RDLC Legacy Rule: IIF(Fields!Lvl.Value = 1, True, False)
-    // When a GroupBG has only ONE GrandParent (Lvl=1), the GrandParent header is hidden
-    // and its children are promoted directly to the GroupBG level.
-    resultTree.forEach(bgNode => {
-        if (!bgNode.children) return;
-        // Count how many gp- children exist
-        const gpChildren = bgNode.children.filter((c: any) => c.key && c.key.startsWith('gp-'));
-        if (gpChildren.length === 1) {
-            const gpNode = gpChildren[0];
-            if (gpNode.children && gpNode.children.length > 0) {
-                // Find the index of the gp- node and replace it with its children
-                const idx = bgNode.children.indexOf(gpNode);
-                bgNode.children.splice(idx, 1, ...gpNode.children);
-            }
-        }
-    });
-
-    return resultTree;
+    return context.resultTree;
 }
 function rollupTotals(node: any) {
     if (!node.children || node.children.length === 0) return node;

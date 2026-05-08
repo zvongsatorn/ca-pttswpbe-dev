@@ -248,6 +248,17 @@ export interface TransferUnitsByReceiveParams {
     selectType?: number;
 }
 
+const mapTransferUnitByReceiveRow = (row: any) => ({
+    id: row.OrgUnitNo,
+    name: row.UnitName || row.OrgUnitNo,
+    unitText: row.UnitText || `${row.OrgUnitNo} ${row.UnitName || ""}`.trim(),
+    parentOrgUnitNo: row.ParentOrgUnitNo ? String(row.ParentOrgUnitNo).trim() : null,
+    ParentOrgUnitNo: row.ParentOrgUnitNo ? String(row.ParentOrgUnitNo).trim() : null,
+    OrgUnitNo: row.OrgUnitNo,
+    UnitName: row.UnitName || row.OrgUnitNo,
+    UnitAbbr: row.UnitAbbr || row.OrgUnitNo,
+});
+
 /**
  * Service for transfer type 1 options (legacy parity with DataCombo/GetUnitComboByUnitReceive)
  * Executes mp_UnitGetByLineAndUnitLvlAndEffectivePeriod using:
@@ -271,18 +282,8 @@ export const getTransferUnitsByReceiveService = async (params: TransferUnitsByRe
         const result = await request.execute('mp_UnitGetByLineAndUnitLvlAndEffectivePeriod');
 
         if (result && result.recordset) {
-            return result.recordset.map(row => ({
-                id: row.OrgUnitNo,
-                name: row.UnitName || row.OrgUnitNo,
-                unitText: row.UnitText || `${row.OrgUnitNo} ${row.UnitName || ''}`.trim(),
-                parentOrgUnitNo: row.ParentOrgUnitNo ? String(row.ParentOrgUnitNo).trim() : null,
-                ParentOrgUnitNo: row.ParentOrgUnitNo ? String(row.ParentOrgUnitNo).trim() : null,
-                OrgUnitNo: row.OrgUnitNo,
-                UnitName: row.UnitName || row.OrgUnitNo,
-                UnitAbbr: row.UnitAbbr || row.OrgUnitNo,
-            }));
+            return result.recordset.map(mapTransferUnitByReceiveRow);
         }
-
         return [];
     } catch (error) {
         console.error('Error executing mp_UnitGetByLineAndUnitLvlAndEffectivePeriod:', error);

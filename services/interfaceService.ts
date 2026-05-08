@@ -229,103 +229,115 @@ const toExcelSerialDate = (serial: number): string | null => {
     return d.toISOString().slice(0, 10);
 };
 
-const toNullableDate = (value: unknown): string | null => {
-    const raw = unwrapExcelCell(value);
+const formatSlashDateText = (text: string): string | null => {
+    const [left, middle, right] = text.split("/").map((part) => Number.parseInt(part, 10));
+    if (!Number.isFinite(left) || !Number.isFinite(middle) || !Number.isFinite(right)) return null;
 
-    if (raw === null || raw === undefined || raw === '') return null;
+    let year = right;
+    if (year > 2400) year -= 543;
+    if (year < 100) year += 2000;
 
-    if (raw instanceof Date && !Number.isNaN(raw.getTime())) {
-        return raw.toISOString().slice(0, 10);
-    }
+    const d = new Date(Date.UTC(year, middle - 1, left));
+    if (Number.isNaN(d.getTime())) return null;
+    return d.toISOString().slice(0, 10);
+};
 
-    if (typeof raw === 'number') {
-        return toExcelSerialDate(raw);
-    }
-
-    const text = cleanCellText(raw);
-    if (!text) return null;
-
-    if (/^\d{4}-\d{2}-\d{2}/.test(text)) {
-        return text.slice(0, 10);
-    }
-
-    if (/^\d{4}\/\d{2}\/\d{2}/.test(text)) {
-        return text.slice(0, 10).replace(/\//g, '-');
-    }
-
-    if (/^\d{8}$/.test(text)) {
-        return `${text.slice(0, 4)}-${text.slice(4, 6)}-${text.slice(6, 8)}`;
-    }
-
-    if (/^\d{1,2}\/\d{1,2}\/\d{2,4}$/.test(text)) {
-        const [left, middle, right] = text.split('/').map((part) => Number.parseInt(part, 10));
-        if (!Number.isFinite(left) || !Number.isFinite(middle) || !Number.isFinite(right)) return null;
-
-        let year = right;
-        if (year > 2400) year -= 543;
-        if (year < 100) year += 2000;
-
-        const day = left;
-        const month = middle;
-
-        const d = new Date(Date.UTC(year, month - 1, day));
-        if (Number.isNaN(d.getTime())) return null;
-        return d.toISOString().slice(0, 10);
-    }
+const formatDateText = (text: string): string | null => {
+    if (/^\d{4}-\d{2}-\d{2}/.test(text)) return text.slice(0, 10);
+    if (/^\d{4}\/\d{2}\/\d{2}/.test(text)) return text.slice(0, 10).replace(/\//g, "-");
+    if (/^\d{8}$/.test(text)) return text.slice(0, 4) + "-" + text.slice(4, 6) + "-" + text.slice(6, 8);
+    if (/^\d{1,2}\/\d{1,2}\/\d{2,4}$/.test(text)) return formatSlashDateText(text);
 
     const parsed = new Date(text);
     if (Number.isNaN(parsed.getTime())) return null;
-
     return parsed.toISOString().slice(0, 10);
+};
+
+const toNullableDate = (value: unknown): string | null => {
+    const raw = unwrapExcelCell(value);
+
+    if (raw === null || raw === undefined || raw === "") return null;
+    if (raw instanceof Date && !Number.isNaN(raw.getTime())) return raw.toISOString().slice(0, 10);
+    if (typeof raw === "number") return toExcelSerialDate(raw);
+
+    const text = cleanCellText(raw);
+    return text ? formatDateText(text) : null;
 };
 
 const isEmptyRow = (values: unknown[]): boolean => {
     return values.every((value) => cleanCellText(value) === '');
 };
 
-const parseCsvText = (text: string): string[][] => {
-    const rows: string[][] = [];
-    let currentRow: string[] = [];
-    let currentField = '';
-    let inQuotes = false;
+type CsvParseState = {
+    rows: string[][];
+    currentRow: string[];
+    currentField: string;
+    inQuotes: boolean;
+    index: number;
+};
 
-    const source = text.replace(/^\uFEFF/, '');
+const pushCsvField = (state: CsvParseState): void => {
+    state.currentRow.push(state.currentField);
+    state.currentField = "";
+};
 
-    for (let i = 0; i < source.length; i += 1) {
-        const ch = source[i];
+const pushCsvRow = (state: CsvParseState): void => {
+    pushCsvField(state);
+    state.rows.push(state.currentRow);
+    state.currentRow = [];
+};
 
-        if (ch === '"') {
-            if (inQuotes && source[i + 1] === '"') {
-                currentField += '"';
-                i += 1;
-            } else {
-                inQuotes = !inQuotes;
-            }
-            continue;
-        }
+const readCsvQuote = (source: string, state: CsvParseState): boolean => {
+    if (source[state.index] !== "\"") return false;
 
-        if (ch === ',' && !inQuotes) {
-            currentRow.push(currentField);
-            currentField = '';
-            continue;
-        }
-
-        if ((ch === '\n' || ch === '\r') && !inQuotes) {
-            if (ch === '\r' && source[i + 1] === '\n') i += 1;
-            currentRow.push(currentField);
-            rows.push(currentRow);
-            currentRow = [];
-            currentField = '';
-            continue;
-        }
-
-        currentField += ch;
+    if (state.inQuotes && source[state.index + 1] === "\"") {
+        state.currentField += "\"";
+        state.index += 2;
+        return true;
     }
 
-    currentRow.push(currentField);
-    rows.push(currentRow);
+    state.inQuotes = !state.inQuotes;
+    state.index += 1;
+    return true;
+};
 
-    return rows;
+const readCsvSeparator = (source: string, state: CsvParseState): boolean => {
+    if (source[state.index] !== "," || state.inQuotes) return false;
+    pushCsvField(state);
+    state.index += 1;
+    return true;
+};
+
+const readCsvLineBreak = (source: string, state: CsvParseState): boolean => {
+    const ch = source[state.index];
+    if ((ch !== "\n" && ch !== "\r") || state.inQuotes) return false;
+
+    pushCsvRow(state);
+    state.index += ch === "\r" && source[state.index + 1] === "\n" ? 2 : 1;
+    return true;
+};
+
+const parseCsvText = (text: string): string[][] => {
+    const source = text.replace(/^\uFEFF/, "");
+    const state: CsvParseState = {
+        rows: [],
+        currentRow: [],
+        currentField: "",
+        inQuotes: false,
+        index: 0
+    };
+
+    while (state.index < source.length) {
+        if (readCsvQuote(source, state)) continue;
+        if (readCsvSeparator(source, state)) continue;
+        if (readCsvLineBreak(source, state)) continue;
+
+        state.currentField += source[state.index];
+        state.index += 1;
+    }
+
+    pushCsvRow(state);
+    return state.rows;
 };
 
 const decodeCsvBuffer = (buffer: Uint8Array): string => {
@@ -560,8 +572,9 @@ const resolveHrpTargetTableFromFileName = (
     const mappedTable = HRP_FILE_TO_TABLE_MAP[normalizedFileBase as keyof typeof HRP_FILE_TO_TABLE_MAP];
 
     if (!mappedTable) {
+        const allowedFileNames = ALLOWED_HRP_FILE_NAMES.map((name) => `${name}.csv`).join(String.fromCharCode(44, 32));
         throw new Error(
-            `ชื่อไฟล์ไม่รองรับ: ${fileName}. รองรับเฉพาะ ${ALLOWED_HRP_FILE_NAMES.map((name) => `${name}.csv`).join(', ')}`
+            `ชื่อไฟล์ไม่รองรับ: ${fileName}. รองรับเฉพาะ ${allowedFileNames}`
         );
     }
 

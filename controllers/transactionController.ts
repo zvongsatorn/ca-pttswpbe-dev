@@ -15,8 +15,7 @@ import {
     getTransactionLogYearService,
     getTransactionLogYearDetailService,
     getSapMonitorGridService,
-    getSapMonitorLogService,
-    DraftTransactionPayload
+    getSapMonitorLogService
 } from '../services/transactionService.js';
 import {
     sendHRCenterToSapService,
@@ -94,48 +93,113 @@ const toEffectiveDateFromThaiMonthYear = (
     return effectiveDate;
 };
 
+const normalizeUploadFileName = (value: unknown): string | undefined => {
+    if (typeof value !== "string") return undefined;
+    const trimmed = value.trim();
+    if (!trimmed) return undefined;
+    return path.basename(trimmed.replace(/\\/g, "/"));
+};
+
+const normalizeTransactionNo = (value: unknown): string | undefined => {
+    if (typeof value !== "string") return undefined;
+    const trimmed = value.trim();
+    return trimmed ? trimmed.substring(0, 10) : undefined;
+};
+
+const parseDraftJsonBody = async (c: Context): Promise<Record<string, any> | null> => {
+    const raw: Record<string, unknown> | null = await c.req.json().catch(() => null);
+    const payloadRaw = raw?.payload;
+
+    if (payloadRaw && typeof payloadRaw === "object") return payloadRaw as Record<string, any>;
+    if (typeof payloadRaw === "string" && payloadRaw.trim()) return JSON.parse(payloadRaw);
+    return raw && typeof raw === "object" ? raw as Record<string, any> : null;
+};
+
+const parseDraftRequest = async (c: Context): Promise<{ body: Record<string, any> | null; fileEntry: File | null; missingPayload: boolean }> => {
+    const contentType = c.req.header("content-type") || "";
+    if (!contentType.includes("multipart/form-data")) {
+        return { body: await parseDraftJsonBody(c), fileEntry: null, missingPayload: false };
+    }
+
+    const formData = await c.req.formData();
+    const payloadRaw = formData.get("payload");
+    const fileEntry = formData.get("file") as File | null;
+
+    if (typeof payloadRaw !== "string" || !payloadRaw.trim()) {
+        return { body: null, fileEntry, missingPayload: true };
+    }
+
+    return { body: JSON.parse(payloadRaw), fileEntry, missingPayload: false };
+};
+
+const saveUploadedTransactionFile = async (fileEntry: File | null): Promise<{ fileName: string | null; fileUrl: string | undefined } | null> => {
+    if (!fileEntry) return null;
+
+    const uploadsDir = path.join(process.cwd(), "uploads", "transactions");
+    if (!existsSync(uploadsDir)) {
+        await mkdir(uploadsDir, { recursive: true });
+    }
+
+    const originalName = fileEntry.name;
+    let extension = path.extname(originalName).toLowerCase();
+    if (!extension) extension = ".pdf";
+
+    const { randomUUID } = await import("crypto");
+    const safeName = randomUUID() + extension;
+    const savedFilePath = path.join(uploadsDir, safeName);
+    const fileBuffer = Buffer.from(await fileEntry.arrayBuffer());
+    await writeFile(savedFilePath, fileBuffer);
+
+    return { fileName: originalName, fileUrl: safeName };
+};
+
+const buildDraftTransactionPayload = (body: Record<string, any>, fileNameToSave: string | null, fileUrlToSave: string | undefined): any => ({
+    transactionType: parseInt(body.transactionType as string),
+    effectiveMonth: body.effectiveMonth,
+    effectiveYear: body.effectiveYear,
+    poolRsFlag: body.poolRsFlag,
+    strgFlag: body.strgFlag,
+    bsType: body.bsType,
+    specFlag: body.specFlag,
+    unitReceive: body.unitReceive,
+    remark: body.remark,
+    lineStaffFlag: body.lineStaffFlag,
+    policyFlag: body.policyFlag,
+    pastFlag: body.pastFlag,
+    levelGroupTo: body.detailData?.levelGroupTo || "",
+    levelGroupFrom: body.detailData?.levelGroupFrom || "",
+    amount: body.detailData?.amount || 0,
+    conclusionNo: body.detailData?.conclusionNo || "",
+    conclusionDate: body.detailData?.conclusionDate || null,
+    unitTransfer: body.detailData?.unitTransfer || "",
+    transferInd: body.detailData?.transferInd || 0,
+    unitReceiveName: body.unitReceiveName || "",
+    unitTransferName: body.detailData?.unitTransferName || "",
+    levelGroupFromName: body.detailData?.levelGroupFromName || "",
+    levelGroupToName: body.detailData?.levelGroupToName || "",
+    fileName: fileNameToSave,
+    fileUrl: fileUrlToSave,
+    refId: body.detailData?.existingFileId,
+    refTransactionNo: normalizeTransactionNo(body.refTransactionNo ?? body.detailData?.refTransactionNo),
+});
+
 export const saveDraftTransaction = async (c: Context) => {
     try {
-        const contentType = c.req.header('content-type') || '';
-        let body: Record<string, any> | null = null;
-        let fileEntry: File | null = null;
+        const { body, fileEntry, missingPayload } = await parseDraftRequest(c);
 
-        if (contentType.includes('multipart/form-data')) {
-            const formData = await c.req.formData();
-            const payloadRaw = formData.get('payload');
-            fileEntry = formData.get('file') as File | null;
-
-            if (typeof payloadRaw !== 'string' || !payloadRaw.trim()) {
-                return c.json({ status: 400, message: 'Missing payload field' }, 400);
-            }
-            body = JSON.parse(payloadRaw);
-        } else {
-            const raw = await c.req.json().catch(() => null) as any;
-            const payloadRaw = raw?.payload;
-
-            if (payloadRaw && typeof payloadRaw === 'object') {
-                body = payloadRaw;
-            } else if (typeof payloadRaw === 'string' && payloadRaw.trim()) {
-                body = JSON.parse(payloadRaw);
-            } else if (raw && typeof raw === 'object') {
-                body = raw;
-            }
+        if (missingPayload) {
+            return c.json({ status: 400, message: "Missing payload field" }, 400);
         }
-
         if (!body) {
-            return c.json({ status: 400, message: 'Invalid payload' }, 400);
+            return c.json({ status: 400, message: "Invalid payload" }, 400);
         }
 
         const parsedEffective = parseEffectiveMonthYear(body.effectiveMonth, body.effectiveYear);
         if (!parsedEffective.month || !parsedEffective.year) {
-            return c.json({ status: 400, message: 'Invalid effectiveMonth or effectiveYear' }, 400);
+            return c.json({ status: 400, message: "Invalid effectiveMonth or effectiveYear" }, 400);
         }
 
-        const calendarWindowCheck = await validateTransactionCreationWindowService(
-            parsedEffective.month,
-            parsedEffective.year
-        );
-
+        const calendarWindowCheck = await validateTransactionCreationWindowService(parsedEffective.month, parsedEffective.year);
         if (!calendarWindowCheck.isAllowed) {
             return c.json({
                 status: 403,
@@ -147,96 +211,23 @@ export const saveDraftTransaction = async (c: Context) => {
             }, 403);
         }
 
-        const createBy = body.employeeId || 'SYSTEM';
-
-        // DB column for FileUpload stores only the file name (no folder prefix).
-        const normalizeUploadFileName = (value: unknown): string | undefined => {
-            if (typeof value !== 'string') return undefined;
-            const trimmed = value.trim();
-            if (!trimmed) return undefined;
-            const normalized = trimmed.replace(/\\/g, '/');
-            return path.basename(normalized);
-        };
-
-        const normalizeTransactionNo = (value: unknown): string | undefined => {
-            if (typeof value !== 'string') return undefined;
-            const trimmed = value.trim();
-            if (!trimmed) return undefined;
-            return trimmed.substring(0, 10);
-        };
-
-        // Process file upload first if present
-        let fileUrlToSave = normalizeUploadFileName(body.detailData?.existingFileUrl);
-        let fileNameToSave = body.detailData?.existingFileName || null;
-        
-        if (fileEntry) {
-            const uploadsDir = path.join(process.cwd(), 'uploads', 'transactions');
-            if (!existsSync(uploadsDir)) {
-                await mkdir(uploadsDir, { recursive: true });
-            }
-            const originalName = fileEntry.name;
-            let extension = path.extname(originalName).toLowerCase();
-            if (!extension) extension = ".pdf";
-            
-            const { randomUUID } = await import('crypto');
-            const safeName = `${randomUUID()}${extension}`;
-            
-            const savedFilePath = path.join(uploadsDir, safeName);
-            const fileBuffer = Buffer.from(await fileEntry.arrayBuffer());
-            await writeFile(savedFilePath, fileBuffer);
-            
-            fileNameToSave = originalName;
-            fileUrlToSave = safeName;
-        }
-
-        const payload = {
-            transactionType: parseInt(body.transactionType as string),
-            effectiveMonth: body.effectiveMonth,
-            effectiveYear: body.effectiveYear,
-            poolRsFlag: body.poolRsFlag,
-            strgFlag: body.strgFlag,
-            bsType: body.bsType,
-            specFlag: body.specFlag,
-            unitReceive: body.unitReceive,
-            remark: body.remark,
-            lineStaffFlag: body.lineStaffFlag,
-            policyFlag: body.policyFlag,
-            pastFlag: body.pastFlag,
-
-            levelGroupTo: body.detailData?.levelGroupTo || '',
-            levelGroupFrom: body.detailData?.levelGroupFrom || '',
-            amount: body.detailData?.amount || 0,
-            conclusionNo: body.detailData?.conclusionNo || '',
-            conclusionDate: body.detailData?.conclusionDate || null,
-            unitTransfer: body.detailData?.unitTransfer || '',
-            transferInd: body.detailData?.transferInd || 0,
-
-            // Text values for description formatting
-            unitReceiveName: body.unitReceiveName || '',
-            unitTransferName: body.detailData?.unitTransferName || '',
-            levelGroupFromName: body.detailData?.levelGroupFromName || '',
-            levelGroupToName: body.detailData?.levelGroupToName || '',
-
-            // File fields
-            fileName: fileNameToSave,
-            fileUrl: fileUrlToSave,
-            refId: body.detailData?.existingFileId, // Using existing TransactionFileID as RefID
-            refTransactionNo: normalizeTransactionNo(body.refTransactionNo ?? body.detailData?.refTransactionNo),
-        };
-
-        // Save draft and the file record in a single call
+        const createBy = body.employeeId || "SYSTEM";
+        const uploadedFile = await saveUploadedTransactionFile(fileEntry);
+        const fileNameToSave = uploadedFile?.fileName ?? body.detailData?.existingFileName ?? null;
+        const fileUrlToSave = uploadedFile?.fileUrl ?? normalizeUploadFileName(body.detailData?.existingFileUrl);
+        const payload = buildDraftTransactionPayload(body, fileNameToSave, fileUrlToSave);
         const result = await saveDraftTransactionService(payload, createBy);
-        
+
         return c.json({
             status: 200,
-            message: 'Draft saved successfully',
+            message: "Draft saved successfully",
             data: result
         });
     } catch (error: any) {
-        console.error('Error in saveDraftTransaction controller:', error);
+        console.error("Error in saveDraftTransaction controller:", error);
         return c.json({
             status: 500,
-            message: 'Internal server error',
+            message: "Internal server error",
             error: error.message
         }, 500);
     }
@@ -398,8 +389,8 @@ export const directApproveTransactions = async (c: Context) => {
 
 export const debugGenerateApprovedStructureRemarks = async (c: Context) => {
     try {
-        const body = await c.req.json().catch(() => ({} as Record<string, unknown>));
-        const tokenUser = ((c.req as any).user || {}) as Record<string, unknown>;
+        const body: Record<string, unknown> = await c.req.json().catch(() => ({}));
+        const tokenUser = (c.req as { user?: Record<string, unknown> }).user || {};
 
         const effectiveDate = parseEffectiveDateForStructureDebug(
             body.effectiveMonth,
@@ -513,7 +504,7 @@ export const getHRCenterData = async (c: Context) => {
 
 export const sendHRCenterToSap = async (c: Context) => {
     try {
-        const body = await c.req.json().catch(() => ({} as Record<string, unknown>));
+        const body: Record<string, unknown> = await c.req.json().catch(() => ({}));
         const effectiveMonth = body.effectiveMonth;
         const effectiveYear = body.effectiveYear;
         const employeeId = String(body.employeeId || '').trim() || 'SYSTEM';

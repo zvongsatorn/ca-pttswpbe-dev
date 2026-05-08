@@ -140,7 +140,7 @@ export const checkUserOther = async (employeeId: string) => {
 };
 
 export const syncUserFromAD = async (employeeId: string) => {
-    return await getUserWithPassword(employeeId);
+    return getUserWithPassword(employeeId);
 };
 
 export const getUserByEmail = async (email: string) => {

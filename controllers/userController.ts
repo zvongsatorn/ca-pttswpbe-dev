@@ -30,6 +30,40 @@ const resolveProfilePicturePath = (filename: string): string | null => {
     return filePath.startsWith(`${uploadDir}${path.sep}`) ? filePath : null;
 };
 
+
+const buildProfilePictureToken = (employeeId: string, userData: any, userGroups: unknown[], safeName: string) => {
+    const secretKey = process.env.JWT_SECRET;
+    if (!secretKey) return null;
+
+    return jwt.sign(
+        {
+            id: employeeId,
+            role: "user",
+            groups: userGroups,
+            name: userData.FullName || userData.fullName || userData.Name || userData.NAME || userData.FULLNAMETH || userData.FULLNAMEENG || userData.name || "",
+            email: userData.Email || "",
+            position: userData.Position || "",
+            orgUnit: userData.OrgUnit || "",
+            profilePicture: safeName,
+        },
+        secretKey,
+        { expiresIn: "1d" }
+    );
+};
+
+const deleteProfilePictureIfExists = (oldFilename: string | null | undefined): void => {
+    if (!oldFilename) return;
+
+    const oldPath = path.join(process.cwd(), "uploads", "profile_pictures", oldFilename);
+    if (!fs.existsSync(oldPath)) return;
+
+    try {
+        fs.unlinkSync(oldPath);
+        console.log("Deleted old profile picture: " + oldFilename);
+    } catch (err) {
+        console.error("Failed to delete old profile picture " + oldFilename + ":", err);
+    }
+};
 const isValidEmailAddress = (email: string): boolean => {
     if (!email || email.length > 254 || email.includes(' ')) return false;
 
@@ -177,38 +211,10 @@ export const uploadProfilePicture = async (c: Context) => {
 
         // Regenerate Token for frontend persistence
         const userGroups = await userGroupService.getGroupsForUser(employeeId);
-        const SECRET_KEY = process.env.JWT_SECRET;
-        let token = null;
-
-        if (SECRET_KEY) {
-            token = jwt.sign(
-                {
-                    id: employeeId,
-                    role: 'user',
-                    groups: userGroups,
-                    name: userData.FullName || userData.fullName || userData.Name || userData.NAME || userData.FULLNAMETH || userData.FULLNAMEENG || userData.name || '',
-                    email: userData.Email || '',
-                    position: userData.Position || '',
-                    orgUnit: userData.OrgUnit || '',
-                    profilePicture: safeName,
-                },
-                SECRET_KEY,
-                { expiresIn: '1d' }
-            );
-        }
+        const token = buildProfilePictureToken(employeeId, userData, userGroups, safeName);
 
         // Delete old file if it exists
-        if (oldFilename) {
-            const oldPath = path.join(process.cwd(), 'uploads', 'profile_pictures', oldFilename);
-            if (fs.existsSync(oldPath)) {
-                try {
-                    fs.unlinkSync(oldPath);
-                    console.log(`Deleted old profile picture: ${oldFilename}`);
-                } catch (err) {
-                    console.error(`Failed to delete old profile picture ${oldFilename}:`, err);
-                }
-            }
-        }
+        deleteProfilePictureIfExists(oldFilename);
 
         return c.json({ 
             success: true, 

@@ -75,7 +75,7 @@ class MenuController {
     async saveMenuRights(c: Context) {
         try {
             const body = await c.req.json();
-            const { userGroupRole, menuID, hasRight } = body;
+            const { userGroupRole, menuID } = body;
             
             if (!userGroupRole || !menuID) {
                 return c.json({ error: 'Invalid data' }, 400);

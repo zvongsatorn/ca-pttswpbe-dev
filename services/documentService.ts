@@ -81,6 +81,26 @@ const formatTransactionTypeText = (typeNo: number | null | undefined): string =>
     }
 };
 
+const getDocumentCategory = (transactionType: unknown): string => {
+    const categoryMap = new Map<number, string>([
+        [1, "ภายใต้ ผช."],
+        [2, "โอนกรอบอื่นๆ"],
+        [3, "ปรับสัดส่วน"],
+        [4, "เพิ่ม/ลด"],
+        [6, "ยืม"]
+    ]);
+    return categoryMap.get(Number(transactionType)) || "อื่นๆ";
+};
+
+const getDocumentTypeCategory = (transactionType: unknown): string => {
+    const categoryMap = new Map<number, string>([
+        [1, "transfer"],
+        [4, "add"],
+        [3, "adjust"]
+    ]);
+    return categoryMap.get(Number(transactionType)) || "other";
+};
+
 const normalizeText = (value: unknown): string => String(value ?? '').trim();
 
 const firstNonEmptyText = (...values: unknown[]): string => {
@@ -238,100 +258,137 @@ const getUnitSnapshotMapByEffectiveDate = async (
     return map;
 };
 
+type DocumentOrgFilters = {
+    agencyId: string;
+    agencyName: string;
+    divisionId: string;
+    divisionName: string;
+    businessUnitId: string;
+    businessUnitName: string;
+};
+
+const getInitialDocumentOrgFilters = (firstItem: Record<string, unknown> | undefined): DocumentOrgFilters => ({
+    agencyId: firstNonEmptyText(
+        firstItem?.UnitReceive,
+        firstItem?.UnitTransfer,
+        firstItem?.OrgUnitNo
+    ),
+    agencyName: firstNonEmptyText(
+        firstItem?.UnitReceiveName,
+        firstItem?.UnitTransferName,
+        firstItem?.OrgUnitName,
+        firstItem?.UnitName
+    ),
+    divisionId: firstNonEmptyText(
+        firstItem?.ParentOrgUnitNo,
+        firstItem?.DivisionNo
+    ),
+    divisionName: firstNonEmptyText(
+        firstItem?.ParentOrgUnitName,
+        firstItem?.DivisionName
+    ),
+    businessUnitId: firstNonEmptyText(
+        firstItem?.BGNo,
+        firstItem?.BusinessUnitNo,
+        firstItem?.BusinessUnit
+    ),
+    businessUnitName: firstNonEmptyText(
+        firstItem?.BGName,
+        firstItem?.BusinessUnitName
+    )
+});
+
+const shouldResolveDocumentTransactionFallback = (filters: DocumentOrgFilters): boolean =>
+    !filters.agencyId || !filters.divisionId || !filters.businessUnitId;
+
+const getDocumentTransactionAgencyId = async (
+    pool: sql.ConnectionPool,
+    firstItem: Record<string, unknown> | undefined
+): Promise<string> => {
+    const itemId = firstNonEmptyText(firstItem?.ItemID, firstItem?.TransactionNo);
+    if (!itemId) return '';
+
+    try {
+        const txReq = new sql.Request(pool);
+        txReq.input('TransactionNo', sql.VarChar(10), itemId);
+        const txRes = await txReq.query(`
+            SELECT TOP 1
+                UnitReceive,
+                UnitTransfer
+            FROM MP_Transactions WITH (NOLOCK)
+            WHERE TransactionNo = @TransactionNo
+        `);
+        const txRow = txRes.recordset?.[0];
+        return firstNonEmptyText(txRow?.UnitReceive, txRow?.UnitTransfer);
+    } catch (error) {
+        console.warn('[documentService] Failed to resolve org filters from MP_Transactions:', error);
+        return '';
+    }
+};
+
+const applyDocumentUnitFallback = async (
+    pool: sql.ConnectionPool,
+    effectiveDateRaw: unknown,
+    filters: DocumentOrgFilters
+) => {
+    if (!filters.agencyId && !filters.divisionId) return;
+
+    const unitMap = await getUnitSnapshotMapByEffectiveDate(pool, effectiveDateRaw);
+    const agency = filters.agencyId ? unitMap.get(filters.agencyId) : undefined;
+
+    if (agency) {
+        filters.agencyName ||= firstNonEmptyText(agency.unitName, filters.agencyId);
+        filters.divisionId ||= agency.parentOrgUnitNo;
+        filters.businessUnitId ||= agency.bgNo;
+    }
+
+    if (filters.divisionId && !filters.divisionName) {
+        const division = unitMap.get(filters.divisionId);
+        filters.divisionName = firstNonEmptyText(division?.unitName, filters.divisionId);
+    }
+};
+
+const applyDocumentBusinessUnitFallback = async (
+    pool: sql.ConnectionPool,
+    effectiveDateRaw: unknown,
+    filters: DocumentOrgFilters
+) => {
+    const needsLookup = filters.businessUnitId &&
+        (!filters.businessUnitName || normalizeText(filters.businessUnitName) === normalizeText(filters.businessUnitId));
+    if (!needsLookup) return;
+
+    const bgMap = await getBgNameMapByEffectiveDate(pool, effectiveDateRaw);
+    filters.businessUnitName = firstNonEmptyText(
+        bgMap.get(filters.businessUnitId),
+        filters.businessUnitName,
+        filters.businessUnitId
+    );
+};
+
+const applyDocumentOrgNameFallbacks = (filters: DocumentOrgFilters) => {
+    filters.agencyName ||= filters.agencyId;
+    filters.divisionName ||= filters.divisionId;
+    filters.businessUnitName ||= filters.businessUnitId;
+};
+
 const resolveDocumentOrgFilters = async (
     pool: sql.ConnectionPool,
     firstItem: Record<string, unknown> | undefined,
     effectiveDateRaw: unknown
 ) => {
-    let agencyId = firstNonEmptyText(
-        firstItem?.UnitReceive,
-        firstItem?.UnitTransfer,
-        firstItem?.OrgUnitNo
-    );
-    let agencyName = firstNonEmptyText(
-        firstItem?.UnitReceiveName,
-        firstItem?.UnitTransferName,
-        firstItem?.OrgUnitName,
-        firstItem?.UnitName
-    );
-    let divisionId = firstNonEmptyText(
-        firstItem?.ParentOrgUnitNo,
-        firstItem?.DivisionNo
-    );
-    let divisionName = firstNonEmptyText(
-        firstItem?.ParentOrgUnitName,
-        firstItem?.DivisionName
-    );
-    let businessUnitId = firstNonEmptyText(
-        firstItem?.BGNo,
-        firstItem?.BusinessUnitNo,
-        firstItem?.BusinessUnit
-    );
-    let businessUnitName = firstNonEmptyText(
-        firstItem?.BGName,
-        firstItem?.BusinessUnitName
-    );
+    const filters = getInitialDocumentOrgFilters(firstItem);
 
     // Fallback: some DB versions return limited fields from mp_DocumentItemsDetailGet.
     // In that case, resolve org data from MP_Transactions by ItemID.
-    if (!agencyId || !divisionId || !businessUnitId) {
-        const itemId = firstNonEmptyText(firstItem?.ItemID, firstItem?.TransactionNo);
-        if (itemId) {
-            try {
-                const txReq = new sql.Request(pool);
-                txReq.input('TransactionNo', sql.VarChar(10), itemId);
-                const txRes = await txReq.query(`
-                    SELECT TOP 1
-                        UnitReceive,
-                        UnitTransfer
-                    FROM MP_Transactions WITH (NOLOCK)
-                    WHERE TransactionNo = @TransactionNo
-                `);
-                const txRow = txRes.recordset?.[0];
-                if (txRow) {
-                    if (!agencyId) {
-                        agencyId = firstNonEmptyText(txRow?.UnitReceive, txRow?.UnitTransfer);
-                    }
-                }
-            } catch (error) {
-                console.warn('[documentService] Failed to resolve org filters from MP_Transactions:', error);
-            }
-        }
+    if (shouldResolveDocumentTransactionFallback(filters) && !filters.agencyId) {
+        filters.agencyId = await getDocumentTransactionAgencyId(pool, firstItem);
     }
 
-    if (agencyId || divisionId) {
-        const unitMap = await getUnitSnapshotMapByEffectiveDate(pool, effectiveDateRaw);
-        const agency = agencyId ? unitMap.get(agencyId) : undefined;
+    await applyDocumentUnitFallback(pool, effectiveDateRaw, filters);
+    await applyDocumentBusinessUnitFallback(pool, effectiveDateRaw, filters);
+    applyDocumentOrgNameFallbacks(filters);
 
-        if (agency) {
-            if (!agencyName) agencyName = firstNonEmptyText(agency.unitName, agencyId);
-            if (!divisionId) divisionId = agency.parentOrgUnitNo;
-            if (!businessUnitId) businessUnitId = agency.bgNo;
-        }
-
-        if (divisionId && !divisionName) {
-            const division = unitMap.get(divisionId);
-            divisionName = firstNonEmptyText(division?.unitName, divisionId);
-        }
-    }
-
-    if (businessUnitId && (!businessUnitName || normalizeText(businessUnitName) === normalizeText(businessUnitId))) {
-        const bgMap = await getBgNameMapByEffectiveDate(pool, effectiveDateRaw);
-        businessUnitName = firstNonEmptyText(bgMap.get(businessUnitId), businessUnitName, businessUnitId);
-    }
-
-    if (!agencyName && agencyId) agencyName = agencyId;
-    if (!divisionName && divisionId) divisionName = divisionId;
-    if (!businessUnitName && businessUnitId) businessUnitName = businessUnitId;
-
-    return {
-        agencyId,
-        agencyName,
-        divisionId,
-        divisionName,
-        businessUnitId,
-        businessUnitName
-    };
+    return filters;
 };
 
 const getTransactionRowsByNos = async (pool: sql.ConnectionPool, transactionNos: string[]): Promise<MailTransactionRow[]> => {
@@ -437,13 +494,43 @@ interface SubmitFirstApproverMailGroup {
     itemIds: string[];
 }
 
+interface SubmitFirstApproverMailGroupDraft {
+    requestedEmail: string;
+    recipientName: string;
+    recipientEmployeeId: string | null;
+    itemIdSet: Set<string>;
+}
+
+const addSubmitFirstApproverMailGroup = (
+    groups: Map<string, SubmitFirstApproverMailGroupDraft>,
+    key: string,
+    itemId: string,
+    requestedEmail: string,
+    recipientName: string,
+    recipientEmployeeId: string | null
+): void => {
+    const existing = groups.get(key);
+    if (existing) {
+        existing.itemIdSet.add(itemId);
+        if (!existing.recipientName && recipientName) {
+            existing.recipientName = recipientName;
+        }
+        if (!existing.requestedEmail && requestedEmail) {
+            existing.requestedEmail = requestedEmail;
+        }
+        return;
+    }
+
+    groups.set(key, {
+        requestedEmail,
+        recipientName,
+        recipientEmployeeId,
+        itemIdSet: new Set([itemId])
+    });
+};
+
 const buildSubmitFirstApproverMailGroups = (items: DocumentItemPayload[]): SubmitFirstApproverMailGroup[] => {
-    const groups = new Map<string, {
-        requestedEmail: string;
-        recipientName: string;
-        recipientEmployeeId: string | null;
-        itemIdSet: Set<string>;
-    }>();
+    const groups = new Map<string, SubmitFirstApproverMailGroupDraft>();
 
     for (const item of items || []) {
         const firstApprover = item.approvers.find((a) => a.seqno === 1);
@@ -457,24 +544,14 @@ const buildSubmitFirstApproverMailGroups = (items: DocumentItemPayload[]): Submi
             : `mail:${requestedEmail.toLowerCase()}`;
         const recipientName = String(firstApprover.fullname || '').trim();
 
-        const existing = groups.get(key);
-        if (existing) {
-            existing.itemIdSet.add(itemId);
-            if (!existing.recipientName && recipientName) {
-                existing.recipientName = recipientName;
-            }
-            if (!existing.requestedEmail && requestedEmail) {
-                existing.requestedEmail = requestedEmail;
-            }
-            continue;
-        }
-
-        groups.set(key, {
+        addSubmitFirstApproverMailGroup(
+            groups,
+            key,
+            itemId,
             requestedEmail,
             recipientName,
-            recipientEmployeeId: recipientEmployeeId || null,
-            itemIdSet: new Set([itemId])
-        });
+            recipientEmployeeId || null
+        );
     }
 
     return Array.from(groups.values()).map((group) => ({
@@ -485,6 +562,206 @@ const buildSubmitFirstApproverMailGroups = (items: DocumentItemPayload[]): Submi
     }));
 };
 
+const buildDocumentNoPrefix = (date: Date) => {
+    const adYY = date.getFullYear().toString().slice(-2);
+    const mm = (date.getMonth() + 1).toString().padStart(2, '0');
+    return 'DA' + adYY + mm;
+};
+
+const getNextDocumentNo = async (transaction: sql.Transaction, today: Date) => {
+    const prefix = buildDocumentNoPrefix(today);
+    const lastDocReq = new sql.Request(transaction);
+    lastDocReq.input('Prefix', sql.VarChar(10), prefix);
+    const lastDocRes = await lastDocReq.execute('mp_DocumentLastNoGet');
+
+    let runningNumber = 1;
+    const lastDocNo = lastDocRes.recordset?.[0]?.DocumentNo;
+    if (lastDocNo) {
+        const lastRunningStr = lastDocNo.substring(prefix.length);
+        if (!isNaN(parseInt(lastRunningStr))) {
+            runningNumber = parseInt(lastRunningStr) + 1;
+        }
+    }
+
+    return prefix + runningNumber.toString().padStart(4, '0');
+};
+
+const insertDocumentHeader = async (
+    transaction: sql.Transaction,
+    payload: SubmitDocumentPayload,
+    documentNo: string,
+    effectiveDate: Date,
+    today: Date,
+    createBy: string
+) => {
+    const docReq = new sql.Request(transaction);
+    docReq.input('DocumentNo', sql.VarChar(13), documentNo);
+    docReq.input('EffectiveDate', sql.DateTime, toSqlDateTimePreserveLocalClock(effectiveDate));
+    docReq.input('DocumentType', sql.Int, payload.documentType);
+    docReq.input('CreateBy', sql.VarChar(20), createBy);
+    docReq.input('CreateDate', sql.DateTime, toSqlDateTimePreserveLocalClock(today));
+    docReq.input('ParentDocumentNo', sql.VarChar(13), payload.parentDocumentNo || null);
+    await docReq.execute('mp_DocumentInsert');
+};
+
+const getDocumentCreatorInfo = async (transaction: sql.Transaction, createBy: string) => {
+    const creatorInfoReq = new sql.Request(transaction);
+    creatorInfoReq.input('EmployeeID', sql.VarChar(20), createBy);
+    const creatorInfoRes = await creatorInfoReq.execute('mp_UserInfoGet');
+    return {
+        creatorFullname: creatorInfoRes.recordset?.[0]?.FullName || createBy,
+        creatorEmail: creatorInfoRes.recordset?.[0]?.Email || null
+    };
+};
+
+const validateSubmitDocumentItemId = (rawItemId: unknown) => {
+    const itemId = String(rawItemId || '').trim();
+    if (!itemId) {
+        throw new Error('Invalid submit payload: itemId is required for every item');
+    }
+    if (itemId.length > 10) {
+        throw new Error('Invalid submit payload: itemId "' + itemId + '" exceeds 10 characters');
+    }
+    return itemId;
+};
+
+const insertCreatorDocumentItem = async (
+    transaction: sql.Transaction,
+    documentNo: string,
+    itemId: string,
+    createBy: string,
+    creatorFullname: string,
+    creatorEmail: string | null,
+    creatorUserGroupNo: string | null
+) => {
+    const creatorReq = new sql.Request(transaction);
+    creatorReq.input('DocumentNo', sql.VarChar(13), documentNo);
+    creatorReq.input('ItemID', sql.VarChar(10), itemId);
+    creatorReq.input('Seqno', sql.Int, 0);
+    creatorReq.input('EmployeeID', sql.VarChar(20), createBy);
+    creatorReq.input('Fullname', sql.NVarChar(200), creatorFullname);
+    creatorReq.input('Email', sql.NVarChar(200), creatorEmail);
+    creatorReq.input('UserGroupNo', sql.VarChar(2), creatorUserGroupNo);
+    creatorReq.input('AuditStatus', sql.Int, 2);
+    creatorReq.input('UnitSide', sql.NVarChar(50), null);
+    await creatorReq.execute('mp_DocumentItemsInsert');
+};
+
+const insertApproverDocumentItem = async (
+    transaction: sql.Transaction,
+    documentNo: string,
+    itemId: string,
+    approver: ApproverPayload
+) => {
+    const itemReq = new sql.Request(transaction);
+    itemReq.input('DocumentNo', sql.VarChar(13), documentNo);
+    itemReq.input('ItemID', sql.VarChar(10), itemId);
+    itemReq.input('Seqno', sql.Int, approver.seqno);
+    itemReq.input('EmployeeID', sql.VarChar(20), approver.employeeId);
+    itemReq.input('Fullname', sql.NVarChar(200), approver.fullname);
+    itemReq.input('Email', sql.NVarChar(200), approver.email);
+    itemReq.input('UserGroupNo', sql.VarChar(2), approver.userGroupNo || null);
+    itemReq.input('UnitSide', sql.NVarChar(50), approver.unitSide || null);
+    itemReq.input('AuditStatus', sql.Int, approver.seqno === 1 ? 1 : 0);
+    await itemReq.execute('mp_DocumentItemsInsert');
+};
+
+const setSubmittedTransactionStatus = async (
+    transaction: sql.Transaction,
+    itemId: string,
+    createBy: string,
+    today: Date
+) => {
+    const trUpdateReq = new sql.Request(transaction);
+    trUpdateReq.input('TransactionNo', sql.VarChar(10), itemId);
+    trUpdateReq.input('Status', sql.Int, 2);
+    trUpdateReq.input('UpdateBy', sql.VarChar(20), createBy);
+    trUpdateReq.input('UpdateDate', sql.DateTime, today);
+    await trUpdateReq.execute('mp_TransactionsUpdateStatus');
+};
+
+const verifySubmittedTransactionStatus = async (transaction: sql.Transaction, itemId: string) => {
+    const verifyReq = new sql.Request(transaction);
+    verifyReq.input('TransactionNo', sql.VarChar(10), itemId);
+    const verifyRes = await verifyReq.query(`
+        SELECT TOP 1 Status
+        FROM MP_Transactions WITH (NOLOCK)
+        WHERE TransactionNo = @TransactionNo
+    `);
+    const updatedStatus = Number(verifyRes.recordset?.[0]?.Status);
+    if (updatedStatus !== 2) {
+        throw new Error('Failed to update transaction status to 2 for itemId "' + itemId + '"');
+    }
+};
+
+const insertSubmitDocumentItems = async (
+    transaction: sql.Transaction,
+    payload: SubmitDocumentPayload,
+    documentNo: string,
+    createBy: string,
+    creatorFullname: string,
+    creatorEmail: string | null,
+    today: Date
+) => {
+    const creatorUserGroupNo = payload.userGroupNo || null;
+    for (const item of payload.items) {
+        const itemId = validateSubmitDocumentItemId(item?.itemId);
+        await insertCreatorDocumentItem(transaction, documentNo, itemId, createBy, creatorFullname, creatorEmail, creatorUserGroupNo);
+
+        for (const approver of item.approvers) {
+            await insertApproverDocumentItem(transaction, documentNo, itemId, approver);
+        }
+
+        await setSubmittedTransactionStatus(transaction, itemId, createBy, today);
+        await verifySubmittedTransactionStatus(transaction, itemId);
+    }
+};
+
+const notifySubmitDocumentFirstApprovers = async (
+    pool: sql.ConnectionPool,
+    payload: SubmitDocumentPayload,
+    documentNo: string,
+    creatorFullname: string,
+    createBy: string
+) => {
+    try {
+        const loginUrl = 'http://localhost:3000/login';
+        const transactionRows = await getTransactionRowsByNos(pool, payload.items.map((item) => item.itemId));
+        const rowByNo = new Map<string, MailTransactionRow>(
+            transactionRows.map((row) => [row.transactionNo, row])
+        );
+        const firstApproverGroups = buildSubmitFirstApproverMailGroups(payload.items);
+
+        for (const group of firstApproverGroups) {
+            const recipient = await resolveMailRecipient('SendMailTrans', group.requestedEmail);
+            const subject = '[PTTSWP] Transaction: มีการเปลี่ยนแปลงกรอบอัตรากำลัง ส่งมาให้ตรวจสอบ';
+            const rows = group.itemIds.map((itemNo) =>
+                rowByNo.get(itemNo) || { transactionNo: itemNo, transactionTypeText: '-', transactionDesc: '-' }
+            );
+            const body = buildTransactionReviewBody({
+                recipientName: group.recipientName || group.requestedEmail,
+                senderName: creatorFullname,
+                documentNo,
+                rows,
+                addressLoginUrl: loginUrl
+            });
+            await sendMailWithLog({
+                recipient,
+                requestedRecipient: group.requestedEmail,
+                subject,
+                body,
+                sendFromBy: createBy,
+                sendToBy: group.recipientEmployeeId,
+                refNo: documentNo,
+                context: 'submitDocumentService'
+            });
+        }
+    } catch (mailError) {
+        console.error('Email notification failed in submitDocumentService:', mailError);
+        // We don't throw here to ensure the transaction commit is not affected by email failure
+    }
+};
+
 export const submitDocumentService = async (payload: SubmitDocumentPayload, createBy: string) => {
     try {
         const pool = await poolPromise;
@@ -492,159 +769,19 @@ export const submitDocumentService = async (payload: SubmitDocumentPayload, crea
         await transaction.begin();
 
         try {
-            // Generate DocumentNo DA + YY + MM + Running
             const today = new Date();
-            const adYY = today.getFullYear().toString().slice(-2);
-            const mm = (today.getMonth() + 1).toString().padStart(2, '0');
-            const prefix = `DA${adYY}${mm}`;
-
-            const lastDocReq = new sql.Request(transaction);
-            lastDocReq.input('Prefix', sql.VarChar(10), prefix);
-            const lastDocRes = await lastDocReq.execute('mp_DocumentLastNoGet');
-
-            let runningNumber = 1;
-            if (lastDocRes.recordset && lastDocRes.recordset.length > 0 && lastDocRes.recordset[0].DocumentNo) {
-                const lastDocNo = lastDocRes.recordset[0].DocumentNo; 
-                const lastRunningStr = lastDocNo.substring(prefix.length); 
-                if (!isNaN(parseInt(lastRunningStr))) {
-                    runningNumber = parseInt(lastRunningStr) + 1;
-                }
-            }
-            
-            const documentNo = `${prefix}${runningNumber.toString().padStart(4, '0')}`;
+            const documentNo = await getNextDocumentNo(transaction, today);
             const effectiveDate = await resolveDocumentEffectiveDateFromItems(
                 transaction,
                 payload.items.map((item) => item.itemId),
                 today
             );
-            const sqlEffectiveDate = toSqlDateTimePreserveLocalClock(effectiveDate);
-            const sqlCreateDate = toSqlDateTimePreserveLocalClock(today);
-
-            // 1. mp_DocumentInsert
-            const docReq = new sql.Request(transaction);
-            docReq.input('DocumentNo', sql.VarChar(13), documentNo);
-            docReq.input('EffectiveDate', sql.DateTime, sqlEffectiveDate);
-            docReq.input('DocumentType', sql.Int, payload.documentType);
-            docReq.input('CreateBy', sql.VarChar(20), createBy);
-            docReq.input('CreateDate', sql.DateTime, sqlCreateDate);
-            docReq.input('ParentDocumentNo', sql.VarChar(13), payload.parentDocumentNo || null);
-            await docReq.execute('mp_DocumentInsert');
-
-            // 2. mp_DocumentItemsInsert for each Item and Approver
-            // First, lookup creator info from MP_User
-            const creatorInfoReq = new sql.Request(transaction);
-            creatorInfoReq.input('EmployeeID', sql.VarChar(20), createBy);
-            const creatorInfoRes = await creatorInfoReq.execute('mp_UserInfoGet');
-            const creatorFullname = creatorInfoRes.recordset?.[0]?.FullName || createBy;
-            const creatorEmail = creatorInfoRes.recordset?.[0]?.Email || null;
-            const creatorUserGroupNo = payload.userGroupNo || null;
-
-            for (const item of payload.items) {
-                const itemId = String(item?.itemId || '').trim();
-                if (!itemId) {
-                    throw new Error('Invalid submit payload: itemId is required for every item');
-                }
-                if (itemId.length > 10) {
-                    throw new Error(`Invalid submit payload: itemId "${itemId}" exceeds 10 characters`);
-                }
-
-                // Insert Creator (Seqno = 0)
-                const creatorReq = new sql.Request(transaction);
-                creatorReq.input('DocumentNo', sql.VarChar(13), documentNo);
-                creatorReq.input('ItemID', sql.VarChar(10), itemId);
-                creatorReq.input('Seqno', sql.Int, 0);
-                creatorReq.input('EmployeeID', sql.VarChar(20), createBy);
-                creatorReq.input('Fullname', sql.NVarChar(200), creatorFullname);
-                creatorReq.input('Email', sql.NVarChar(200), creatorEmail);
-                creatorReq.input('UserGroupNo', sql.VarChar(2), creatorUserGroupNo);
-                creatorReq.input('AuditStatus', sql.Int, 2); // Auto-approved for creator
-                creatorReq.input('UnitSide', sql.NVarChar(50), null);
-                await creatorReq.execute('mp_DocumentItemsInsert');
-
-                for (const approver of item.approvers) {
-                    const itemReq = new sql.Request(transaction);
-                    itemReq.input('DocumentNo', sql.VarChar(13), documentNo);
-                    itemReq.input('ItemID', sql.VarChar(10), itemId);
-                    itemReq.input('Seqno', sql.Int, approver.seqno);
-                    itemReq.input('EmployeeID', sql.VarChar(20), approver.employeeId);
-                    itemReq.input('Fullname', sql.NVarChar(200), approver.fullname);
-                    itemReq.input('Email', sql.NVarChar(200), approver.email);
-                    itemReq.input('UserGroupNo', sql.VarChar(2), approver.userGroupNo || null);
-                    itemReq.input('UnitSide', sql.NVarChar(50), approver.unitSide || null);
-                    
-                    // Set AuditStatus = 1 for the first approver, else 0
-                    const auditStatus = approver.seqno === 1 ? 1 : 0;
-                    itemReq.input('AuditStatus', sql.Int, auditStatus);
-
-                    await itemReq.execute('mp_DocumentItemsInsert');
-                }
-
-                const trUpdateReq = new sql.Request(transaction);
-                trUpdateReq.input('TransactionNo', sql.VarChar(10), itemId);
-                trUpdateReq.input('Status', sql.Int, 2);
-                trUpdateReq.input('UpdateBy', sql.VarChar(20), createBy);
-                trUpdateReq.input('UpdateDate', sql.DateTime, today);
-                await trUpdateReq.execute('mp_TransactionsUpdateStatus');
-
-                // Guard against silent submit success where transaction status was not actually updated.
-                const verifyReq = new sql.Request(transaction);
-                verifyReq.input('TransactionNo', sql.VarChar(10), itemId);
-                const verifyRes = await verifyReq.query(`
-                    SELECT TOP 1 Status
-                    FROM MP_Transactions WITH (NOLOCK)
-                    WHERE TransactionNo = @TransactionNo
-                `);
-                const updatedStatus = Number(verifyRes.recordset?.[0]?.Status);
-                if (updatedStatus !== 2) {
-                    throw new Error(`Failed to update transaction status to 2 for itemId "${itemId}"`);
-                }
-            }
-
-            await resetSentSapStatusForTransactions(
-                transaction,
-                payload.items.map((item) => item.itemId)
-            );
-
+            await insertDocumentHeader(transaction, payload, documentNo, effectiveDate, today, createBy);
+            const { creatorFullname, creatorEmail } = await getDocumentCreatorInfo(transaction, createBy);
+            await insertSubmitDocumentItems(transaction, payload, documentNo, createBy, creatorFullname, creatorEmail, today);
+            await resetSentSapStatusForTransactions(transaction, payload.items.map((item) => item.itemId));
             await transaction.commit();
-
-            // Send notification emails to first approvers (Seqno 1)
-            try {
-                const loginUrl = 'http://localhost:3000/login';
-                const transactionRows = await getTransactionRowsByNos(pool, payload.items.map((i) => i.itemId));
-                const rowByNo = new Map<string, MailTransactionRow>(
-                    transactionRows.map((r) => [r.transactionNo, r])
-                );
-                const firstApproverGroups = buildSubmitFirstApproverMailGroups(payload.items);
-
-                for (const group of firstApproverGroups) {
-                    const recipient = await resolveMailRecipient('SendMailTrans', group.requestedEmail);
-                    const subject = `[PTTSWP] Transaction: มีการเปลี่ยนแปลงกรอบอัตรากำลัง ส่งมาให้ตรวจสอบ`;
-                    const rows = group.itemIds.map((itemNo) =>
-                        rowByNo.get(itemNo) || { transactionNo: itemNo, transactionTypeText: '-', transactionDesc: '-' }
-                    );
-                    const body = buildTransactionReviewBody({
-                        recipientName: group.recipientName || group.requestedEmail,
-                        senderName: creatorFullname,
-                        documentNo,
-                        rows,
-                        addressLoginUrl: loginUrl
-                    });
-                    await sendMailWithLog({
-                        recipient,
-                        requestedRecipient: group.requestedEmail,
-                        subject,
-                        body,
-                        sendFromBy: createBy,
-                        sendToBy: group.recipientEmployeeId,
-                        refNo: documentNo,
-                        context: 'submitDocumentService'
-                    });
-                }
-            } catch (mailError) {
-                console.error('Email notification failed in submitDocumentService:', mailError);
-                // We don't throw here to ensure the transaction commit is not affected by email failure
-            }
-
+            await notifySubmitDocumentFirstApprovers(pool, payload, documentNo, creatorFullname, createBy);
             return { success: true, documentNo, message: 'Document submitted successfully' };
         } catch (error) {
             try {
@@ -690,6 +827,194 @@ export const getInboxCountService = async (employeeId: string) => {
     }
 };
 
+const updateDocumentItemAuditStatus = async (
+    transaction: sql.Transaction,
+    documentNo: string,
+    itemId: string,
+    seqno: number,
+    auditStatus: number,
+    auditDate: Date | null
+) => {
+    const request = new sql.Request(transaction);
+    request.input('DocumentNo', sql.VarChar(13), documentNo);
+    request.input('ItemID', sql.VarChar(10), itemId);
+    request.input('Seqno', sql.Int, seqno);
+    request.input('AuditStatus', sql.Int, auditStatus);
+    request.input('AuditDate', sql.DateTime, auditDate);
+    await request.execute('mp_DocumentItemsUpdateAuditStatus');
+};
+
+const getNextDocumentApprover = async (
+    transaction: sql.Transaction,
+    documentNo: string,
+    itemId: string,
+    seqno: number
+) => {
+    const nextSeqnoReq = new sql.Request(transaction);
+    nextSeqnoReq.input('DocumentNo', sql.VarChar(13), documentNo);
+    nextSeqnoReq.input('ItemID', sql.VarChar(10), itemId);
+    nextSeqnoReq.input('Seqno', sql.Int, seqno + 1);
+    const nextSeqnoRes = await nextSeqnoReq.execute('mp_DocumentNextSeqnoGet');
+    return nextSeqnoRes.recordset?.[0] || null;
+};
+
+const setDocumentApprovedStatus = async (
+    transaction: sql.Transaction,
+    documentNo: string,
+    updateBy: string,
+    today: Date
+) => {
+    const docUpdateReq = new sql.Request(transaction);
+    docUpdateReq.input('DocumentNo', sql.VarChar(13), documentNo);
+    docUpdateReq.input('DocumentStatus', sql.Int, 2);
+    docUpdateReq.input('UpdateBy', sql.VarChar(20), updateBy);
+    docUpdateReq.input('UpdateDate', sql.DateTime, today);
+    await docUpdateReq.execute('mp_DocumentUpdateStatus');
+};
+
+const finalizeApprovedTransactions = async (
+    transaction: sql.Transaction,
+    documentNo: string,
+    updateBy: string,
+    today: Date
+) => {
+    const approvedItemsReq = new sql.Request(transaction);
+    approvedItemsReq.input('DocumentNo', sql.VarChar(13), documentNo);
+    const approvedItemsRes = await approvedItemsReq.execute('mp_DocumentApprovedItemsGet');
+
+    for (const row of approvedItemsRes.recordset || []) {
+        const trUpdateReq = new sql.Request(transaction);
+        trUpdateReq.input('TransactionNo', sql.VarChar(10), row.ItemID);
+        trUpdateReq.input('Status', sql.Int, 3);
+        trUpdateReq.input('UpdateBy', sql.VarChar(20), updateBy);
+        trUpdateReq.input('UpdateDate', sql.DateTime, today);
+        await trUpdateReq.execute('mp_TransactionsUpdateStatus');
+    }
+};
+
+const finalizeDocumentIfFullyApproved = async (
+    transaction: sql.Transaction,
+    documentNo: string,
+    updateBy: string,
+    today: Date
+) => {
+    const checkDocReq = new sql.Request(transaction);
+    checkDocReq.input('DocumentNo', sql.VarChar(13), documentNo);
+    const checkDocRes = await checkDocReq.execute('mp_DocumentPendingCheck');
+    if (checkDocRes.recordset && checkDocRes.recordset.length > 0) return;
+
+    await setDocumentApprovedStatus(transaction, documentNo, updateBy, today);
+    await finalizeApprovedTransactions(transaction, documentNo, updateBy, today);
+};
+
+const approveDocumentInsideTransaction = async (
+    transaction: sql.Transaction,
+    documentNo: string,
+    itemId: string,
+    seqno: number,
+    updateBy: string,
+    today: Date
+) => {
+    await updateDocumentItemAuditStatus(transaction, documentNo, itemId, seqno, 2, today);
+    const nextApprover = await getNextDocumentApprover(transaction, documentNo, itemId, seqno);
+    if (nextApprover) {
+        await updateDocumentItemAuditStatus(transaction, documentNo, itemId, seqno + 1, 1, null);
+    } else {
+        await finalizeDocumentIfFullyApproved(transaction, documentNo, updateBy, today);
+    }
+    return nextApprover;
+};
+
+const getDocumentActorName = async (pool: sql.ConnectionPool, employeeId: string) => {
+    const actorReq = new sql.Request(pool);
+    actorReq.input('EmployeeID', sql.VarChar(20), employeeId);
+    const actorRes = await actorReq.execute('mp_UserInfoGet');
+    return actorRes.recordset?.[0]?.FullName || employeeId;
+};
+
+const notifyNextDocumentApprover = async (
+    pool: sql.ConnectionPool,
+    nextApprover: any,
+    documentNo: string,
+    itemId: string,
+    updateBy: string
+) => {
+    if (!nextApprover?.Email) return;
+
+    const recipient = await resolveMailRecipient('SendMailTrans', nextApprover.Email);
+    const actorName = await getDocumentActorName(pool, updateBy);
+    const transactionRows = await getTransactionRowsByNos(pool, [itemId]);
+    const selectedRow = transactionRows[0] || { transactionNo: itemId, transactionTypeText: '-', transactionDesc: '-' };
+    const subject = '[PTTSWP] Transaction: มีการเปลี่ยนแปลงกรอบอัตรากำลัง ส่งมาให้ตรวจสอบ';
+    const body = buildTransactionReviewBody({
+        recipientName: nextApprover.Fullname || nextApprover.FullnameTH || '-',
+        senderName: actorName,
+        documentNo,
+        rows: [selectedRow],
+        addressLoginUrl: 'http://localhost:3000/login'
+    });
+
+    await sendMailWithLog({
+        recipient,
+        requestedRecipient: nextApprover.Email,
+        subject,
+        body,
+        sendFromBy: updateBy,
+        sendToBy: nextApprover.EmployeeID || nextApprover.EmployeeId || null,
+        refNo: documentNo,
+        context: 'approveDocumentService'
+    });
+};
+
+const notifyApprovedDocumentRequester = async (
+    pool: sql.ConnectionPool,
+    documentNo: string,
+    itemId: string,
+    updateBy: string
+) => {
+    const requester = await getDocumentRequester(pool, documentNo, itemId);
+    if (!requester?.Email) return;
+
+    const recipient = await resolveMailRecipient('SendMailTrans', requester.Email);
+    const subject = '[PTTSWP] คำขอ ' + documentNo + ' ได้รับการอนุมัติครบถ้วนแล้ว';
+    const body = `
+        <h2>แจ้งเตือนสถานะคำขอระบบ PTTSWP</h2>
+        <p>เรียน คุณ ${requester.Fullname},</p>
+        <p>คำขอหมายเลข <b>${documentNo}</b> (รายการ: ${itemId}) ของท่านได้รับการอนุมัติเรียบร้อยแล้ว</p>
+        <p>โปรดตรวจสอบรายละเอียดที่: <a href="http://localhost:3000/mkd/my-requests">My Requests</a></p>
+        <hr/>
+        <p style="color: gray; font-size: 12px;">นี่คือระบบเมลอัตโนมัติ</p>
+    `;
+    await sendMailWithLog({
+        recipient,
+        requestedRecipient: requester.Email,
+        subject,
+        body,
+        sendFromBy: updateBy,
+        sendToBy: requester.EmployeeID || requester.EmployeeId || null,
+        refNo: documentNo,
+        context: 'approveDocumentService'
+    });
+};
+
+const notifyApprovedDocumentResult = async (
+    pool: sql.ConnectionPool,
+    nextApprover: any,
+    documentNo: string,
+    itemId: string,
+    updateBy: string
+) => {
+    try {
+        if (nextApprover) {
+            await notifyNextDocumentApprover(pool, nextApprover, documentNo, itemId, updateBy);
+        } else {
+            await notifyApprovedDocumentRequester(pool, documentNo, itemId, updateBy);
+        }
+    } catch (mailError) {
+        console.error('Email notification failed in approveDocumentService:', mailError);
+    }
+};
+
 export const approveDocumentService = async (documentNo: string, itemId: string, seqno: number, updateBy: string) => {
     try {
         const pool = await poolPromise;
@@ -698,149 +1023,9 @@ export const approveDocumentService = async (documentNo: string, itemId: string,
 
         try {
             const today = new Date();
-
-            // 1. Update current approver to Accepted (2)
-            const updateCurrentReq = new sql.Request(transaction);
-            updateCurrentReq.input('DocumentNo', sql.VarChar(13), documentNo);
-            updateCurrentReq.input('ItemID', sql.VarChar(10), itemId);
-            updateCurrentReq.input('Seqno', sql.Int, seqno);
-            updateCurrentReq.input('AuditStatus', sql.Int, 2); // 2 = Accepted
-            updateCurrentReq.input('AuditDate', sql.DateTime, today);
-            await updateCurrentReq.execute('mp_DocumentItemsUpdateAuditStatus');
-
-            // 2. Check if there is a next approver
-            const nextSeqnoReq = new sql.Request(transaction);
-            nextSeqnoReq.input('DocumentNo', sql.VarChar(13), documentNo);
-            nextSeqnoReq.input('ItemID', sql.VarChar(10), itemId);
-            nextSeqnoReq.input('Seqno', sql.Int, seqno + 1);
-            
-            const nextSeqnoRes = await nextSeqnoReq.execute('mp_DocumentNextSeqnoGet');
-
-            if (nextSeqnoRes.recordset && nextSeqnoRes.recordset.length > 0) {
-                // Activate next approver
-                const updateNextReq = new sql.Request(transaction);
-                updateNextReq.input('DocumentNo', sql.VarChar(13), documentNo);
-                updateNextReq.input('ItemID', sql.VarChar(10), itemId);
-                updateNextReq.input('Seqno', sql.Int, seqno + 1);
-                updateNextReq.input('AuditStatus', sql.Int, 1); // 1 = Active
-                updateNextReq.input('AuditDate', sql.DateTime, null);
-                await updateNextReq.execute('mp_DocumentItemsUpdateAuditStatus');
-            } else {
-                // Automatically check if all items in Document are completely approved
-                const checkDocReq = new sql.Request(transaction);
-                checkDocReq.input('DocumentNo', sql.VarChar(13), documentNo);
-                const checkDocRes = await checkDocReq.execute('mp_DocumentPendingCheck');
-                
-                if (!checkDocRes.recordset || checkDocRes.recordset.length === 0) {
-                    // All items are completely approved (or rejected).
-                    // Update DocumentStatus to 2
-                    const docUpdateReq = new sql.Request(transaction);
-                    docUpdateReq.input('DocumentNo', sql.VarChar(13), documentNo);
-                    docUpdateReq.input('DocumentStatus', sql.Int, 2); // 2 = Approved
-                    docUpdateReq.input('UpdateBy', sql.VarChar(20), updateBy);
-                    docUpdateReq.input('UpdateDate', sql.DateTime, today);
-                    await docUpdateReq.execute('mp_DocumentUpdateStatus');
-                    
-                    // Use a fresh request so we don't pass extra params from mp_DocumentUpdateStatus
-                    const approvedItemsReq = new sql.Request(transaction);
-                    approvedItemsReq.input('DocumentNo', sql.VarChar(13), documentNo);
-                    const approvedItemsRes = await approvedItemsReq.execute('mp_DocumentApprovedItemsGet');
-                    
-                    if (approvedItemsRes.recordset && approvedItemsRes.recordset.length > 0) {
-                        for (const row of approvedItemsRes.recordset) {
-                           const trUpdateReq = new sql.Request(transaction);
-                           trUpdateReq.input('TransactionNo', sql.VarChar(10), row.ItemID);
-                           trUpdateReq.input('Status', sql.Int, 3);
-                           trUpdateReq.input('UpdateBy', sql.VarChar(20), updateBy);
-                           trUpdateReq.input('UpdateDate', sql.DateTime, today);
-                           await trUpdateReq.execute('mp_TransactionsUpdateStatus');
-                        }
-                    }
-                }
-            }
-
+            const nextApprover = await approveDocumentInsideTransaction(transaction, documentNo, itemId, seqno, updateBy, today);
             await transaction.commit();
-
-            // Send notification emails after successful commit
-            try {
-                if (nextSeqnoRes.recordset && nextSeqnoRes.recordset.length > 0) {
-                    // Notify next approver
-                    const nextApprover = nextSeqnoRes.recordset[0];
-                    if (nextApprover.Email) {
-                        const recipient = await resolveMailRecipient('SendMailTrans', nextApprover.Email);
-                        const actorReq = new sql.Request(pool);
-                        actorReq.input('EmployeeID', sql.VarChar(20), updateBy);
-                        const actorRes = await actorReq.execute('mp_UserInfoGet');
-                        const actorName = actorRes.recordset?.[0]?.FullName || updateBy;
-                        const loginUrl = 'http://localhost:3000/login';
-                        const transactionRows = await getTransactionRowsByNos(pool, [itemId]);
-                        const selectedRow = transactionRows[0] || { transactionNo: itemId, transactionTypeText: '-', transactionDesc: '-' };
-
-                        const subject = `[PTTSWP] Transaction: มีการเปลี่ยนแปลงกรอบอัตรากำลัง ส่งมาให้ตรวจสอบ`;
-                        const body = buildTransactionReviewBody({
-                            recipientName: nextApprover.Fullname || nextApprover.FullnameTH || '-',
-                            senderName: actorName,
-                            documentNo,
-                            rows: [selectedRow],
-                            addressLoginUrl: loginUrl
-                        });
-                        await sendMailWithLog({
-                            recipient,
-                            requestedRecipient: nextApprover.Email,
-                            subject,
-                            body,
-                            sendFromBy: updateBy,
-                            sendToBy: nextApprover.EmployeeID || nextApprover.EmployeeId || null,
-                            refNo: documentNo,
-                            context: 'approveDocumentService'
-                        });
-                    }
-                } else {
-                    // Full Approval - Notify Requester (Seqno 0)
-                    const requesterReq = new sql.Request(pool);
-                    requesterReq.input('DocumentNo', sql.VarChar(13), documentNo);
-                    requesterReq.input('ItemID', sql.VarChar(10), itemId);
-                    const requesterRes = await requesterReq.query(`
-                        SELECT TOP 1
-                            EmployeeID,
-                            Fullname,
-                            Email
-                        FROM MP_DocumentItems WITH (NOLOCK)
-                        WHERE DocumentNo = @DocumentNo
-                          AND ItemID = @ItemID
-                          AND Seqno = 0
-                    `); // Creator row
-                    
-                    if (requesterRes.recordset && requesterRes.recordset.length > 0) {
-                        const requester = requesterRes.recordset[0];
-                        if (requester.Email) {
-                            const recipient = await resolveMailRecipient('SendMailTrans', requester.Email);
-                            const subject = `[PTTSWP] คำขอ ${documentNo} ได้รับการอนุมัติครบถ้วนแล้ว`;
-                            const body = `
-                                <h2>แจ้งเตือนสถานะคำขอระบบ PTTSWP</h2>
-                                <p>เรียน คุณ ${requester.Fullname},</p>
-                                <p>คำขอหมายเลข <b>${documentNo}</b> (รายการ: ${itemId}) ของท่านได้รับการอนุมัติเรียบร้อยแล้ว</p>
-                                <p>โปรดตรวจสอบรายละเอียดที่: <a href="http://localhost:3000/mkd/my-requests">My Requests</a></p>
-                                <hr/>
-                                <p style="color: gray; font-size: 12px;">นี่คือระบบเมลอัตโนมัติ</p>
-                            `;
-                            await sendMailWithLog({
-                                recipient,
-                                requestedRecipient: requester.Email,
-                                subject,
-                                body,
-                                sendFromBy: updateBy,
-                                sendToBy: requester.EmployeeID || requester.EmployeeId || null,
-                                refNo: documentNo,
-                                context: 'approveDocumentService'
-                            });
-                        }
-                    }
-                }
-            } catch (mailError) {
-                console.error('Email notification failed in approveDocumentService:', mailError);
-            }
-
+            await notifyApprovedDocumentResult(pool, nextApprover, documentNo, itemId, updateBy);
             return { success: true, message: 'Approved successfully' };
         } catch (error) {
             try {
@@ -854,6 +1039,184 @@ export const approveDocumentService = async (documentNo: string, itemId: string,
     }
 };
 
+const rejectDocumentItemAudit = async (
+    transaction: sql.Transaction,
+    documentNo: string,
+    itemId: string,
+    seqno: number,
+    today: Date
+) => {
+    const updateCurrentReq = new sql.Request(transaction);
+    updateCurrentReq.input('DocumentNo', sql.VarChar(13), documentNo);
+    updateCurrentReq.input('ItemID', sql.VarChar(10), itemId);
+    updateCurrentReq.input('Seqno', sql.Int, seqno);
+    updateCurrentReq.input('AuditStatus', sql.Int, -1);
+    updateCurrentReq.input('AuditDate', sql.DateTime, today);
+    await updateCurrentReq.execute('mp_DocumentItemsUpdateAuditStatus');
+
+    const updateFutureReq = new sql.Request(transaction);
+    updateFutureReq.input('DocumentNo', sql.VarChar(13), documentNo);
+    updateFutureReq.input('ItemID', sql.VarChar(10), itemId);
+    updateFutureReq.input('Seqno', sql.Int, seqno);
+    updateFutureReq.input('AuditDate', sql.DateTime, today);
+    await updateFutureReq.execute('mp_DocumentItemsFutureRejectUpdate');
+};
+
+const insertDocumentRejectRemark = async (
+    transaction: sql.Transaction,
+    documentNo: string,
+    itemId: string,
+    remark: string,
+    updateBy: string,
+    today: Date
+) => {
+    const remarkReq = new sql.Request(transaction);
+    remarkReq.input('DocumentNo', sql.VarChar(13), documentNo);
+    remarkReq.input('ItemID', sql.VarChar(10), itemId);
+    remarkReq.input('Remark', sql.NVarChar(500), remark);
+    remarkReq.input('CreateBy', sql.VarChar(20), updateBy);
+    remarkReq.input('CreateDate', sql.DateTime, today);
+    await remarkReq.execute('mp_DocumentRemarkInsert');
+};
+
+const updateRejectedTransactionStatus = async (
+    transaction: sql.Transaction,
+    itemId: string,
+    updateBy: string,
+    today: Date
+) => {
+    const trUpdateReq = new sql.Request(transaction);
+    trUpdateReq.input('TransactionNo', sql.VarChar(10), itemId);
+    trUpdateReq.input('Status', sql.Int, 0);
+    trUpdateReq.input('UpdateBy', sql.VarChar(20), updateBy);
+    trUpdateReq.input('UpdateDate', sql.DateTime, today);
+    await trUpdateReq.execute('mp_TransactionsUpdateStatus');
+};
+
+const setDocumentStatusAfterReject = async (
+    transaction: sql.Transaction,
+    documentNo: string,
+    updateBy: string,
+    today: Date,
+    isAllRejected: boolean
+) => {
+    const docUpdateReq = new sql.Request(transaction);
+    docUpdateReq.input('DocumentNo', sql.VarChar(13), documentNo);
+    docUpdateReq.input('UpdateBy', sql.VarChar(20), updateBy);
+    docUpdateReq.input('UpdateDate', sql.DateTime, today);
+    docUpdateReq.input('DocumentStatus', sql.Int, isAllRejected ? 0 : 2);
+    await docUpdateReq.execute('mp_DocumentUpdateStatus');
+};
+
+const finalizeApprovedTransactionsAfterMixedReject = async (
+    transaction: sql.Transaction,
+    documentNo: string,
+    updateBy: string,
+    today: Date
+) => {
+    const approvedItemsReq = new sql.Request(transaction);
+    approvedItemsReq.input('DocumentNo', sql.VarChar(13), documentNo);
+    const approvedItemsRes = await approvedItemsReq.execute('mp_DocumentApprovedItemsGet');
+
+    for (const row of approvedItemsRes.recordset || []) {
+        const approvedTrReq = new sql.Request(transaction);
+        approvedTrReq.input('TransactionNo', sql.VarChar(10), row.ItemID);
+        approvedTrReq.input('Status', sql.Int, 3);
+        approvedTrReq.input('UpdateBy', sql.VarChar(20), updateBy);
+        approvedTrReq.input('UpdateDate', sql.DateTime, today);
+        await approvedTrReq.execute('mp_TransactionsUpdateStatus');
+    }
+};
+
+const finalizeDocumentAfterRejectIfComplete = async (
+    transaction: sql.Transaction,
+    documentNo: string,
+    updateBy: string,
+    today: Date
+) => {
+    const checkDocReq = new sql.Request(transaction);
+    checkDocReq.input('DocumentNo', sql.VarChar(13), documentNo);
+    const checkDocRes = await checkDocReq.execute('mp_DocumentPendingCheck');
+    if (checkDocRes.recordset && checkDocRes.recordset.length > 0) return;
+
+    const allRejectedRes = await checkDocReq.execute('mp_DocumentAllRejectedCheck');
+    const isAllRejected = !allRejectedRes.recordset || allRejectedRes.recordset.length === 0;
+    await setDocumentStatusAfterReject(transaction, documentNo, updateBy, today, isAllRejected);
+
+    if (!isAllRejected) {
+        await finalizeApprovedTransactionsAfterMixedReject(transaction, documentNo, updateBy, today);
+    }
+};
+
+const rejectDocumentInsideTransaction = async (
+    transaction: sql.Transaction,
+    documentNo: string,
+    itemId: string,
+    seqno: number,
+    remark: string,
+    updateBy: string,
+    today: Date
+) => {
+    await rejectDocumentItemAudit(transaction, documentNo, itemId, seqno, today);
+    await insertDocumentRejectRemark(transaction, documentNo, itemId, remark, updateBy, today);
+    await updateRejectedTransactionStatus(transaction, itemId, updateBy, today);
+    await finalizeDocumentAfterRejectIfComplete(transaction, documentNo, updateBy, today);
+};
+
+const getDocumentRequester = async (pool: sql.ConnectionPool, documentNo: string, itemId: string) => {
+    const requesterReq = new sql.Request(pool);
+    requesterReq.input('DocumentNo', sql.VarChar(13), documentNo);
+    requesterReq.input('ItemID', sql.VarChar(10), itemId);
+    const requesterRes = await requesterReq.query(`
+        SELECT TOP 1
+            EmployeeID,
+            Fullname,
+            Email
+        FROM MP_DocumentItems WITH (NOLOCK)
+        WHERE DocumentNo = @DocumentNo
+          AND ItemID = @ItemID
+          AND Seqno = 0
+    `);
+    return requesterRes.recordset?.[0] || null;
+};
+
+const notifyRejectedDocumentRequester = async (
+    pool: sql.ConnectionPool,
+    documentNo: string,
+    itemId: string,
+    remark: string,
+    updateBy: string
+) => {
+    try {
+        const requester = await getDocumentRequester(pool, documentNo, itemId);
+        if (!requester?.Email) return;
+
+        const recipient = await resolveMailRecipient('SendMailTrans', requester.Email);
+        const subject = `[PTTSWP] คำขอ ${documentNo} ถูกส่งคืน (Rejected)`;
+        const body = `
+            <h2>แจ้งเตือนการส่งคืนคำขอระบบ PTTSWP</h2>
+            <p>เรียน คุณ ${requester.Fullname},</p>
+            <p>คำขอหมายเลข <b>${documentNo}</b> (รายการ: ${itemId}) ของท่านถูกส่งคืน/ไม่ได้รับการอนุมัติ</p>
+            <p><b>เหตุผล:</b> ${remark}</p>
+            <p>โปรดตรวจสอบและแก้ไขได้ที่: <a href="http://localhost:3000/mkd/my-requests">My Requests</a></p>
+            <hr/>
+            <p style="color: gray; font-size: 12px;">นี่คือระบบเมลอัตโนมัติ</p>
+        `;
+        await sendMailWithLog({
+            recipient,
+            requestedRecipient: requester.Email,
+            subject,
+            body,
+            sendFromBy: updateBy,
+            sendToBy: requester.EmployeeID || requester.EmployeeId || null,
+            refNo: documentNo,
+            context: 'rejectDocumentService'
+        });
+    } catch (mailError) {
+        console.error('Email notification failed in rejectDocumentService:', mailError);
+    }
+};
+
 export const rejectDocumentService = async (documentNo: string, itemId: string, seqno: number, remark: string, updateBy: string) => {
     try {
         const pool = await poolPromise;
@@ -862,133 +1225,9 @@ export const rejectDocumentService = async (documentNo: string, itemId: string, 
 
         try {
             const today = new Date();
-
-            // 1. Update current and future approvers to Rejected (-1)
-            const updateCurrentReq = new sql.Request(transaction);
-            updateCurrentReq.input('DocumentNo', sql.VarChar(13), documentNo);
-            updateCurrentReq.input('ItemID', sql.VarChar(10), itemId);
-            updateCurrentReq.input('Seqno', sql.Int, seqno);
-            updateCurrentReq.input('AuditStatus', sql.Int, -1); // -1 = Rejected
-            updateCurrentReq.input('AuditDate', sql.DateTime, today);
-            await updateCurrentReq.execute('mp_DocumentItemsUpdateAuditStatus');
-
-            const updateFutureReq = new sql.Request(transaction);
-            updateFutureReq.input('DocumentNo', sql.VarChar(13), documentNo);
-            updateFutureReq.input('ItemID', sql.VarChar(10), itemId);
-            updateFutureReq.input('Seqno', sql.Int, seqno);
-            updateFutureReq.input('AuditDate', sql.DateTime, today);
-            await updateFutureReq.execute('mp_DocumentItemsFutureRejectUpdate');
-
-            // 2. Insert Remark
-            const remarkReq = new sql.Request(transaction);
-            remarkReq.input('DocumentNo', sql.VarChar(13), documentNo);
-            remarkReq.input('ItemID', sql.VarChar(10), itemId);
-            remarkReq.input('Remark', sql.NVarChar(500), remark);
-            remarkReq.input('CreateBy', sql.VarChar(20), updateBy);
-            remarkReq.input('CreateDate', sql.DateTime, today);
-            await remarkReq.execute('mp_DocumentRemarkInsert');
-
-            // 3. Update MP_Transactions Status to 0
-            const trUpdateReq = new sql.Request(transaction);
-            trUpdateReq.input('TransactionNo', sql.VarChar(10), itemId);
-            trUpdateReq.input('Status', sql.Int, 0);
-            trUpdateReq.input('UpdateBy', sql.VarChar(20), updateBy);
-            trUpdateReq.input('UpdateDate', sql.DateTime, today);
-            await trUpdateReq.execute('mp_TransactionsUpdateStatus');
-
-            // 4. Check if the original DocumentNo is now fully approved or rejected
-            const checkDocReq = new sql.Request(transaction);
-            checkDocReq.input('DocumentNo', sql.VarChar(13), documentNo);
-            const checkDocRes = await checkDocReq.execute('mp_DocumentPendingCheck');
-            
-            if (!checkDocRes.recordset || checkDocRes.recordset.length === 0) {
-                // If no remaining active/pending items, update DocumentStatus
-                const allRejectedRes = await checkDocReq.execute('mp_DocumentAllRejectedCheck');
-
-                const docUpdateReq = new sql.Request(transaction);
-                docUpdateReq.input('DocumentNo', sql.VarChar(13), documentNo);
-                docUpdateReq.input('UpdateBy', sql.VarChar(20), updateBy);
-                docUpdateReq.input('UpdateDate', sql.DateTime, today);
-
-                const isAllRejected = !allRejectedRes.recordset || allRejectedRes.recordset.length === 0;
-
-                if (isAllRejected) {
-                    // All rejected
-                    docUpdateReq.input('DocumentStatus', sql.Int, 0); 
-                } else {
-                    docUpdateReq.input('DocumentStatus', sql.Int, 2); 
-                }
-                
-                await docUpdateReq.execute('mp_DocumentUpdateStatus');
-
-                // If document is finalized with mixed result (some approved, some rejected),
-                // ensure all approved transactions are moved to final status = 3.
-                if (!isAllRejected) {
-                    const approvedItemsReq = new sql.Request(transaction);
-                    approvedItemsReq.input('DocumentNo', sql.VarChar(13), documentNo);
-                    const approvedItemsRes = await approvedItemsReq.execute('mp_DocumentApprovedItemsGet');
-
-                    if (approvedItemsRes.recordset && approvedItemsRes.recordset.length > 0) {
-                        for (const row of approvedItemsRes.recordset) {
-                            const approvedTrReq = new sql.Request(transaction);
-                            approvedTrReq.input('TransactionNo', sql.VarChar(10), row.ItemID);
-                            approvedTrReq.input('Status', sql.Int, 3);
-                            approvedTrReq.input('UpdateBy', sql.VarChar(20), updateBy);
-                            approvedTrReq.input('UpdateDate', sql.DateTime, today);
-                            await approvedTrReq.execute('mp_TransactionsUpdateStatus');
-                        }
-                    }
-                }
-            }
-
+            await rejectDocumentInsideTransaction(transaction, documentNo, itemId, seqno, remark, updateBy, today);
             await transaction.commit();
-
-            // Notify Requester about rejection
-            try {
-                const requesterReq = new sql.Request(pool);
-                requesterReq.input('DocumentNo', sql.VarChar(13), documentNo);
-                requesterReq.input('ItemID', sql.VarChar(10), itemId);
-                const requesterRes = await requesterReq.query(`
-                    SELECT TOP 1
-                        EmployeeID,
-                        Fullname,
-                        Email
-                    FROM MP_DocumentItems WITH (NOLOCK)
-                    WHERE DocumentNo = @DocumentNo
-                      AND ItemID = @ItemID
-                      AND Seqno = 0
-                `);
-                
-                if (requesterRes.recordset && requesterRes.recordset.length > 0) {
-                    const requester = requesterRes.recordset[0];
-                    if (requester.Email) {
-                        const recipient = await resolveMailRecipient('SendMailTrans', requester.Email);
-                        const subject = `[PTTSWP] คำขอ ${documentNo} ถูกส่งคืน (Rejected)`;
-                        const body = `
-                            <h2>แจ้งเตือนการส่งคืนคำขอระบบ PTTSWP</h2>
-                            <p>เรียน คุณ ${requester.Fullname},</p>
-                            <p>คำขอหมายเลข <b>${documentNo}</b> (รายการ: ${itemId}) ของท่านถูกส่งคืน/ไม่ได้รับการอนุมัติ</p>
-                            <p><b>เหตุผล:</b> ${remark}</p>
-                            <p>โปรดตรวจสอบและแก้ไขได้ที่: <a href="http://localhost:3000/mkd/my-requests">My Requests</a></p>
-                            <hr/>
-                            <p style="color: gray; font-size: 12px;">นี่คือระบบเมลอัตโนมัติ</p>
-                        `;
-                        await sendMailWithLog({
-                            recipient,
-                            requestedRecipient: requester.Email,
-                            subject,
-                            body,
-                            sendFromBy: updateBy,
-                            sendToBy: requester.EmployeeID || requester.EmployeeId || null,
-                            refNo: documentNo,
-                            context: 'rejectDocumentService'
-                        });
-                    }
-                }
-            } catch (mailError) {
-                console.error('Email notification failed in rejectDocumentService:', mailError);
-            }
-
+            await notifyRejectedDocumentRequester(pool, documentNo, itemId, remark, updateBy);
             return { success: true, message: 'Rejected transaction successfully.' };
         } catch (error) {
             try {
@@ -1163,112 +1402,156 @@ export const rejectAllDocumentService = async (documentNo: string, remark: strin
     }
 };
 
+type DocumentLogRow = { AuditStatus?: number; UserGroupName?: string };
+
+const loadDocumentListWithOptionalEmployee = async (
+    pool: sql.ConnectionPool,
+    procedureName: string,
+    employeeId: string
+) => {
+    try {
+        const req = new sql.Request(pool);
+        req.input('EmployeeID', sql.VarChar(20), employeeId);
+        return await req.execute(procedureName);
+    } catch (error: any) {
+        const message = String(error?.message || '');
+        if (!message.includes('has no parameters and arguments were supplied')) {
+            throw error;
+        }
+
+        // Fallback for DB where this SP has no input parameters
+        const reqNoParam = new sql.Request(pool);
+        return reqNoParam.execute(procedureName);
+    }
+};
+
+const getDocumentItemsForProgress = async (pool: sql.ConnectionPool, documentNo: string) => {
+    const itemsReq = new sql.Request(pool);
+    itemsReq.input('DocumentNo', sql.VarChar(13), documentNo);
+    itemsReq.input('EmployeeID', sql.VarChar(20), null);
+    return itemsReq.execute('mp_DocumentItemsDetailGet');
+};
+
+const getDocumentProgressLogsByQuery = async (pool: sql.ConnectionPool, documentNo: string) => {
+    const logsReq = new sql.Request(pool);
+    logsReq.input('DocumentNo', sql.VarChar(13), documentNo);
+    const logsQuery = `
+        SELECT DISTINCT
+            di.Seqno,
+            di.EmployeeID,
+            di.Fullname,
+            di.AuditStatus,
+            di.AuditDate,
+            di.UserGroupNo,
+            di.UnitSide,
+            ug.UserGroupName
+        FROM MP_DocumentItems di
+        LEFT JOIN MP_UserGroup ug ON di.UserGroupNo = ug.UserGroupNo
+        WHERE di.DocumentNo = @DocumentNo
+        ORDER BY di.Seqno ASC
+    `;
+    return logsReq.query(logsQuery);
+};
+
+const getDocumentLogsByProcedure = async (pool: sql.ConnectionPool, documentNo: string) => {
+    const logsReq = new sql.Request(pool);
+    logsReq.input('DocumentNo', sql.VarChar(13), documentNo);
+    return logsReq.execute('mp_DocumentLogsGet');
+};
+
+const resolveDocumentProcessStage = (logs: DocumentLogRow[] = []) => {
+    const hasActive = logs.some((log) => log.AuditStatus === 1);
+    const allDone = logs.every((log) => log.AuditStatus === 2 || log.AuditStatus === -1);
+
+    if (allDone && logs.length > 0) return 3;
+    if (hasActive) return 2;
+    return 1;
+};
+
+const getWaitingApproverLabel = (logs: DocumentLogRow[] = []) => {
+    const activeApprover = logs.find((log) => log.AuditStatus === 1);
+    return activeApprover?.UserGroupName ? 'Waiting ' + activeApprover.UserGroupName : 'Waiting';
+};
+
+const getProgressStatusLabel = (logs: DocumentLogRow[], processStage: number) => {
+    if (processStage === 3) return 'Complete';
+    return getWaitingApproverLabel(logs);
+};
+
+const getAllTransactionStatusLabel = (doc: Record<string, unknown>, logs: DocumentLogRow[], processStage: number) => {
+    if (doc.DocumentStatus === -1) return 'Rejected';
+    if (processStage === 3) return 'Complete';
+    return getWaitingApproverLabel(logs);
+};
+
+const buildProgressDocumentRow = async (pool: sql.ConnectionPool, doc: Record<string, any>) => {
+    const docNo = doc.DocumentNo;
+    const itemsRes = await getDocumentItemsForProgress(pool, docNo);
+    const logsRes = await getDocumentProgressLogsByQuery(pool, docNo);
+    const logs = logsRes.recordset || [];
+    const processStage = resolveDocumentProcessStage(logs);
+    const firstItem = itemsRes.recordset?.[0];
+    const orgFilters = await resolveDocumentOrgFilters(
+        pool,
+        (firstItem || {}) as Record<string, unknown>,
+        doc.EffectiveDate
+    );
+
+    return {
+        documentNo: docNo,
+        effectiveDate: doc.EffectiveDate,
+        documentType: doc.DocumentType,
+        createDate: doc.CreateDate,
+        createBy: doc.CreateBy,
+        statusLabel: getProgressStatusLabel(logs, processStage),
+        processStage,
+        category: getDocumentCategory(firstItem?.TransactionType),
+        typeCategory: getDocumentTypeCategory(firstItem?.TransactionType),
+        resolution: firstItem?.TransactionDesc || '',
+        businessUnitId: orgFilters.businessUnitId,
+        businessUnitName: orgFilters.businessUnitName,
+        divisionId: orgFilters.divisionId,
+        divisionName: orgFilters.divisionName,
+        agencyId: orgFilters.agencyId,
+        agencyName: orgFilters.agencyName,
+        items: itemsRes.recordset || [],
+        logs
+    };
+};
+
+const buildAllTransactionDocumentRow = async (pool: sql.ConnectionPool, doc: Record<string, any>) => {
+    const docNo = doc.DocumentNo;
+    const itemsRes = await getDocumentItemsForProgress(pool, docNo);
+    const logsRes = await getDocumentLogsByProcedure(pool, docNo);
+    const logs = logsRes.recordset || [];
+    const processStage = resolveDocumentProcessStage(logs);
+    const firstItem = itemsRes.recordset?.[0];
+
+    return {
+        documentNo: docNo,
+        effectiveDate: doc.EffectiveDate,
+        documentType: doc.DocumentType,
+        createDate: doc.CreateDate,
+        createBy: doc.CreateBy,
+        statusLabel: getAllTransactionStatusLabel(doc, logs, processStage),
+        processStage,
+        category: getDocumentCategory(firstItem?.TransactionType),
+        typeCategory: getDocumentTypeCategory(firstItem?.TransactionType),
+        resolution: firstItem?.TransactionDesc || '',
+        items: itemsRes.recordset || [],
+        logs
+    };
+};
+
 export const getProgressService = async (employeeId: string) => {
     try {
         const pool = await poolPromise;
-        let docsRes;
-        try {
-            const req = new sql.Request(pool);
-            req.input('EmployeeID', sql.VarChar(20), employeeId);
-            docsRes = await req.execute('mp_DocumentProgressListGet');
-        } catch (error: any) {
-            const message = String(error?.message || '');
-            if (!message.includes('has no parameters and arguments were supplied')) {
-                throw error;
-            }
-
-            // Fallback for DB where this SP has no input parameters
-            const reqNoParam = new sql.Request(pool);
-            docsRes = await reqNoParam.execute('mp_DocumentProgressListGet');
-        }
+        const docsRes = await loadDocumentListWithOptionalEmployee(pool, 'mp_DocumentProgressListGet', employeeId);
         if (!docsRes.recordset?.length) return [];
 
         const results = [];
-
         for (const doc of docsRes.recordset) {
-            const docNo = doc.DocumentNo;
-
-            const itemsReq = new sql.Request(pool);
-            itemsReq.input('DocumentNo', sql.VarChar(13), docNo);
-            itemsReq.input('EmployeeID', sql.VarChar(20), null);
-            const itemsRes = await itemsReq.execute('mp_DocumentItemsDetailGet');
-
-            // Get approval logs
-            const logsReq = new sql.Request(pool);
-            logsReq.input('DocumentNo', sql.VarChar(13), docNo);
-            const logsQuery = `
-                SELECT DISTINCT
-                    di.Seqno,
-                    di.EmployeeID,
-                    di.Fullname,
-                    di.AuditStatus,
-                    di.AuditDate,
-                    di.UserGroupNo,
-                    di.UnitSide,
-                    ug.UserGroupName
-                FROM MP_DocumentItems di
-                LEFT JOIN MP_UserGroup ug ON di.UserGroupNo = ug.UserGroupNo
-                WHERE di.DocumentNo = @DocumentNo
-                ORDER BY di.Seqno ASC
-            `;
-            const logsRes = await logsReq.query(logsQuery);
-
-            // Determine process stage
-            const hasActive = logsRes.recordset?.some((l: { AuditStatus: number }) => l.AuditStatus === 1);
-            const allDone = logsRes.recordset?.every((l: { AuditStatus: number }) => l.AuditStatus === 2 || l.AuditStatus === -1);
-            let processStage = 1;
-            if (hasActive) processStage = 2;
-            if (allDone && logsRes.recordset?.length > 0) processStage = 3;
-
-            // Determine status label based on current active approver
-            let statusLabel = 'Waiting';
-            if (processStage === 3) {
-                statusLabel = 'Complete';
-            } else {
-                const activeApprover = logsRes.recordset?.find((l: { AuditStatus: number; UserGroupName?: string }) => l.AuditStatus === 1);
-                if (activeApprover?.UserGroupName) {
-                    statusLabel = `Waiting ${activeApprover.UserGroupName}`;
-                }
-            }
-
-            // Build first item description as resolution text
-            const firstItem = itemsRes.recordset?.[0];
-            const resolution = firstItem?.TransactionDesc || '';
-            const category = firstItem?.TransactionType === 1 ? 'ภายใต้ ผช.' :
-                             firstItem?.TransactionType === 2 ? 'โอนกรอบอื่นๆ' :
-                             firstItem?.TransactionType === 3 ? 'ปรับสัดส่วน' :
-                             firstItem?.TransactionType === 4 ? 'เพิ่ม/ลด' :
-                             firstItem?.TransactionType === 6 ? 'ยืม' : 'อื่นๆ';
-
-            const typeCategory = firstItem?.TransactionType === 1 ? 'transfer' :
-                                 firstItem?.TransactionType === 4 ? 'add' :
-                                 firstItem?.TransactionType === 3 ? 'adjust' : 'other';
-            const orgFilters = await resolveDocumentOrgFilters(
-                pool,
-                (firstItem || {}) as Record<string, unknown>,
-                doc.EffectiveDate
-            );
-
-            results.push({
-                documentNo: docNo,
-                effectiveDate: doc.EffectiveDate,
-                documentType: doc.DocumentType,
-                createDate: doc.CreateDate,
-                createBy: doc.CreateBy,
-                statusLabel,
-                processStage,
-                category,
-                typeCategory,
-                resolution,
-                businessUnitId: orgFilters.businessUnitId,
-                businessUnitName: orgFilters.businessUnitName,
-                divisionId: orgFilters.divisionId,
-                divisionName: orgFilters.divisionName,
-                agencyId: orgFilters.agencyId,
-                agencyName: orgFilters.agencyName,
-                items: itemsRes.recordset || [],
-                logs: logsRes.recordset || []
-            });
+            results.push(await buildProgressDocumentRow(pool, doc));
         }
 
         return results;
@@ -1281,86 +1564,12 @@ export const getProgressService = async (employeeId: string) => {
 export const getAllTransactionsService = async (employeeId: string) => {
     try {
         const pool = await poolPromise;
-        let docsRes;
-        try {
-            const req = new sql.Request(pool);
-            req.input('EmployeeID', sql.VarChar(20), employeeId);
-            docsRes = await req.execute('mp_AllDocumentsGet');
-        } catch (error: any) {
-            const message = String(error?.message || '');
-            if (!message.includes('has no parameters and arguments were supplied')) {
-                throw error;
-            }
-
-            // Fallback for DB where this SP has no input parameters
-            const reqNoParam = new sql.Request(pool);
-            docsRes = await reqNoParam.execute('mp_AllDocumentsGet');
-        }
+        const docsRes = await loadDocumentListWithOptionalEmployee(pool, 'mp_AllDocumentsGet', employeeId);
         if (!docsRes.recordset?.length) return [];
 
         const results = [];
-
         for (const doc of docsRes.recordset) {
-            const docNo = doc.DocumentNo;
-
-            // Get items (transactions) for this document
-            const itemsReq = new sql.Request(pool);
-            itemsReq.input('DocumentNo', sql.VarChar(13), docNo);
-            itemsReq.input('EmployeeID', sql.VarChar(20), null);
-            const itemsRes = await itemsReq.execute('mp_DocumentItemsDetailGet');
-
-            // Get approval logs
-            const logsReq = new sql.Request(pool);
-            logsReq.input('DocumentNo', sql.VarChar(13), docNo);
-            const logsRes = await logsReq.execute('mp_DocumentLogsGet');
-
-            // Determine process stage
-            const hasActive = logsRes.recordset?.some((l: { AuditStatus: number }) => l.AuditStatus === 1);
-            const allDone = logsRes.recordset?.every((l: { AuditStatus: number }) => l.AuditStatus === 2 || l.AuditStatus === -1);
-            let processStage = 1;
-            if (hasActive) processStage = 2;
-            if (allDone && logsRes.recordset?.length > 0) processStage = 3;
-
-            // Determine status label based on current active approver or document status
-            let statusLabel = 'Waiting';
-            if (doc.DocumentStatus === -1) {
-                statusLabel = 'Rejected';
-            } else if (processStage === 3) {
-                statusLabel = 'Complete';
-            } else {
-                const activeApprover = logsRes.recordset?.find((l: { AuditStatus: number; UserGroupName?: string }) => l.AuditStatus === 1);
-                if (activeApprover?.UserGroupName) {
-                    statusLabel = `Waiting ${activeApprover.UserGroupName}`;
-                }
-            }
-
-            // Build first item description as resolution text
-            const firstItem = itemsRes.recordset?.[0];
-            const resolution = firstItem?.TransactionDesc || '';
-            const category = firstItem?.TransactionType === 1 ? 'ภายใต้ ผช.' :
-                             firstItem?.TransactionType === 2 ? 'โอนกรอบอื่นๆ' :
-                             firstItem?.TransactionType === 3 ? 'ปรับสัดส่วน' :
-                             firstItem?.TransactionType === 4 ? 'เพิ่ม/ลด' :
-                             firstItem?.TransactionType === 6 ? 'ยืม' : 'อื่นๆ';
-
-            const typeCategory = firstItem?.TransactionType === 1 ? 'transfer' :
-                                 firstItem?.TransactionType === 4 ? 'add' :
-                                 firstItem?.TransactionType === 3 ? 'adjust' : 'other';
-
-            results.push({
-                documentNo: docNo,
-                effectiveDate: doc.EffectiveDate,
-                documentType: doc.DocumentType,
-                createDate: doc.CreateDate,
-                createBy: doc.CreateBy,
-                statusLabel,
-                processStage,
-                category,
-                typeCategory,
-                resolution,
-                items: itemsRes.recordset || [],
-                logs: logsRes.recordset || []
-            });
+            results.push(await buildAllTransactionDocumentRow(pool, doc));
         }
 
         return results;

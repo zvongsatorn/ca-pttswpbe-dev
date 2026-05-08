@@ -19,16 +19,207 @@ const constantTimeEquals = (left: string, right: string): boolean => {
     return leftBuffer.length === rightBuffer.length && timingSafeEqual(leftBuffer, rightBuffer);
 };
 
+const scorePasswordKey = (key: string): number => {
+    const normalizedKey = key.toLowerCase();
+    if (normalizedKey === "password") return 100;
+    if (normalizedKey === "passwordhash") return 95;
+    if (normalizedKey === "userpassword") return 90;
+    if (normalizedKey === "pwd") return 85;
+    if (normalizedKey.includes("password")) return 80;
+    if (normalizedKey.includes("pwd")) return 75;
+    return 0;
+};
+
+const stringifyPasswordValue = (value: unknown): string => {
+    if (typeof value === "string" && value.trim()) return value.trim();
+    if (typeof value === "number") return String(value);
+    if (Buffer.isBuffer(value)) return value.toString("utf8").trim();
+    return "";
+};
+
+const extractPassword = (record: Record<string, unknown>): string => {
+    const candidates = Object.entries(record || {})
+        .map(([key, value]) => ({ value, score: scorePasswordKey(key) }))
+        .filter((item) => item.score > 0)
+        .sort((a, b) => b.score - a.score);
+
+    for (const item of candidates) {
+        const passwordValue = stringifyPasswordValue(item.value);
+        if (passwordValue) return passwordValue;
+    }
+
+    return "";
+};
+
+const verifyStoredPassword = async (input: string, stored: string): Promise<boolean> => {
+    if (/^\$2[aby]\$\d{2}\$/.test(stored)) {
+        return bcrypt.compare(input, stored);
+    }
+
+    const sha256Hex = createHash("sha256").update(input).digest("hex");
+    const sha256Base64 = createHash("sha256").update(input).digest("base64");
+    return [sha256Hex, sha256Hex.toUpperCase(), sha256Base64]
+        .some((candidate) => constantTimeEquals(candidate, stored));
+};
+
+const parseLoginCredentials = (body: Record<string, unknown>): { employeeId: string; password: string } => {
+    let employeeId = String(body.EmployeeID || body.employeeID || '').trim();
+    if (employeeId && /^\d+$/.test(employeeId)) {
+        employeeId = employeeId.padStart(8, '0');
+    }
+    return {
+        employeeId,
+        password: String(body.Password || body.password || '')
+    };
+};
+
+const mapLoginUser = (userData: any, employeeId: string) => ({
+    EmployeeID: userData.EmployeeID || userData.employeeID || userData.CODE || employeeId,
+    Name: userData.FullName || userData.fullName || userData.Name || userData.NAME || userData.FULLNAMETH || userData.FULLNAMEENG || userData.name || employeeId,
+    Email: userData.Email || userData.EMAIL || '',
+    UserID: userData.UserID || userData.UserId || ''
+});
+
+const ensureLoginUserGroups = async (employeeId: string) => {
+    let userGroups = await userGroupService.getGroupsForUser(employeeId);
+    if (userGroups.length === 0) {
+        console.log('[Login] User ' + employeeId + ' has no groups, auto-assigning to group 08 (OTHER)');
+        await userGroupService.insertUserInGroup('08', employeeId, 'SYSTEM');
+        userGroups = await userGroupService.getGroupsForUser(employeeId);
+    }
+    return userGroups;
+};
+
+const signLoginToken = (user: { EmployeeID: string; Name: string; Email: string }, userData: any, userGroups: unknown[]) => {
+    const secretKey = process.env.JWT_SECRET;
+    if (!secretKey) {
+        throw new Error('JWT_SECRET is not defined in environment variables.');
+    }
+    return jwt.sign(
+        {
+            id: user.EmployeeID,
+            role: 'user',
+            groups: userGroups,
+            name: user.Name,
+            email: user.Email,
+            position: userData.Position || '',
+            orgUnit: userData.OrgUnit || '',
+            profilePicture: userData.ProfilePicture || '',
+        },
+        secretKey,
+        { expiresIn: '1d' }
+    );
+};
+const getSsoCaaData = async (type: string, accessToken: string, systemToken: string) => {
+    const caaUrl = await configService.getConfig('CAA_URL');
+    const authHeaders = {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer ' + systemToken
+    };
+
+    if (type === 'B2C') {
+        const b2cClientId = process.env.NEXT_PUBLIC_B2C_CLIENT_ID || '';
+        const b2cTenantId = process.env.NEXT_PUBLIC_B2C_TENANT_ID || '';
+        const targetUrl = caaUrl + '/auth/b2c/' + b2cClientId;
+        const b2cPayload = {
+            v: JSON.stringify({
+                tenant_id: b2cTenantId,
+                client_id: b2cClientId,
+                validated_claims: "",
+                object_id: ""
+            })
+        };
+
+        return configService.curlRequest(targetUrl, 'POST', authHeaders, b2cPayload);
+    }
+
+    const caaClientId = await configService.getConfig('CAA_CLIENT_ID');
+    // The Postman collection confirms the AD endpoint is just /auth/ad (no ID in path)
+    const targetUrl = caaUrl.endsWith('/') ? caaUrl + 'auth/ad' : caaUrl + '/auth/ad';
+    const adPayload = {
+        v: JSON.stringify({
+            tenant_id: process.env.NEXT_PUBLIC_AZURE_TENANT_ID || '',
+            client_id: caaClientId,
+            access_token: accessToken,
+            validated_claims: "",
+            object_id: ""
+        })
+    };
+
+    return configService.curlRequest(targetUrl, 'POST', authHeaders, adPayload);
+};
+
+const decodeSsoCaaData = (caaData: any) => {
+    if (!caaData?.Data) return caaData;
+
+    try {
+        const decodedString = Buffer.from(caaData.Data, 'base64').toString('utf-8');
+        const decodedData = JSON.parse(decodedString);
+        console.log('[SSO] Decoded CA&A Data:', JSON.stringify(decodedData));
+        return decodedData;
+    } catch (e) {
+        console.warn("[SSO] Failed to decode CA&A Data field, using raw response");
+        return caaData;
+    }
+};
+
+const findSsoUserByEmail = async (email: string) => {
+    if (!email) return { employeeId: '', userData: null as any };
+
+    const userData: any = await userService.getUserByEmail(email);
+    const employeeId = String(userData?.EmployeeID || '');
+    if (employeeId) {
+        console.log('[SSO] Identified user by email: ' + email + ' -> EmployeeID: ' + employeeId);
+    }
+
+    return { employeeId, userData };
+};
+
+const enrichSsoUserData = async (type: string, employeeId: string, userData: any) => {
+    if (type !== 'B2C') return userData;
+
+    const otherData = await userService.checkUserOther(employeeId);
+    return otherData ? { ...userData, ...otherData } : userData;
+};
+
+const mapSsoUser = (userData: any, employeeId: string, email: string) => ({
+    EmployeeID: userData.EmployeeID || userData.employeeID || userData.CODE || employeeId,
+    Name: userData.FullName || userData.fullname || userData.Name || userData.NAME || userData.FULLNAMETH || userData.FULLNAMEENG || userData.name || 'Guest User',
+    Email: userData.Email || userData.EMAIL || email || '',
+    UserID: userData.UserID || userData.UserId || ''
+});
+
+const ensureSsoUserGroups = async (employeeId: string) => {
+    let userGroups = await userGroupService.getGroupsForUser(employeeId);
+    if (userGroups.length === 0) {
+        console.log('[SSO] User ' + employeeId + ' has no groups, auto-assigning to group 08 (OTHER)');
+        await userGroupService.insertUserInGroup('08', employeeId, 'SYSTEM');
+        userGroups = await userGroupService.getGroupsForUser(employeeId);
+    }
+    return userGroups;
+};
+
+const writeSsoLoginActionLog = async (employeeId: string, userGroups: any[]) => {
+    const defaultUserGroupNo = String(userGroups?.[0]?.userGroupNo || '').trim();
+    try {
+        await insertLogActionService({
+            employeeId,
+            actionId: 1,
+            subjectId: 0,
+            userRole: defaultUserGroupNo,
+            note: 'SSO Login successful',
+            adminFlag: defaultUserGroupNo === '01' ? 1 : 0
+        });
+    } catch (logError) {
+        console.error('[SSO Login] Failed to write action log:', logError);
+    }
+};
+
 class AuthController {
     login = async (c: Context) => {
         try {
             const body = await c.req.json();
-            let EmployeeID: string = String(body.EmployeeID || body.employeeID || '').trim();
-            const Password = String(body.Password || body.password || '');
-
-            if (EmployeeID && /^\d+$/.test(EmployeeID)) {
-                EmployeeID = EmployeeID.padStart(8, '0');
-            }
+            const { employeeId: EmployeeID, password: Password } = parseLoginCredentials(body);
 
             if (!EmployeeID || !Password) {
                 return c.json({ message: 'EmployeeID and Password are required' }, 400);
@@ -40,56 +231,14 @@ class AuthController {
                 return c.json({ message: 'User not found in MP_User' }, 404);
             }
 
-            const extractPassword = (record: Record<string, unknown>): string => {
-                const entries = Object.entries(record || {});
-                const scoreKey = (key: string): number => {
-                    const k = key.toLowerCase();
-                    if (k === 'password') return 100;
-                    if (k === 'passwordhash') return 95;
-                    if (k === 'userpassword') return 90;
-                    if (k === 'pwd') return 85;
-                    if (k.includes('password')) return 80;
-                    if (k.includes('pwd')) return 75;
-                    return 0;
-                };
-
-                const candidates = entries
-                    .map(([key, value]) => ({ key, value, score: scoreKey(key) }))
-                    .filter((item) => item.score > 0)
-                    .sort((a, b) => b.score - a.score);
-
-                for (const item of candidates) {
-                    const value = item.value;
-                    if (typeof value === 'string' && value.trim()) return value.trim();
-                    if (typeof value === 'number') return String(value);
-                    if (Buffer.isBuffer(value)) {
-                        const asUtf8 = value.toString('utf8').trim();
-                        if (asUtf8) return asUtf8;
-                    }
-                }
-
-                return '';
-            };
-
             const storedPassword = extractPassword(userData as Record<string, unknown>);
 
             if (!storedPassword) {
                 console.warn(
-                    `[Login] Password field not found/empty in MP_User for ${EmployeeID}. Available keys: ${Object.keys(userData || {}).join(', ')}`
+                    `[Login] Password field not found/empty in MP_User for ${EmployeeID}. Available keys: ${Object.keys(userData || {}).join(", ")}`
                 );
-                return c.json({ message: 'User does not have a local password set' }, 401);
+                return c.json({ message: "User does not have a local password set" }, 401);
             }
-
-            const verifyStoredPassword = async (input: string, stored: string): Promise<boolean> => {
-                if (/^\$2[aby]\$\d{2}\$/.test(stored)) {
-                    return bcrypt.compare(input, stored);
-                }
-
-                const sha256Hex = createHash('sha256').update(input).digest('hex');
-                const sha256Base64 = createHash('sha256').update(input).digest('base64');
-                return [sha256Hex, sha256Hex.toUpperCase(), sha256Base64]
-                    .some((candidate) => constantTimeEquals(candidate, stored));
-            };
 
             const isPasswordValid = await verifyStoredPassword(Password, storedPassword);
 
@@ -99,47 +248,17 @@ class AuthController {
 
 
             // Map user data for Token validation completion
-            const user = {
-                EmployeeID: userData.EmployeeID || userData.employeeID || userData.CODE || EmployeeID,
-                Name: userData.FullName || userData.fullName || userData.Name || userData.NAME || userData.FULLNAMETH || userData.FULLNAMEENG || userData.name || EmployeeID,
-                Email: userData.Email || userData.EMAIL || '',
-                UserID: userData.UserID || userData.UserId || ''
-            };
+            const user = mapLoginUser(userData, EmployeeID);
 
             // 3. Get User Groups
-            let userGroups = await userGroupService.getGroupsForUser(EmployeeID);
-
-            // 3.1 Auto-assign to group 08 (OTHER) if user has no groups
-            if (userGroups.length === 0) {
-                console.log(`[Login] User ${EmployeeID} has no groups, auto-assigning to group 08 (OTHER)`);
-                await userGroupService.insertUserInGroup('08', EmployeeID, 'SYSTEM');
-                userGroups = await userGroupService.getGroupsForUser(EmployeeID);
-            }
+            const userGroups = await ensureLoginUserGroups(EmployeeID);
 
             // 3.1 Get StartYear Config
             let startYear = await configService.getConfig('StartYear');
-            if (!startYear) startYear = "2562"; // Default fallback
+            if (!startYear) startYear = '2562'; // Default fallback
 
             // 4. Generate Token
-            const SECRET_KEY = process.env.JWT_SECRET;
-            if (!SECRET_KEY) {
-                throw new Error("JWT_SECRET is not defined in environment variables.");
-            }
-
-            const token = jwt.sign(
-                {
-                    id: user.EmployeeID,
-                    role: 'user',
-                    groups: userGroups,
-                    name: user.Name,
-                    email: user.Email,
-                    position: userData.Position || '',
-                    orgUnit: userData.OrgUnit || '',
-                    profilePicture: userData.ProfilePicture || '',
-                },
-                SECRET_KEY,
-                { expiresIn: '1d' }
-            );
+            const token = signLoginToken(user, userData, userGroups);
 
             const defaultUserGroupNo = String(userGroups?.[0]?.userGroupNo || '').trim();
             try {
@@ -180,13 +299,12 @@ class AuthController {
     ssoLogin = async (c: Context) => {
         try {
             const body = await c.req.json();
-            const { accessToken, email, employeeID: reqEmpID, type } = body;
+            const { accessToken, email = '', type = '' } = body;
 
             if (!accessToken) {
                 return c.json({ message: 'Microsoft Access Token is required for SSO' }, 400);
             }
 
-            // 1. Get CA&A System Token
             const systemToken = await configService.getToken();
             if (!systemToken) {
                 console.error("[SSO] Failed to retrieve system token from CA&A");
@@ -196,150 +314,34 @@ class AuthController {
                 }, 500);
             }
 
-            // 2. Validate Microsoft Token with CA&A
-            const caaUrl = await configService.getConfig('CAA_URL');
-            let caaData;
-
-            if (type === 'B2C') {
-                const b2cClientId = process.env.NEXT_PUBLIC_B2C_CLIENT_ID || '';
-                const b2cTenantId = process.env.NEXT_PUBLIC_B2C_TENANT_ID || '';
-                const targetUrl = `${caaUrl}/auth/b2c/${b2cClientId}`;
-                
-                const b2cPayload = {
-                    v: JSON.stringify({
-                        tenant_id: b2cTenantId,
-                        client_id: b2cClientId,
-                        validated_claims: "",
-                        object_id: ""
-                    })
-                };
-
-                caaData = await configService.curlRequest(targetUrl, 'POST', {
-                    'Content-Type': 'application/json',
-                    'Authorization': `Bearer ${systemToken}`
-                }, b2cPayload);
-            } else {
-                const caaClientId = await configService.getConfig('CAA_CLIENT_ID');
-                // The Postman collection confirms the AD endpoint is just /auth/ad (no ID in path)
-                const targetUrl = caaUrl.endsWith('/') ? `${caaUrl}auth/ad` : `${caaUrl}/auth/ad`;
-                
-                const adPayload = {
-                    v: JSON.stringify({
-                        tenant_id: process.env.NEXT_PUBLIC_AZURE_TENANT_ID || '',
-                        client_id: caaClientId,
-                        access_token: accessToken, // Added from Postman docs
-                        validated_claims: "",
-                        object_id: ""
-                    })
-                };
-
-                caaData = await configService.curlRequest(targetUrl, 'POST', {
-                    'Content-Type': 'application/json',
-                    'Authorization': `Bearer ${systemToken}`
-                }, adPayload);
-            }
-
+            const caaData = await getSsoCaaData(type, accessToken, systemToken);
             if (!caaData) {
                 return c.json({ message: 'Microsoft token verification failed with CA&A' }, 401);
             }
+            decodeSsoCaaData(caaData);
 
-            // 3. Decode CA&A Response Data (if encoded)
-            let decodedData = caaData;
-            if (caaData.Data) {
-                try {
-                    const decodedString = Buffer.from(caaData.Data, 'base64').toString('utf-8');
-                    decodedData = JSON.parse(decodedString);
-                    console.log(`[SSO] Decoded CA&A Data:`, JSON.stringify(decodedData));
-                } catch (e) {
-                    console.warn("[SSO] Failed to decode CA&A Data field, using raw response");
-                }
-            }
-            
-            // Priority 1: Mandatory Email Lookup in our DB (as per user instruction)
-            let EmployeeID = "";
-            let userData: any = null;
-
-            if (email) {
-                userData = await userService.getUserByEmail(email);
-                if (userData && userData.EmployeeID) {
-                    EmployeeID = userData.EmployeeID;
-                    console.log(`[SSO] Identified user by email: ${email} -> EmployeeID: ${EmployeeID}`);
-                }
-            }
-
-            if (!EmployeeID) {
-                console.warn(`[SSO] User with email ${email} authenticated via Microsoft but NOT FOUND in MP_User table.`);
+            const ssoUser = await findSsoUserByEmail(email);
+            if (!ssoUser.employeeId) {
+                console.warn('[SSO] User with email ' + email + ' authenticated via Microsoft but NOT FOUND in MP_User table.');
                 return c.json({ 
-                    message: `User (${email}) is not registered in the Manpower Planning system. Please contact admin.`,
+                    message: 'User (' + email + ') is not registered in the Manpower Planning system. Please contact admin.',
                     error: 'USER_NOT_FOUND'
                 }, 403);
             }
 
-            // Sync/Verify User Data
-            if (type === 'B2C') {
-                // For B2C, check if they are in other users table if not in main sync
-                const otherData = await userService.checkUserOther(EmployeeID);
-                if (otherData) userData = { ...userData, ...otherData };
-            }
-
+            const userData = await enrichSsoUserData(type, ssoUser.employeeId, ssoUser.userData);
             if (!userData) {
                 return c.json({ message: 'User authenticated via Microsoft but not found in System' }, 401);
             }
 
-            console.log(`[SSO] User Data retrieved:`, JSON.stringify(userData));
+            console.log('[SSO] User Data retrieved:', JSON.stringify(userData));
 
-            // Map user data for Token
-            const user = {
-                EmployeeID: userData.EmployeeID || userData.employeeID || userData.CODE || EmployeeID,
-                Name: userData.FullName || userData.fullname || userData.Name || userData.NAME || userData.FULLNAMETH || userData.FULLNAMEENG || userData.name || 'Guest User',
-                Email: userData.Email || userData.EMAIL || email || '',
-                UserID: userData.UserID || userData.UserId || ''
-            };
+            const user = mapSsoUser(userData, ssoUser.employeeId, email);
+            const userGroups = await ensureSsoUserGroups(ssoUser.employeeId);
+            const startYear = await configService.getConfig('StartYear') || "2562";
+            const token = signLoginToken(user, userData, userGroups);
 
-            let userGroups = await userGroupService.getGroupsForUser(EmployeeID);
-
-            // Auto-assign to group 08 (OTHER) if user has no groups
-            if (userGroups.length === 0) {
-                console.log(`[SSO] User ${EmployeeID} has no groups, auto-assigning to group 08 (OTHER)`);
-                await userGroupService.insertUserInGroup('08', EmployeeID, 'SYSTEM');
-                userGroups = await userGroupService.getGroupsForUser(EmployeeID);
-            }
-            let startYear = await configService.getConfig('StartYear');
-            if (!startYear) startYear = "2562";
-
-            const SECRET_KEY = process.env.JWT_SECRET;
-            if (!SECRET_KEY) {
-                throw new Error("JWT_SECRET is not defined in environment variables.");
-            }
-
-            const token = jwt.sign(
-                {
-                    id: user.EmployeeID,
-                    role: 'user',
-                    groups: userGroups,
-                    name: user.Name,
-                    email: user.Email,
-                    position: userData.Position || '',
-                    orgUnit: userData.OrgUnit || '',
-                    profilePicture: userData.ProfilePicture || '',
-                },
-                SECRET_KEY,
-                { expiresIn: '1d' }
-            );
-
-            const defaultUserGroupNo = String(userGroups?.[0]?.userGroupNo || '').trim();
-            try {
-                await insertLogActionService({
-                    employeeId: user.EmployeeID,
-                    actionId: 1,
-                    subjectId: 0,
-                    userRole: defaultUserGroupNo,
-                    note: 'SSO Login successful',
-                    adminFlag: defaultUserGroupNo === '01' ? 1 : 0
-                });
-            } catch (logError) {
-                console.error('[SSO Login] Failed to write action log:', logError);
-            }
+            await writeSsoLoginActionLog(user.EmployeeID, userGroups);
 
             return c.json({
                 message: 'SSO Login successful',
@@ -393,8 +395,6 @@ class AuthController {
             const token = await configService.getToken();
             const caaUrl = await configService.getConfig('CAA_URL');
             const appUser = await configService.getConfig('CAA_USER');
-            const tenantId = await configService.getConfig('CAA_TENANT_ID');
-            const clientId = await configService.getConfig('CAA_CLIENT_ID');
             const targetUrl = `${caaUrl.endsWith('/') ? caaUrl : caaUrl + '/'}azt/doservice`;
 
             console.log(`[Registration] Using appUser: ${appUser}, token prefix: ${token?.substring(0, 10)}...`);

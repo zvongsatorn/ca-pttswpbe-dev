@@ -57,6 +57,66 @@ type TableMeta = {
 
 type GenericRow = Record<string, unknown>;
 
+type EmployeeProfileResult = {
+    retireYear: number | null;
+    delayType: number | null;
+    posName: string | null;
+};
+
+type EmployeeProfileColumns = {
+    infoEmployeeCol: string | null;
+    infoNameCol: string | null;
+    infoPositionNameCol: string | null;
+    infoPositionCol: string | null;
+    infoRetireYearCol: string | null;
+    positionIdCol: string | null;
+    positionSignPosCol: string | null;
+    positionSecondmentTextCol: string | null;
+    positionBsTypeCol: string | null;
+    positionOrgTypeCol: string | null;
+    positionOrgCol: string | null;
+    positionEmployeeCol: string | null;
+    positionBeginDateCol: string | null;
+    positionEndDateCol: string | null;
+    unitOrgCol: string | null;
+    unitNameCol: string | null;
+    unitAbbrCol: string | null;
+    unitBgCol: string | null;
+};
+
+type EmployeeProfileQueryContext = {
+    pool: sql.ConnectionPool;
+    normalizedEmployeeId: string;
+    infoSource: string;
+    positionSource: string;
+    unitSource: string;
+    canJoinUnit: boolean;
+    positionOrderBy: string;
+    unitJoinClause: string;
+    positionEmpMatch: string;
+    positionSecondmentCondition: string;
+    columns: EmployeeProfileColumns;
+};
+
+type EmployeeOrgMetaQueryContext = {
+    pool: sql.ConnectionPool;
+    uniqueIds: string[];
+    infoSource: string;
+    positionSource: string;
+    canJoinUnit: boolean;
+    positionOrderBy: string;
+    unitJoinClause: string;
+    unitNameSelectExpr: string;
+    positionSecondmentCondition: string;
+    columns: EmployeeProfileColumns;
+};
+
+type EmployeeOptionsQueryContext = EmployeeOrgMetaQueryContext & {
+    retireYear?: number;
+    keywordLike: string;
+    effectiveDate: Date;
+};
+
 const INFO_TABLE_CANDIDATES = ['InfoData', 'infodata'];
 const POSITION_TABLE_CANDIDATES = ['fn_InterfacePosition', 'InterfacePosition', 'interfaceposition'];
 const INFO_EMPLOYEE_COL_CANDIDATES = ['CODE', 'Code', 'EmployeeID', 'EmployeeId'];
@@ -103,6 +163,29 @@ class DelayService {
         );
     }
 
+    private rankTableCandidate(row: GenericRow, candidate: string): number {
+        const objectName = toTrimText(row.object_name).toLowerCase();
+        const schemaName = toTrimText(row.schema_name).toLowerCase();
+        const objectType = toTrimText(row.object_type).toUpperCase();
+        const objectExact = objectName === candidate.toLowerCase() ? 0 : 1;
+        const schemaRank = schemaName === 'dbo' ? 0 : 1;
+        const typeRank = objectType === 'U' ? 0 : 1;
+        return objectExact * 100 + schemaRank * 10 + typeRank;
+    }
+
+    private selectTableMetaRow(rows: GenericRow[], tableCandidates: string[]): GenericRow | null {
+        for (const candidate of tableCandidates) {
+            const matched = rows
+                .filter((row) => toTrimText(row.object_name).toLowerCase() === candidate.toLowerCase())
+                .sort((a, b) => this.rankTableCandidate(a, candidate) - this.rankTableCandidate(b, candidate));
+            if (matched.length > 0) {
+                return matched[0];
+            }
+        }
+
+        return [...rows].sort((a, b) => this.rankTableCandidate(a, tableCandidates[0]) - this.rankTableCandidate(b, tableCandidates[0]))[0] || null;
+    }
+
     private async getTableMeta(
         pool: sql.ConnectionPool,
         tableCandidates: string[]
@@ -134,29 +217,8 @@ class DelayService {
             : [];
         if (!rows.length) return null;
 
-        const rankTable = (row: GenericRow, candidate: string) => {
-            const objectName = toTrimText(row.object_name).toLowerCase();
-            const schemaName = toTrimText(row.schema_name).toLowerCase();
-            const objectType = toTrimText(row.object_type).toUpperCase();
-            const objectExact = objectName === candidate.toLowerCase() ? 0 : 1;
-            const schemaRank = schemaName === 'dbo' ? 0 : 1;
-            const typeRank = objectType === 'U' ? 0 : 1;
-            return objectExact * 100 + schemaRank * 10 + typeRank;
-        };
-
-        let selected: GenericRow | null = null;
-        for (const candidate of tableCandidates) {
-            const matched = rows
-                .filter((row) => toTrimText(row.object_name).toLowerCase() === candidate.toLowerCase())
-                .sort((a, b) => rankTable(a, candidate) - rankTable(b, candidate));
-            if (matched.length > 0) {
-                selected = matched[0];
-                break;
-            }
-        }
-        if (!selected) {
-            selected = [...rows].sort((a, b) => rankTable(a, tableCandidates[0]) - rankTable(b, tableCandidates[0]))[0];
-        }
+        const selected = this.selectTableMetaRow(rows, tableCandidates);
+        if (!selected) return null;
 
         const schemaName = toTrimText(selected.schema_name);
         const tableName = toTrimText(selected.object_name);
@@ -241,16 +303,15 @@ class DelayService {
         unitNameCol: string | null;
         unitAbbrCol: string | null;
     }): string {
-        const positionOrgTypeExpr = params.positionOrgTypeExpr
-            ? params.positionOrgTypeExpr
-            : params.positionOrgTypeCol
-                ? `TRY_CONVERT(int, ${params.positionAlias}.${escapeSqlIdentifier(params.positionOrgTypeCol)})`
-                : 'NULL';
-        const positionBsTypeExpr = params.positionBsTypeExpr
-            ? params.positionBsTypeExpr
-            : params.positionBsTypeCol
-                ? `TRY_CONVERT(int, ${params.positionAlias}.${escapeSqlIdentifier(params.positionBsTypeCol)})`
-                : 'NULL';
+        let positionOrgTypeExpr = params.positionOrgTypeExpr || 'NULL';
+        if (!params.positionOrgTypeExpr && params.positionOrgTypeCol) {
+            positionOrgTypeExpr = 'TRY_CONVERT(int, ' + params.positionAlias + '.' + escapeSqlIdentifier(params.positionOrgTypeCol) + ')';
+        }
+
+        let positionBsTypeExpr = params.positionBsTypeExpr || 'NULL';
+        if (!params.positionBsTypeExpr && params.positionBsTypeCol) {
+            positionBsTypeExpr = 'TRY_CONVERT(int, ' + params.positionAlias + '.' + escapeSqlIdentifier(params.positionBsTypeCol) + ')';
+        }
         const unitBgExpr = params.unitBgCol
             ? `LTRIM(RTRIM(CAST(${params.unitAlias}.${escapeSqlIdentifier(params.unitBgCol)} AS nvarchar(32))))`
             : 'NULL';
@@ -340,366 +401,459 @@ class DelayService {
         if (!infoMeta || !positionMeta) {
             throw new Error('InfoData/fn_InterfacePosition source not found');
         }
-        const infoSource = this.buildSqlSource(infoMeta, '@EffectiveDate');
-        const positionSource = this.buildSqlSource(positionMeta, '@EffectiveDate');
-        const unitSource = unitMeta ? this.buildSqlSource(unitMeta, '@EffectiveDate') : '';
 
-        const infoEmployeeCol = pickColumnName(infoMeta.columns, INFO_EMPLOYEE_COL_CANDIDATES);
-        const infoNameCol = pickColumnName(infoMeta.columns, INFO_NAME_COL_CANDIDATES);
-        const infoPositionNameCol = pickColumnName(infoMeta.columns, INFO_POSITION_NAME_COL_CANDIDATES);
-        const infoPositionCol = pickColumnName(infoMeta.columns, INFO_POSITION_COL_CANDIDATES);
-        const infoRetireYearCol = pickColumnName(infoMeta.columns, INFO_RETIRE_YEAR_COL_CANDIDATES);
-
-        const positionIdCol = pickColumnName(positionMeta.columns, POSITION_ID_COL_CANDIDATES);
-        const positionSignPosCol = pickColumnName(positionMeta.columns, POSITION_SIGN_POS_COL_CANDIDATES);
-        const positionSecondmentTextCol = pickColumnName(positionMeta.columns, POSITION_SECONDMENT_TEXT_COL_CANDIDATES);
-        const positionBsTypeCol = pickColumnName(positionMeta.columns, POSITION_BS_TYPE_COL_CANDIDATES);
-        const positionOrgTypeCol = pickColumnName(positionMeta.columns, POSITION_ORG_TYPE_COL_CANDIDATES);
-        const positionOrgCol = pickColumnName(positionMeta.columns, POSITION_ORG_COL_CANDIDATES);
-        const positionEmployeeCol = pickColumnName(positionMeta.columns, POSITION_EMPLOYEE_COL_CANDIDATES);
-        const positionBeginDateCol = pickColumnName(positionMeta.columns, POSITION_BEGIN_DATE_COL_CANDIDATES);
-        const positionEndDateCol = pickColumnName(positionMeta.columns, POSITION_END_DATE_COL_CANDIDATES);
-        const unitOrgCol = unitMeta ? pickColumnName(unitMeta.columns, UNIT_ORG_COL_CANDIDATES) : null;
-        const unitNameCol = unitMeta ? pickColumnName(unitMeta.columns, UNIT_NAME_COL_CANDIDATES) : null;
-        const unitAbbrCol = unitMeta ? pickColumnName(unitMeta.columns, UNIT_ABBR_COL_CANDIDATES) : null;
-        const unitBgCol = unitMeta ? pickColumnName(unitMeta.columns, UNIT_BG_COL_CANDIDATES) : null;
-
-        if (!infoEmployeeCol || !infoNameCol || !infoPositionNameCol || !infoPositionCol || !infoRetireYearCol || !positionIdCol || !positionSignPosCol) {
+        const columns = this.pickEmployeeProfileColumns(infoMeta, positionMeta, unitMeta);
+        if (!this.hasRequiredEmployeeOptionsColumns(columns)) {
             throw new Error('InfoData/fn_InterfacePosition required columns not found');
         }
 
-        const positionOrderFields: string[] = [];
-        if (positionEndDateCol) {
-            positionOrderFields.push(`TRY_CONVERT(date, p.${escapeSqlIdentifier(positionEndDateCol)}) DESC`);
-        }
-        if (positionBeginDateCol) {
-            positionOrderFields.push(`TRY_CONVERT(date, p.${escapeSqlIdentifier(positionBeginDateCol)}) DESC`);
-        }
-        positionOrderFields.push(`LTRIM(RTRIM(CAST(p.${escapeSqlIdentifier(positionIdCol)} AS nvarchar(64)))) DESC`);
-        const positionOrderBy = positionOrderFields.join(', ');
-
-        const keywordLike = `%${(keyword || '').trim()}%`;
-        const effectiveDate = new Date();
-        const positionSecondmentCondition = positionSecondmentTextCol
-            ? `AND UPPER(LTRIM(RTRIM(CAST(p.${escapeSqlIdentifier(positionSecondmentTextCol)} AS nvarchar(64))))) = 'EMPLOYEE'`
-            : '';
-        const canJoinUnit = Boolean(unitMeta && unitSource && positionOrgCol && unitOrgCol);
-        const unitJoinClause = canJoinUnit
-            ? `
-                LEFT JOIN ${unitSource} u
-                    ON LTRIM(RTRIM(CAST(u.${escapeSqlIdentifier(unitOrgCol!)} AS nvarchar(32)))) =
-                       LTRIM(RTRIM(CAST(p.org_unit_id AS nvarchar(32))))
-            `
-            : '';
-        const unitNameSelectExpr = canJoinUnit && unitNameCol
-            ? `NULLIF(LTRIM(RTRIM(CAST(u.${escapeSqlIdentifier(unitNameCol)} AS nvarchar(200)))), '')`
-            : "N''";
-        const queryEmployeeOptions = async (
-            resolvedPositionOrgTypeCol: string | null,
-            resolvedPositionBsTypeCol: string | null
-        ) => {
-            const delayTypeExpr = this.buildDelayTypeExpr({
-                positionAlias: 'p',
-                unitAlias: 'u',
-                positionOrgTypeExpr: 'TRY_CONVERT(int, p.org_type)',
-                positionBsTypeExpr: 'TRY_CONVERT(int, p.bs_type)',
-                positionOrgTypeCol: null,
-                positionBsTypeCol: null,
-                unitBgCol: canJoinUnit ? unitBgCol : null,
-                unitNameCol: canJoinUnit ? unitNameCol : null,
-                unitAbbrCol: canJoinUnit ? unitAbbrCol : null
-            });
-            const request = pool.request()
-                .input('RetireYear', sql.Int, typeof retireYear === 'number' && Number.isFinite(retireYear) ? retireYear : null)
-                .input('KeywordLike', sql.NVarChar(128), keywordLike)
-                .input('EffectiveDate', sql.DateTime, effectiveDate);
-
-            const query = `
-                ;WITH PositionDedup AS (
-                    SELECT
-                        LTRIM(RTRIM(CAST(p.${escapeSqlIdentifier(positionIdCol)} AS nvarchar(64)))) AS position_id,
-                        ${positionEmployeeCol ? `LTRIM(RTRIM(CAST(p.${escapeSqlIdentifier(positionEmployeeCol)} AS nvarchar(32))))` : "N''"} AS employee_id,
-                        ${resolvedPositionOrgTypeCol ? `TRY_CONVERT(int, p.${escapeSqlIdentifier(resolvedPositionOrgTypeCol)})` : 'NULL'} AS org_type,
-                        ${resolvedPositionBsTypeCol ? `TRY_CONVERT(int, p.${escapeSqlIdentifier(resolvedPositionBsTypeCol)})` : 'NULL'} AS bs_type,
-                        ${positionOrgCol ? `LTRIM(RTRIM(CAST(p.${escapeSqlIdentifier(positionOrgCol)} AS nvarchar(32))))` : "N''"} AS org_unit_id,
-                        ROW_NUMBER() OVER (
-                            PARTITION BY LTRIM(RTRIM(CAST(p.${escapeSqlIdentifier(positionIdCol)} AS nvarchar(64))))
-                            ORDER BY ${positionOrderBy}
-                        ) AS rn
-                    FROM ${positionSource} p
-                    WHERE TRY_CONVERT(int, p.${escapeSqlIdentifier(positionSignPosCol)}) = 100
-                      ${positionSecondmentCondition}
-                ),
-                InfoDataDedup AS (
-                    SELECT
-                        LTRIM(RTRIM(CAST(i.${escapeSqlIdentifier(infoEmployeeCol)} AS nvarchar(32)))) AS employee_id,
-                        LTRIM(RTRIM(COALESCE(CAST(i.${escapeSqlIdentifier(infoNameCol)} AS nvarchar(200)), N''))) AS employee_name,
-                        LTRIM(RTRIM(COALESCE(CAST(i.${escapeSqlIdentifier(infoPositionNameCol)} AS nvarchar(200)), N''))) AS pos_name,
-                        LTRIM(RTRIM(CAST(i.${escapeSqlIdentifier(infoPositionCol)} AS nvarchar(64)))) AS position_id,
-                        TRY_CONVERT(int, i.${escapeSqlIdentifier(infoRetireYearCol)}) AS retire_year,
-                        ROW_NUMBER() OVER (
-                            PARTITION BY LTRIM(RTRIM(CAST(i.${escapeSqlIdentifier(infoPositionCol)} AS nvarchar(64))))
-                            ORDER BY TRY_CONVERT(int, i.${escapeSqlIdentifier(infoRetireYearCol)}) DESC,
-                                     LTRIM(RTRIM(CAST(i.${escapeSqlIdentifier(infoEmployeeCol)} AS nvarchar(32)))) DESC
-                        ) AS rn
-                    FROM ${infoSource} i
-                    WHERE (@RetireYear IS NULL OR TRY_CONVERT(int, i.${escapeSqlIdentifier(infoRetireYearCol)}) = @RetireYear)
-                )
-                SELECT
-                    src.employee_id,
-                    MAX(src.employee_name) AS employee_name,
-                    MAX(src.pos_name) AS pos_name,
-                    MAX(src.unit_name) AS unit_name,
-                    MAX(src.delay_type) AS delay_type,
-                    CASE WHEN MAX(src.delay_type) = 2 THEN 'Support' ELSE 'Business' END AS bu_support
-                FROM (
-                    SELECT
-                        COALESCE(NULLIF(i.employee_id, ''), NULLIF(p.employee_id, '')) AS employee_id,
-                        NULLIF(i.employee_name, '') AS employee_name,
-                        NULLIF(i.pos_name, '') AS pos_name,
-                        ${unitNameSelectExpr} AS unit_name,
-                        ${delayTypeExpr} AS delay_type
-                    FROM PositionDedup p
-                    INNER JOIN InfoDataDedup i ON i.position_id = p.position_id AND i.rn = 1
-                    ${unitJoinClause}
-                    WHERE p.rn = 1
-                ) src
-                WHERE src.employee_id IS NOT NULL
-                  AND src.employee_id <> ''
-                  AND (
-                        @KeywordLike = '%%'
-                        OR src.employee_id LIKE @KeywordLike
-                        OR COALESCE(src.employee_name, '') LIKE @KeywordLike
-                        OR COALESCE(src.pos_name, '') LIKE @KeywordLike
-                      )
-                GROUP BY src.employee_id
-                ORDER BY src.employee_id ASC
-            `;
-
-            return request.query(query);
-        };
-
-        let result;
-        try {
-            result = await queryEmployeeOptions(positionOrgTypeCol, positionBsTypeCol);
-        } catch (error) {
-            if (!this.isMissingDelayTypeColumnError(error)) throw error;
-            result = await queryEmployeeOptions(null, null);
-        }
+        const result = await this.queryEmployeeOptionsWithFallback(this.buildEmployeeOptionsContext({
+            pool,
+            retireYear,
+            keyword,
+            infoMeta,
+            positionMeta,
+            unitMeta,
+            columns
+        }));
         const rows = Array.isArray(result.recordset) ? (result.recordset as GenericRow[]) : [];
 
         return rows
-            .map((row) => {
-                const employeeId = this.getFirstNonEmpty(row, ['employee_id', 'EmployeeID']);
-                if (!employeeId) return null;
-
-                const name = this.getFirstNonEmpty(row, ['employee_name', 'EmployeeName']) || employeeId;
-                const position = this.getFirstNonEmpty(row, ['pos_name', 'PosName']);
-                const buSupport = this.getFirstNonEmpty(row, ['bu_support', 'BUSupport']);
-                const unitName = this.getFirstNonEmpty(row, ['unit_name', 'UnitName']);
-                const delayType = this.normalizeDelayType(this.getFirstNonEmpty(row, ['delay_type', 'DelayType'])) || 1;
-
-                return {
-                    value: employeeId,
-                    label: `${employeeId} - ${name}`,
-                    name,
-                    position,
-                    buSupport: buSupport || '-',
-                    unitName: unitName || '-',
-                    delayType
-                };
-            })
+            .map((row) => this.mapEmployeeOptionRow(row))
             .filter((item): item is DelayEmployeeOption => item !== null);
+    }
+
+    private mapRetireYearRows(rows: unknown): number[] {
+        return Array.isArray(rows)
+            ? (rows as GenericRow[])
+                .map((row) => Number.parseInt(String(row.retire_year), 10))
+                .filter((year) => Number.isFinite(year))
+            : [];
+    }
+
+    private async getRetireYearOptionsFromInfoData(pool: sql.ConnectionPool): Promise<number[]> {
+        const infoMeta = await this.getTableMeta(pool, INFO_TABLE_CANDIDATES);
+        const positionMeta = await this.getTableMeta(pool, POSITION_TABLE_CANDIDATES);
+        if (!infoMeta || !positionMeta) return [];
+
+        const infoSource = this.buildSqlSource(infoMeta, "@EffectiveDate");
+        const positionSource = this.buildSqlSource(positionMeta, "@EffectiveDate");
+        const infoRetireYearCol = pickColumnName(infoMeta.columns, INFO_RETIRE_YEAR_COL_CANDIDATES);
+        const infoPositionCol = pickColumnName(infoMeta.columns, INFO_POSITION_COL_CANDIDATES);
+        const positionIdCol = pickColumnName(positionMeta.columns, POSITION_ID_COL_CANDIDATES);
+        const positionSignPosCol = pickColumnName(positionMeta.columns, POSITION_SIGN_POS_COL_CANDIDATES);
+        if (!infoRetireYearCol || !infoPositionCol || !positionIdCol || !positionSignPosCol) return [];
+
+        const positionSecondmentTextCol = pickColumnName(positionMeta.columns, POSITION_SECONDMENT_TEXT_COL_CANDIDATES);
+        const positionSecondmentCondition = positionSecondmentTextCol
+            ? `AND UPPER(LTRIM(RTRIM(CAST(p.${escapeSqlIdentifier(positionSecondmentTextCol)} AS nvarchar(64))))) = ${String.fromCharCode(39)}EMPLOYEE${String.fromCharCode(39)}`
+            : "";
+        const result = await pool.request()
+            .input("EffectiveDate", sql.DateTime, new Date())
+            .query(`
+                SELECT DISTINCT
+                    TRY_CONVERT(int, i.${escapeSqlIdentifier(infoRetireYearCol)}) AS retire_year
+                FROM ${infoSource} i
+                INNER JOIN ${positionSource} p
+                    ON LTRIM(RTRIM(CAST(p.${escapeSqlIdentifier(positionIdCol)} AS nvarchar(64)))) =
+                       LTRIM(RTRIM(CAST(i.${escapeSqlIdentifier(infoPositionCol)} AS nvarchar(64))))
+                WHERE TRY_CONVERT(int, p.${escapeSqlIdentifier(positionSignPosCol)}) = 100
+                  ${positionSecondmentCondition}
+                  AND TRY_CONVERT(int, i.${escapeSqlIdentifier(infoRetireYearCol)}) IS NOT NULL
+                ORDER BY TRY_CONVERT(int, i.${escapeSqlIdentifier(infoRetireYearCol)}) ASC
+            `);
+
+        return this.mapRetireYearRows(result.recordset);
+    }
+
+    private async getRetireYearOptionsFromDelayTable(pool: sql.ConnectionPool): Promise<number[]> {
+        const fallbackResult = await pool.request().query(`
+            SELECT DISTINCT
+                TRY_CONVERT(int, DelayYear) AS retire_year
+            FROM MP_Delay
+            WHERE TRY_CONVERT(int, DelayYear) IS NOT NULL
+              AND TRY_CONVERT(int, DelayYear) <> ${NON_COUNT_DELAY_YEAR}
+            ORDER BY TRY_CONVERT(int, DelayYear) ASC
+        `);
+
+        return this.mapRetireYearRows(fallbackResult.recordset);
     }
 
     async getRetireYearOptions(): Promise<number[]> {
         const pool = await poolPromise;
 
         try {
-            const infoMeta = await this.getTableMeta(pool, INFO_TABLE_CANDIDATES);
-            const positionMeta = await this.getTableMeta(pool, POSITION_TABLE_CANDIDATES);
-
-            if (infoMeta && positionMeta) {
-                const infoSource = this.buildSqlSource(infoMeta, '@EffectiveDate');
-                const positionSource = this.buildSqlSource(positionMeta, '@EffectiveDate');
-                const infoRetireYearCol = pickColumnName(infoMeta.columns, INFO_RETIRE_YEAR_COL_CANDIDATES);
-                const infoPositionCol = pickColumnName(infoMeta.columns, INFO_POSITION_COL_CANDIDATES);
-                const positionIdCol = pickColumnName(positionMeta.columns, POSITION_ID_COL_CANDIDATES);
-                const positionSignPosCol = pickColumnName(positionMeta.columns, POSITION_SIGN_POS_COL_CANDIDATES);
-                const positionSecondmentTextCol = pickColumnName(positionMeta.columns, POSITION_SECONDMENT_TEXT_COL_CANDIDATES);
-                const positionSecondmentCondition = positionSecondmentTextCol
-                    ? `AND UPPER(LTRIM(RTRIM(CAST(p.${escapeSqlIdentifier(positionSecondmentTextCol)} AS nvarchar(64))))) = 'EMPLOYEE'`
-                    : '';
-
-                if (infoRetireYearCol && infoPositionCol && positionIdCol && positionSignPosCol) {
-                    const result = await pool.request()
-                        .input('EffectiveDate', sql.DateTime, new Date())
-                        .query(`
-                        SELECT DISTINCT
-                            TRY_CONVERT(int, i.${escapeSqlIdentifier(infoRetireYearCol)}) AS retire_year
-                        FROM ${infoSource} i
-                        INNER JOIN ${positionSource} p
-                            ON LTRIM(RTRIM(CAST(p.${escapeSqlIdentifier(positionIdCol)} AS nvarchar(64)))) =
-                               LTRIM(RTRIM(CAST(i.${escapeSqlIdentifier(infoPositionCol)} AS nvarchar(64))))
-                        WHERE TRY_CONVERT(int, p.${escapeSqlIdentifier(positionSignPosCol)}) = 100
-                          ${positionSecondmentCondition}
-                          AND TRY_CONVERT(int, i.${escapeSqlIdentifier(infoRetireYearCol)}) IS NOT NULL
-                        ORDER BY TRY_CONVERT(int, i.${escapeSqlIdentifier(infoRetireYearCol)}) ASC
-                    `);
-
-                    const years = Array.isArray(result.recordset)
-                        ? (result.recordset as GenericRow[])
-                            .map((row) => Number.parseInt(String(row.retire_year), 10))
-                            .filter((year) => Number.isFinite(year))
-                        : [];
-
-                    if (years.length > 0) {
-                        return years;
-                    }
-                }
-            }
+            const years = await this.getRetireYearOptionsFromInfoData(pool);
+            if (years.length > 0) return years;
         } catch (error) {
-            console.warn('[DelayService.getRetireYearOptions] InfoData/interfaceposition source unavailable, fallback to MP_Delay', error);
+            console.warn("[DelayService.getRetireYearOptions] InfoData/interfaceposition source unavailable, fallback to MP_Delay", error);
         }
 
         try {
-            const fallbackResult = await pool.request().query(`
-                SELECT DISTINCT
-                    TRY_CONVERT(int, DelayYear) AS retire_year
-                FROM MP_Delay
-                WHERE TRY_CONVERT(int, DelayYear) IS NOT NULL
-                  AND TRY_CONVERT(int, DelayYear) <> ${NON_COUNT_DELAY_YEAR}
-                ORDER BY TRY_CONVERT(int, DelayYear) ASC
-            `);
-
-            return Array.isArray(fallbackResult.recordset)
-                ? (fallbackResult.recordset as GenericRow[])
-                    .map((row) => Number.parseInt(String(row.retire_year), 10))
-                    .filter((year) => Number.isFinite(year))
-                : [];
+            return await this.getRetireYearOptionsFromDelayTable(pool);
         } catch (error) {
-            console.warn('[DelayService.getRetireYearOptions] MP_Delay fallback failed', error);
+            console.warn("[DelayService.getRetireYearOptions] MP_Delay fallback failed", error);
             return [];
         }
     }
 
-    private async getEmployeeProfile(employeeId: string): Promise<{ retireYear: number | null; delayType: number | null; posName: string | null }> {
+    private getEmptyEmployeeProfile(): EmployeeProfileResult {
+        return { retireYear: null, delayType: null, posName: null };
+    }
+
+    private hasRequiredEmployeeOptionsColumns(columns: EmployeeProfileColumns): boolean {
+        return Boolean(
+            columns.infoEmployeeCol &&
+            columns.infoNameCol &&
+            columns.infoPositionNameCol &&
+            columns.infoPositionCol &&
+            columns.infoRetireYearCol &&
+            columns.positionIdCol &&
+            columns.positionSignPosCol
+        );
+    }
+
+    private buildEmployeeOptionsContext(params: {
+        pool: sql.ConnectionPool;
+        retireYear?: number;
+        keyword?: string;
+        infoMeta: TableMeta;
+        positionMeta: TableMeta;
+        unitMeta: TableMeta | null;
+        columns: EmployeeProfileColumns;
+    }): EmployeeOptionsQueryContext {
+        return {
+            ...this.buildEmployeeOrgMetaContext({
+                pool: params.pool,
+                uniqueIds: [],
+                infoMeta: params.infoMeta,
+                positionMeta: params.positionMeta,
+                unitMeta: params.unitMeta,
+                columns: params.columns
+            }),
+            retireYear: params.retireYear,
+            keywordLike: `%${(params.keyword || '').trim()}%`,
+            effectiveDate: new Date()
+        };
+    }
+
+    private buildEmployeeOptionsQuery(
+        context: EmployeeOptionsQueryContext,
+        resolvedPositionOrgTypeCol: string | null,
+        resolvedPositionBsTypeCol: string | null
+    ): string {
+        const columns = context.columns;
+        const delayTypeExpr = this.buildDelayTypeExpr({
+            positionAlias: 'p',
+            unitAlias: 'u',
+            positionOrgTypeExpr: 'TRY_CONVERT(int, p.org_type)',
+            positionBsTypeExpr: 'TRY_CONVERT(int, p.bs_type)',
+            positionOrgTypeCol: null,
+            positionBsTypeCol: null,
+            unitBgCol: context.canJoinUnit ? columns.unitBgCol : null,
+            unitNameCol: context.canJoinUnit ? columns.unitNameCol : null,
+            unitAbbrCol: context.canJoinUnit ? columns.unitAbbrCol : null
+        });
+
+        return `
+            ;WITH PositionDedup AS (
+                SELECT
+                    LTRIM(RTRIM(CAST(p.${escapeSqlIdentifier(columns.positionIdCol!)} AS nvarchar(64)))) AS position_id,
+                    ${columns.positionEmployeeCol ? `LTRIM(RTRIM(CAST(p.${escapeSqlIdentifier(columns.positionEmployeeCol)} AS nvarchar(32))))` : "N''"} AS employee_id,
+                    ${resolvedPositionOrgTypeCol ? `TRY_CONVERT(int, p.${escapeSqlIdentifier(resolvedPositionOrgTypeCol)})` : 'NULL'} AS org_type,
+                    ${resolvedPositionBsTypeCol ? `TRY_CONVERT(int, p.${escapeSqlIdentifier(resolvedPositionBsTypeCol)})` : 'NULL'} AS bs_type,
+                    ${columns.positionOrgCol ? `LTRIM(RTRIM(CAST(p.${escapeSqlIdentifier(columns.positionOrgCol)} AS nvarchar(32))))` : "N''"} AS org_unit_id,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY LTRIM(RTRIM(CAST(p.${escapeSqlIdentifier(columns.positionIdCol!)} AS nvarchar(64))))
+                        ORDER BY ${context.positionOrderBy}
+                    ) AS rn
+                FROM ${context.positionSource} p
+                WHERE TRY_CONVERT(int, p.${escapeSqlIdentifier(columns.positionSignPosCol!)}) = 100
+                  ${context.positionSecondmentCondition}
+            ),
+            InfoDataDedup AS (
+                SELECT
+                    LTRIM(RTRIM(CAST(i.${escapeSqlIdentifier(columns.infoEmployeeCol!)} AS nvarchar(32)))) AS employee_id,
+                    LTRIM(RTRIM(COALESCE(CAST(i.${escapeSqlIdentifier(columns.infoNameCol!)} AS nvarchar(200)), N''))) AS employee_name,
+                    LTRIM(RTRIM(COALESCE(CAST(i.${escapeSqlIdentifier(columns.infoPositionNameCol!)} AS nvarchar(200)), N''))) AS pos_name,
+                    LTRIM(RTRIM(CAST(i.${escapeSqlIdentifier(columns.infoPositionCol!)} AS nvarchar(64)))) AS position_id,
+                    TRY_CONVERT(int, i.${escapeSqlIdentifier(columns.infoRetireYearCol!)}) AS retire_year,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY LTRIM(RTRIM(CAST(i.${escapeSqlIdentifier(columns.infoPositionCol!)} AS nvarchar(64))))
+                        ORDER BY TRY_CONVERT(int, i.${escapeSqlIdentifier(columns.infoRetireYearCol!)}) DESC,
+                                 LTRIM(RTRIM(CAST(i.${escapeSqlIdentifier(columns.infoEmployeeCol!)} AS nvarchar(32)))) DESC
+                    ) AS rn
+                FROM ${context.infoSource} i
+                WHERE (@RetireYear IS NULL OR TRY_CONVERT(int, i.${escapeSqlIdentifier(columns.infoRetireYearCol!)}) = @RetireYear)
+            )
+            SELECT
+                src.employee_id,
+                MAX(src.employee_name) AS employee_name,
+                MAX(src.pos_name) AS pos_name,
+                MAX(src.unit_name) AS unit_name,
+                MAX(src.delay_type) AS delay_type,
+                CASE WHEN MAX(src.delay_type) = 2 THEN 'Support' ELSE 'Business' END AS bu_support
+            FROM (
+                SELECT
+                    COALESCE(NULLIF(i.employee_id, ''), NULLIF(p.employee_id, '')) AS employee_id,
+                    NULLIF(i.employee_name, '') AS employee_name,
+                    NULLIF(i.pos_name, '') AS pos_name,
+                    ${context.unitNameSelectExpr} AS unit_name,
+                    ${delayTypeExpr} AS delay_type
+                FROM PositionDedup p
+                INNER JOIN InfoDataDedup i ON i.position_id = p.position_id AND i.rn = 1
+                ${context.unitJoinClause}
+                WHERE p.rn = 1
+            ) src
+            WHERE src.employee_id IS NOT NULL
+              AND src.employee_id <> ''
+              AND (
+                    @KeywordLike = '%%'
+                    OR src.employee_id LIKE @KeywordLike
+                    OR COALESCE(src.employee_name, '') LIKE @KeywordLike
+                    OR COALESCE(src.pos_name, '') LIKE @KeywordLike
+                  )
+            GROUP BY src.employee_id
+            ORDER BY src.employee_id ASC
+        `;
+    }
+
+    private queryEmployeeOptions(
+        context: EmployeeOptionsQueryContext,
+        resolvedPositionOrgTypeCol: string | null,
+        resolvedPositionBsTypeCol: string | null
+    ) {
+        return context.pool.request()
+            .input('RetireYear', sql.Int, typeof context.retireYear === 'number' && Number.isFinite(context.retireYear) ? context.retireYear : null)
+            .input('KeywordLike', sql.NVarChar(128), context.keywordLike)
+            .input('EffectiveDate', sql.DateTime, context.effectiveDate)
+            .query(this.buildEmployeeOptionsQuery(context, resolvedPositionOrgTypeCol, resolvedPositionBsTypeCol));
+    }
+
+    private async queryEmployeeOptionsWithFallback(context: EmployeeOptionsQueryContext) {
+        try {
+            return await this.queryEmployeeOptions(context, context.columns.positionOrgTypeCol, context.columns.positionBsTypeCol);
+        } catch (error) {
+            if (!this.isMissingDelayTypeColumnError(error)) throw error;
+            return this.queryEmployeeOptions(context, null, null);
+        }
+    }
+
+    private mapEmployeeOptionRow(row: GenericRow): DelayEmployeeOption | null {
+        const employeeId = this.getFirstNonEmpty(row, ['employee_id', 'EmployeeID']);
+        if (!employeeId) return null;
+
+        const name = this.getFirstNonEmpty(row, ['employee_name', 'EmployeeName']) || employeeId;
+        const position = this.getFirstNonEmpty(row, ['pos_name', 'PosName']);
+        const buSupport = this.getFirstNonEmpty(row, ['bu_support', 'BUSupport']);
+        const unitName = this.getFirstNonEmpty(row, ['unit_name', 'UnitName']);
+        const delayType = this.normalizeDelayType(this.getFirstNonEmpty(row, ['delay_type', 'DelayType'])) || 1;
+
+        return {
+            value: employeeId,
+            label: `${employeeId} - ${name}`,
+            name,
+            position,
+            buSupport: buSupport || '-',
+            unitName: unitName || '-',
+            delayType
+        };
+    }
+
+    private pickEmployeeProfileColumns(
+        infoMeta: TableMeta,
+        positionMeta: TableMeta,
+        unitMeta: TableMeta | null
+    ): EmployeeProfileColumns {
+        return {
+            infoEmployeeCol: pickColumnName(infoMeta.columns, INFO_EMPLOYEE_COL_CANDIDATES),
+            infoNameCol: pickColumnName(infoMeta.columns, INFO_NAME_COL_CANDIDATES),
+            infoPositionNameCol: pickColumnName(infoMeta.columns, INFO_POSITION_NAME_COL_CANDIDATES),
+            infoPositionCol: pickColumnName(infoMeta.columns, INFO_POSITION_COL_CANDIDATES),
+            infoRetireYearCol: pickColumnName(infoMeta.columns, INFO_RETIRE_YEAR_COL_CANDIDATES),
+            positionIdCol: pickColumnName(positionMeta.columns, POSITION_ID_COL_CANDIDATES),
+            positionSignPosCol: pickColumnName(positionMeta.columns, POSITION_SIGN_POS_COL_CANDIDATES),
+            positionSecondmentTextCol: pickColumnName(positionMeta.columns, POSITION_SECONDMENT_TEXT_COL_CANDIDATES),
+            positionBsTypeCol: pickColumnName(positionMeta.columns, POSITION_BS_TYPE_COL_CANDIDATES),
+            positionOrgTypeCol: pickColumnName(positionMeta.columns, POSITION_ORG_TYPE_COL_CANDIDATES),
+            positionOrgCol: pickColumnName(positionMeta.columns, POSITION_ORG_COL_CANDIDATES),
+            positionEmployeeCol: pickColumnName(positionMeta.columns, POSITION_EMPLOYEE_COL_CANDIDATES),
+            positionBeginDateCol: pickColumnName(positionMeta.columns, POSITION_BEGIN_DATE_COL_CANDIDATES),
+            positionEndDateCol: pickColumnName(positionMeta.columns, POSITION_END_DATE_COL_CANDIDATES),
+            unitOrgCol: unitMeta ? pickColumnName(unitMeta.columns, UNIT_ORG_COL_CANDIDATES) : null,
+            unitNameCol: unitMeta ? pickColumnName(unitMeta.columns, UNIT_NAME_COL_CANDIDATES) : null,
+            unitAbbrCol: unitMeta ? pickColumnName(unitMeta.columns, UNIT_ABBR_COL_CANDIDATES) : null,
+            unitBgCol: unitMeta ? pickColumnName(unitMeta.columns, UNIT_BG_COL_CANDIDATES) : null
+        };
+    }
+
+    private hasRequiredEmployeeProfileColumns(columns: EmployeeProfileColumns): boolean {
+        return Boolean(
+            columns.infoEmployeeCol &&
+            columns.infoPositionCol &&
+            columns.infoRetireYearCol &&
+            columns.positionIdCol &&
+            columns.positionSignPosCol
+        );
+    }
+
+    private buildEmployeeProfilePositionOrderBy(columns: EmployeeProfileColumns): string {
+        const positionOrderFields: string[] = [];
+        if (columns.positionEndDateCol) {
+            positionOrderFields.push('TRY_CONVERT(date, p.' + escapeSqlIdentifier(columns.positionEndDateCol) + ') DESC');
+        }
+        if (columns.positionBeginDateCol) {
+            positionOrderFields.push('TRY_CONVERT(date, p.' + escapeSqlIdentifier(columns.positionBeginDateCol) + ') DESC');
+        }
+        positionOrderFields.push('LTRIM(RTRIM(CAST(p.' + escapeSqlIdentifier(columns.positionIdCol!) + ' AS nvarchar(64)))) DESC');
+        return positionOrderFields.join(', ');
+    }
+
+    private buildEmployeeProfileUnitJoinClause(
+        unitSource: string,
+        canJoinUnit: boolean,
+        columns: EmployeeProfileColumns
+    ): string {
+        if (!canJoinUnit) return '';
+        return [
+            'LEFT JOIN ' + unitSource + ' u',
+            '    ON LTRIM(RTRIM(CAST(u.' + escapeSqlIdentifier(columns.unitOrgCol!) + ' AS nvarchar(32)))) =',
+            '       LTRIM(RTRIM(CAST(p.' + escapeSqlIdentifier(columns.positionOrgCol!) + ' AS nvarchar(32))))'
+        ].join('\n');
+    }
+
+    private buildEmployeeProfileQueryContext(params: {
+        pool: sql.ConnectionPool;
+        normalizedEmployeeId: string;
+        infoMeta: TableMeta;
+        positionMeta: TableMeta;
+        unitMeta: TableMeta | null;
+        columns: EmployeeProfileColumns;
+    }): EmployeeProfileQueryContext {
+        const infoSource = this.buildSqlSource(params.infoMeta, '@EffectiveDate');
+        const positionSource = this.buildSqlSource(params.positionMeta, '@EffectiveDate');
+        const unitSource = params.unitMeta ? this.buildSqlSource(params.unitMeta, '@EffectiveDate') : '';
+        const canJoinUnit = Boolean(params.unitMeta && unitSource && params.columns.positionOrgCol && params.columns.unitOrgCol);
+        const positionEmpMatch = params.columns.positionEmployeeCol
+            ? 'OR LTRIM(RTRIM(CAST(p.' + escapeSqlIdentifier(params.columns.positionEmployeeCol) + ' AS nvarchar(32)))) = @EmployeeID'
+            : '';
+        const positionSecondmentCondition = params.columns.positionSecondmentTextCol
+            ? "AND UPPER(LTRIM(RTRIM(CAST(p." + escapeSqlIdentifier(params.columns.positionSecondmentTextCol) + " AS nvarchar(64))))) = 'EMPLOYEE'"
+            : '';
+
+        return {
+            pool: params.pool,
+            normalizedEmployeeId: params.normalizedEmployeeId,
+            infoSource,
+            positionSource,
+            unitSource,
+            canJoinUnit,
+            positionOrderBy: this.buildEmployeeProfilePositionOrderBy(params.columns),
+            unitJoinClause: this.buildEmployeeProfileUnitJoinClause(unitSource, canJoinUnit, params.columns),
+            positionEmpMatch,
+            positionSecondmentCondition,
+            columns: params.columns
+        };
+    }
+
+    private buildEmployeeProfileQuery(
+        context: EmployeeProfileQueryContext,
+        resolvedPositionOrgTypeCol: string | null,
+        resolvedPositionBsTypeCol: string | null
+    ): string {
+        const columns = context.columns;
+        const delayTypeExpr = this.buildDelayTypeExpr({
+            positionAlias: 'p',
+            unitAlias: 'u',
+            positionOrgTypeCol: resolvedPositionOrgTypeCol,
+            positionBsTypeCol: resolvedPositionBsTypeCol,
+            unitBgCol: context.canJoinUnit ? columns.unitBgCol : null,
+            unitNameCol: context.canJoinUnit ? columns.unitNameCol : null,
+            unitAbbrCol: context.canJoinUnit ? columns.unitAbbrCol : null
+        });
+        const posNameExpr = columns.infoPositionNameCol
+            ? "NULLIF(LTRIM(RTRIM(CAST(i." + escapeSqlIdentifier(columns.infoPositionNameCol) + " AS nvarchar(200)))), '')"
+            : "N''";
+
+        return [
+            'SELECT TOP 1',
+            '    TRY_CONVERT(int, i.' + escapeSqlIdentifier(columns.infoRetireYearCol!) + ') AS retire_year,',
+            '    ' + posNameExpr + ' AS pos_name,',
+            '    ' + delayTypeExpr + ' AS delay_type',
+            'FROM ' + context.infoSource + ' i',
+            'INNER JOIN ' + context.positionSource + ' p',
+            '    ON LTRIM(RTRIM(CAST(p.' + escapeSqlIdentifier(columns.positionIdCol!) + ' AS nvarchar(64)))) =',
+            '       LTRIM(RTRIM(CAST(i.' + escapeSqlIdentifier(columns.infoPositionCol!) + ' AS nvarchar(64))))',
+            context.unitJoinClause,
+            'WHERE TRY_CONVERT(int, p.' + escapeSqlIdentifier(columns.positionSignPosCol!) + ') = 100',
+            '  ' + context.positionSecondmentCondition,
+            '  AND (',
+            '    LTRIM(RTRIM(CAST(i.' + escapeSqlIdentifier(columns.infoEmployeeCol!) + ' AS nvarchar(32)))) = @EmployeeID',
+            '    ' + context.positionEmpMatch,
+            '  )',
+            '  AND TRY_CONVERT(int, i.' + escapeSqlIdentifier(columns.infoRetireYearCol!) + ') IS NOT NULL',
+            'ORDER BY TRY_CONVERT(int, i.' + escapeSqlIdentifier(columns.infoRetireYearCol!) + ') DESC,',
+            '         ' + context.positionOrderBy
+        ].join('\n');
+    }
+
+    private queryEmployeeProfile(
+        context: EmployeeProfileQueryContext,
+        resolvedPositionOrgTypeCol: string | null,
+        resolvedPositionBsTypeCol: string | null
+    ) {
+        return context.pool.request()
+            .input('EmployeeID', sql.VarChar(32), context.normalizedEmployeeId)
+            .input('EffectiveDate', sql.DateTime, new Date())
+            .query(this.buildEmployeeProfileQuery(context, resolvedPositionOrgTypeCol, resolvedPositionBsTypeCol));
+    }
+
+    private async queryEmployeeProfileWithFallback(context: EmployeeProfileQueryContext) {
+        try {
+            return await this.queryEmployeeProfile(
+                context,
+                context.columns.positionOrgTypeCol,
+                context.columns.positionBsTypeCol
+            );
+        } catch (error) {
+            if (!this.isMissingDelayTypeColumnError(error)) throw error;
+            return this.queryEmployeeProfile(context, null, null);
+        }
+    }
+
+    private mapEmployeeProfileResult(row: GenericRow | undefined): EmployeeProfileResult {
+        const retireYearRaw = row?.retire_year;
+        const retireYear = Number.parseInt(String(retireYearRaw), 10);
+        return {
+            retireYear: Number.isFinite(retireYear) ? retireYear : null,
+            delayType: this.normalizeDelayType(row?.delay_type),
+            posName: this.getFirstNonEmpty(row || {}, ['pos_name', 'PosName']) || null
+        };
+    }
+
+    private async getEmployeeProfile(employeeId: string): Promise<EmployeeProfileResult> {
         const normalizedEmployeeId = toTrimText(employeeId);
-        if (!normalizedEmployeeId) return { retireYear: null, delayType: null, posName: null };
+        if (!normalizedEmployeeId) return this.getEmptyEmployeeProfile();
 
         const pool = await poolPromise;
         const infoMeta = await this.getTableMeta(pool, INFO_TABLE_CANDIDATES);
         const positionMeta = await this.getTableMeta(pool, POSITION_TABLE_CANDIDATES);
         const unitMeta = await this.getTableMeta(pool, UNIT_TABLE_CANDIDATES);
-        if (!infoMeta || !positionMeta) return { retireYear: null, delayType: null, posName: null };
-        const infoSource = this.buildSqlSource(infoMeta, '@EffectiveDate');
-        const positionSource = this.buildSqlSource(positionMeta, '@EffectiveDate');
-        const unitSource = unitMeta ? this.buildSqlSource(unitMeta, '@EffectiveDate') : '';
+        if (!infoMeta || !positionMeta) return this.getEmptyEmployeeProfile();
 
-        const infoEmployeeCol = pickColumnName(infoMeta.columns, INFO_EMPLOYEE_COL_CANDIDATES);
-        const infoPositionNameCol = pickColumnName(infoMeta.columns, INFO_POSITION_NAME_COL_CANDIDATES);
-        const infoPositionCol = pickColumnName(infoMeta.columns, INFO_POSITION_COL_CANDIDATES);
-        const infoRetireYearCol = pickColumnName(infoMeta.columns, INFO_RETIRE_YEAR_COL_CANDIDATES);
-        const positionIdCol = pickColumnName(positionMeta.columns, POSITION_ID_COL_CANDIDATES);
-        const positionSignPosCol = pickColumnName(positionMeta.columns, POSITION_SIGN_POS_COL_CANDIDATES);
-        const positionSecondmentTextCol = pickColumnName(positionMeta.columns, POSITION_SECONDMENT_TEXT_COL_CANDIDATES);
-        const positionBsTypeCol = pickColumnName(positionMeta.columns, POSITION_BS_TYPE_COL_CANDIDATES);
-        const positionOrgTypeCol = pickColumnName(positionMeta.columns, POSITION_ORG_TYPE_COL_CANDIDATES);
-        const positionOrgCol = pickColumnName(positionMeta.columns, POSITION_ORG_COL_CANDIDATES);
-        const positionEmployeeCol = pickColumnName(positionMeta.columns, POSITION_EMPLOYEE_COL_CANDIDATES);
-        const positionBeginDateCol = pickColumnName(positionMeta.columns, POSITION_BEGIN_DATE_COL_CANDIDATES);
-        const positionEndDateCol = pickColumnName(positionMeta.columns, POSITION_END_DATE_COL_CANDIDATES);
-        const unitOrgCol = unitMeta ? pickColumnName(unitMeta.columns, UNIT_ORG_COL_CANDIDATES) : null;
-        const unitNameCol = unitMeta ? pickColumnName(unitMeta.columns, UNIT_NAME_COL_CANDIDATES) : null;
-        const unitAbbrCol = unitMeta ? pickColumnName(unitMeta.columns, UNIT_ABBR_COL_CANDIDATES) : null;
-        const unitBgCol = unitMeta ? pickColumnName(unitMeta.columns, UNIT_BG_COL_CANDIDATES) : null;
+        const columns = this.pickEmployeeProfileColumns(infoMeta, positionMeta, unitMeta);
+        if (!this.hasRequiredEmployeeProfileColumns(columns)) return this.getEmptyEmployeeProfile();
 
-        if (!infoEmployeeCol || !infoPositionCol || !infoRetireYearCol || !positionIdCol || !positionSignPosCol) {
-            return { retireYear: null, delayType: null, posName: null };
-        }
-
-        const positionOrderFields: string[] = [];
-        if (positionEndDateCol) {
-            positionOrderFields.push(`TRY_CONVERT(date, p.${escapeSqlIdentifier(positionEndDateCol)}) DESC`);
-        }
-        if (positionBeginDateCol) {
-            positionOrderFields.push(`TRY_CONVERT(date, p.${escapeSqlIdentifier(positionBeginDateCol)}) DESC`);
-        }
-        positionOrderFields.push(`LTRIM(RTRIM(CAST(p.${escapeSqlIdentifier(positionIdCol)} AS nvarchar(64)))) DESC`);
-        const positionOrderBy = positionOrderFields.join(', ');
-
-        const positionEmpMatch = positionEmployeeCol
-            ? `
-                OR LTRIM(RTRIM(CAST(p.${escapeSqlIdentifier(positionEmployeeCol)} AS nvarchar(32)))) = @EmployeeID
-            `
-            : '';
-        const positionSecondmentCondition = positionSecondmentTextCol
-            ? `AND UPPER(LTRIM(RTRIM(CAST(p.${escapeSqlIdentifier(positionSecondmentTextCol)} AS nvarchar(64))))) = 'EMPLOYEE'`
-            : '';
-        const canJoinUnit = Boolean(unitMeta && unitSource && positionOrgCol && unitOrgCol);
-        const unitJoinClause = canJoinUnit
-            ? `
-                LEFT JOIN ${unitSource} u
-                    ON LTRIM(RTRIM(CAST(u.${escapeSqlIdentifier(unitOrgCol!)} AS nvarchar(32)))) =
-                       LTRIM(RTRIM(CAST(p.${escapeSqlIdentifier(positionOrgCol!)} AS nvarchar(32))))
-            `
-            : '';
-        const queryEmployeeProfile = async (
-            resolvedPositionOrgTypeCol: string | null,
-            resolvedPositionBsTypeCol: string | null
-        ) => {
-            const delayTypeExpr = this.buildDelayTypeExpr({
-                positionAlias: 'p',
-                unitAlias: 'u',
-                positionOrgTypeCol: resolvedPositionOrgTypeCol,
-                positionBsTypeCol: resolvedPositionBsTypeCol,
-                unitBgCol: canJoinUnit ? unitBgCol : null,
-                unitNameCol: canJoinUnit ? unitNameCol : null,
-                unitAbbrCol: canJoinUnit ? unitAbbrCol : null
-            });
-
-            return pool.request()
-                .input('EmployeeID', sql.VarChar(32), normalizedEmployeeId)
-                .input('EffectiveDate', sql.DateTime, new Date())
-                .query(`
-                    SELECT TOP 1
-                        TRY_CONVERT(int, i.${escapeSqlIdentifier(infoRetireYearCol)}) AS retire_year,
-                        ${infoPositionNameCol ? `NULLIF(LTRIM(RTRIM(CAST(i.${escapeSqlIdentifier(infoPositionNameCol)} AS nvarchar(200)))), '')` : "N''"} AS pos_name,
-                        ${delayTypeExpr} AS delay_type
-                    FROM ${infoSource} i
-                    INNER JOIN ${positionSource} p
-                        ON LTRIM(RTRIM(CAST(p.${escapeSqlIdentifier(positionIdCol)} AS nvarchar(64)))) =
-                           LTRIM(RTRIM(CAST(i.${escapeSqlIdentifier(infoPositionCol)} AS nvarchar(64))))
-                    ${unitJoinClause}
-                    WHERE TRY_CONVERT(int, p.${escapeSqlIdentifier(positionSignPosCol)}) = 100
-                      ${positionSecondmentCondition}
-                      AND (
-                        LTRIM(RTRIM(CAST(i.${escapeSqlIdentifier(infoEmployeeCol)} AS nvarchar(32)))) = @EmployeeID
-                        ${positionEmpMatch}
-                      )
-                      AND TRY_CONVERT(int, i.${escapeSqlIdentifier(infoRetireYearCol)}) IS NOT NULL
-                    ORDER BY TRY_CONVERT(int, i.${escapeSqlIdentifier(infoRetireYearCol)}) DESC,
-                             ${positionOrderBy}
-                `);
-        };
-
-        let result;
-        try {
-            result = await queryEmployeeProfile(positionOrgTypeCol, positionBsTypeCol);
-        } catch (error) {
-            if (!this.isMissingDelayTypeColumnError(error)) throw error;
-            result = await queryEmployeeProfile(null, null);
-        }
-
-        const retireYearRaw = result.recordset?.[0]?.retire_year;
-        const retireYear = Number.parseInt(String(retireYearRaw), 10);
-        const delayType = this.normalizeDelayType(result.recordset?.[0]?.delay_type);
-        const posName = this.getFirstNonEmpty(result.recordset?.[0] || {}, ['pos_name', 'PosName']) || null;
-        return {
-            retireYear: Number.isFinite(retireYear) ? retireYear : null,
-            delayType,
-            posName
-        };
+        const context = this.buildEmployeeProfileQueryContext({
+            pool,
+            normalizedEmployeeId,
+            infoMeta,
+            positionMeta,
+            unitMeta,
+            columns
+        });
+        const result = await this.queryEmployeeProfileWithFallback(context);
+        return this.mapEmployeeProfileResult(result.recordset?.[0]);
     }
 
     private async getEmployeeNameMapFromInfoData(employeeIds: string[]): Promise<Map<string, string>> {
@@ -814,6 +968,164 @@ class DelayService {
         return positionMap;
     }
 
+    private hasRequiredEmployeeOrgMetaColumns(columns: EmployeeProfileColumns): boolean {
+        return Boolean(
+            columns.infoEmployeeCol &&
+            columns.infoPositionCol &&
+            columns.positionIdCol &&
+            columns.positionSignPosCol
+        );
+    }
+
+    private buildEmployeeOrgMetaUnitJoinClause(
+        unitSource: string,
+        canJoinUnit: boolean,
+        columns: EmployeeProfileColumns
+    ): string {
+        if (!canJoinUnit) return '';
+        return [
+            'LEFT JOIN ' + unitSource + ' u',
+            '    ON LTRIM(RTRIM(CAST(u.' + escapeSqlIdentifier(columns.unitOrgCol!) + ' AS nvarchar(32)))) =',
+            '       LTRIM(RTRIM(CAST(p.org_unit_id AS nvarchar(32))))'
+        ].join('\n');
+    }
+
+    private buildEmployeeOrgMetaContext(params: {
+        pool: sql.ConnectionPool;
+        uniqueIds: string[];
+        infoMeta: TableMeta;
+        positionMeta: TableMeta;
+        unitMeta: TableMeta | null;
+        columns: EmployeeProfileColumns;
+    }): EmployeeOrgMetaQueryContext {
+        const infoSource = this.buildSqlSource(params.infoMeta, '@EffectiveDate');
+        const positionSource = this.buildSqlSource(params.positionMeta, '@EffectiveDate');
+        const unitSource = params.unitMeta ? this.buildSqlSource(params.unitMeta, '@EffectiveDate') : '';
+        const canJoinUnit = Boolean(params.unitMeta && unitSource && params.columns.positionOrgCol && params.columns.unitOrgCol);
+        const positionSecondmentCondition = params.columns.positionSecondmentTextCol
+            ? "AND UPPER(LTRIM(RTRIM(CAST(p." + escapeSqlIdentifier(params.columns.positionSecondmentTextCol) + " AS nvarchar(64))))) = 'EMPLOYEE'"
+            : '';
+        const unitNameSelectExpr = canJoinUnit && params.columns.unitNameCol
+            ? "NULLIF(LTRIM(RTRIM(CAST(u." + escapeSqlIdentifier(params.columns.unitNameCol) + " AS nvarchar(200)))), '')"
+            : "N''";
+
+        return {
+            pool: params.pool,
+            uniqueIds: params.uniqueIds,
+            infoSource,
+            positionSource,
+            canJoinUnit,
+            positionOrderBy: this.buildEmployeeProfilePositionOrderBy(params.columns),
+            unitJoinClause: this.buildEmployeeOrgMetaUnitJoinClause(unitSource, canJoinUnit, params.columns),
+            unitNameSelectExpr,
+            positionSecondmentCondition,
+            columns: params.columns
+        };
+    }
+
+    private buildEmployeeOrgMetaQuery(
+        context: EmployeeOrgMetaQueryContext,
+        resolvedPositionOrgTypeCol: string | null,
+        resolvedPositionBsTypeCol: string | null
+    ): string {
+        const columns = context.columns;
+        const delayTypeExpr = this.buildDelayTypeExpr({
+            positionAlias: 'p',
+            unitAlias: 'u',
+            positionOrgTypeExpr: 'TRY_CONVERT(int, p.org_type)',
+            positionBsTypeExpr: 'TRY_CONVERT(int, p.bs_type)',
+            positionOrgTypeCol: null,
+            positionBsTypeCol: null,
+            unitBgCol: context.canJoinUnit ? columns.unitBgCol : null,
+            unitNameCol: context.canJoinUnit ? columns.unitNameCol : null,
+            unitAbbrCol: context.canJoinUnit ? columns.unitAbbrCol : null
+        });
+
+        return `
+            ;WITH target_ids AS (
+                SELECT DISTINCT LTRIM(RTRIM(value)) AS employee_id
+                FROM STRING_SPLIT(@EmployeeIdsCsv, ',')
+                WHERE LTRIM(RTRIM(value)) <> ''
+            ),
+            PositionDedup AS (
+                SELECT
+                    LTRIM(RTRIM(CAST(p.${escapeSqlIdentifier(columns.positionIdCol!)} AS nvarchar(64)))) AS position_id,
+                    ${columns.positionEmployeeCol ? `LTRIM(RTRIM(CAST(p.${escapeSqlIdentifier(columns.positionEmployeeCol)} AS nvarchar(32))))` : "N''"} AS employee_id,
+                    ${resolvedPositionOrgTypeCol ? `TRY_CONVERT(int, p.${escapeSqlIdentifier(resolvedPositionOrgTypeCol)})` : 'NULL'} AS org_type,
+                    ${resolvedPositionBsTypeCol ? `TRY_CONVERT(int, p.${escapeSqlIdentifier(resolvedPositionBsTypeCol)})` : 'NULL'} AS bs_type,
+                    ${columns.positionOrgCol ? `LTRIM(RTRIM(CAST(p.${escapeSqlIdentifier(columns.positionOrgCol)} AS nvarchar(32))))` : "N''"} AS org_unit_id,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY LTRIM(RTRIM(CAST(p.${escapeSqlIdentifier(columns.positionIdCol!)} AS nvarchar(64))))
+                        ORDER BY ${context.positionOrderBy}
+                    ) AS rn
+                FROM ${context.positionSource} p
+                WHERE TRY_CONVERT(int, p.${escapeSqlIdentifier(columns.positionSignPosCol!)}) = 100
+                  ${context.positionSecondmentCondition}
+            ),
+            InfoDataDedup AS (
+                SELECT
+                    LTRIM(RTRIM(CAST(i.${escapeSqlIdentifier(columns.infoEmployeeCol!)} AS nvarchar(32)))) AS employee_id,
+                    LTRIM(RTRIM(CAST(i.${escapeSqlIdentifier(columns.infoPositionCol!)} AS nvarchar(64)))) AS position_id,
+                    ${columns.infoRetireYearCol ? `TRY_CONVERT(int, i.${escapeSqlIdentifier(columns.infoRetireYearCol)})` : 'NULL'} AS retire_year,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY LTRIM(RTRIM(CAST(i.${escapeSqlIdentifier(columns.infoPositionCol!)} AS nvarchar(64))))
+                        ORDER BY ${columns.infoRetireYearCol ? `TRY_CONVERT(int, i.${escapeSqlIdentifier(columns.infoRetireYearCol)}) DESC,` : ''} LTRIM(RTRIM(CAST(i.${escapeSqlIdentifier(columns.infoEmployeeCol!)} AS nvarchar(32)))) DESC
+                    ) AS rn
+                FROM ${context.infoSource} i
+            )
+            SELECT
+                src.employee_id,
+                MAX(src.unit_name) AS unit_name,
+                MAX(src.delay_type) AS delay_type
+            FROM (
+                SELECT
+                    COALESCE(NULLIF(i.employee_id, ''), NULLIF(p.employee_id, '')) AS employee_id,
+                    ${context.unitNameSelectExpr} AS unit_name,
+                    ${delayTypeExpr} AS delay_type
+                FROM PositionDedup p
+                INNER JOIN InfoDataDedup i
+                    ON i.position_id = p.position_id
+                   AND i.rn = 1
+                ${context.unitJoinClause}
+                WHERE p.rn = 1
+            ) src
+            INNER JOIN target_ids t ON t.employee_id = src.employee_id
+            GROUP BY src.employee_id
+        `;
+    }
+
+    private queryEmployeeOrgMeta(
+        context: EmployeeOrgMetaQueryContext,
+        resolvedPositionOrgTypeCol: string | null,
+        resolvedPositionBsTypeCol: string | null
+    ) {
+        return context.pool.request()
+            .input('EmployeeIdsCsv', sql.NVarChar(sql.MAX), context.uniqueIds.join(','))
+            .input('EffectiveDate', sql.DateTime, new Date())
+            .query(this.buildEmployeeOrgMetaQuery(context, resolvedPositionOrgTypeCol, resolvedPositionBsTypeCol));
+    }
+
+    private async queryEmployeeOrgMetaWithFallback(context: EmployeeOrgMetaQueryContext) {
+        try {
+            return await this.queryEmployeeOrgMeta(context, context.columns.positionOrgTypeCol, context.columns.positionBsTypeCol);
+        } catch (error) {
+            if (!this.isMissingDelayTypeColumnError(error)) throw error;
+            return this.queryEmployeeOrgMeta(context, null, null);
+        }
+    }
+
+    private addEmployeeOrgMetaRows(metaMap: Map<string, EmployeeOrgMetaItem>, rows: GenericRow[]) {
+        rows.forEach((row) => {
+            const employeeId = this.getFirstNonEmpty(row, ['employee_id', 'EmployeeID']);
+            if (!employeeId) return;
+
+            metaMap.set(employeeId, {
+                unitName: this.getFirstNonEmpty(row, ['unit_name', 'UnitName']),
+                delayType: this.normalizeDelayType(this.getFirstNonEmpty(row, ['delay_type', 'DelayType']))
+            });
+        });
+    }
+
     private async getEmployeeOrgMetaMap(employeeIds: string[]): Promise<Map<string, EmployeeOrgMetaItem>> {
         const uniqueIds = Array.from(new Set(employeeIds.map((id) => toTrimText(id)).filter(Boolean)));
         const metaMap = new Map<string, EmployeeOrgMetaItem>();
@@ -826,145 +1138,19 @@ class DelayService {
             const unitMeta = await this.getTableMeta(pool, UNIT_TABLE_CANDIDATES);
             if (!infoMeta || !positionMeta) return metaMap;
 
-            const infoSource = this.buildSqlSource(infoMeta, '@EffectiveDate');
-            const positionSource = this.buildSqlSource(positionMeta, '@EffectiveDate');
-            const unitSource = unitMeta ? this.buildSqlSource(unitMeta, '@EffectiveDate') : '';
+            const columns = this.pickEmployeeProfileColumns(infoMeta, positionMeta, unitMeta);
+            if (!this.hasRequiredEmployeeOrgMetaColumns(columns)) return metaMap;
 
-            const infoEmployeeCol = pickColumnName(infoMeta.columns, INFO_EMPLOYEE_COL_CANDIDATES);
-            const infoPositionCol = pickColumnName(infoMeta.columns, INFO_POSITION_COL_CANDIDATES);
-            const infoRetireYearCol = pickColumnName(infoMeta.columns, INFO_RETIRE_YEAR_COL_CANDIDATES);
-            const positionIdCol = pickColumnName(positionMeta.columns, POSITION_ID_COL_CANDIDATES);
-            const positionSignPosCol = pickColumnName(positionMeta.columns, POSITION_SIGN_POS_COL_CANDIDATES);
-            const positionSecondmentTextCol = pickColumnName(positionMeta.columns, POSITION_SECONDMENT_TEXT_COL_CANDIDATES);
-            const positionBsTypeCol = pickColumnName(positionMeta.columns, POSITION_BS_TYPE_COL_CANDIDATES);
-            const positionOrgTypeCol = pickColumnName(positionMeta.columns, POSITION_ORG_TYPE_COL_CANDIDATES);
-            const positionOrgCol = pickColumnName(positionMeta.columns, POSITION_ORG_COL_CANDIDATES);
-            const positionEmployeeCol = pickColumnName(positionMeta.columns, POSITION_EMPLOYEE_COL_CANDIDATES);
-            const positionBeginDateCol = pickColumnName(positionMeta.columns, POSITION_BEGIN_DATE_COL_CANDIDATES);
-            const positionEndDateCol = pickColumnName(positionMeta.columns, POSITION_END_DATE_COL_CANDIDATES);
-            const unitOrgCol = unitMeta ? pickColumnName(unitMeta.columns, UNIT_ORG_COL_CANDIDATES) : null;
-            const unitNameCol = unitMeta ? pickColumnName(unitMeta.columns, UNIT_NAME_COL_CANDIDATES) : null;
-            const unitAbbrCol = unitMeta ? pickColumnName(unitMeta.columns, UNIT_ABBR_COL_CANDIDATES) : null;
-            const unitBgCol = unitMeta ? pickColumnName(unitMeta.columns, UNIT_BG_COL_CANDIDATES) : null;
-
-            if (!infoEmployeeCol || !infoPositionCol || !positionIdCol || !positionSignPosCol) {
-                return metaMap;
-            }
-
-            const positionOrderFields: string[] = [];
-            if (positionEndDateCol) {
-                positionOrderFields.push(`TRY_CONVERT(date, p.${escapeSqlIdentifier(positionEndDateCol)}) DESC`);
-            }
-            if (positionBeginDateCol) {
-                positionOrderFields.push(`TRY_CONVERT(date, p.${escapeSqlIdentifier(positionBeginDateCol)}) DESC`);
-            }
-            positionOrderFields.push(`LTRIM(RTRIM(CAST(p.${escapeSqlIdentifier(positionIdCol)} AS nvarchar(64)))) DESC`);
-            const positionOrderBy = positionOrderFields.join(', ');
-
-            const positionSecondmentCondition = positionSecondmentTextCol
-                ? `AND UPPER(LTRIM(RTRIM(CAST(p.${escapeSqlIdentifier(positionSecondmentTextCol)} AS nvarchar(64))))) = 'EMPLOYEE'`
-                : '';
-            const canJoinUnit = Boolean(unitMeta && unitSource && positionOrgCol && unitOrgCol);
-            const unitJoinClause = canJoinUnit
-                ? `
-                    LEFT JOIN ${unitSource} u
-                        ON LTRIM(RTRIM(CAST(u.${escapeSqlIdentifier(unitOrgCol!)} AS nvarchar(32)))) =
-                           LTRIM(RTRIM(CAST(p.org_unit_id AS nvarchar(32))))
-                `
-                : '';
-            const unitNameSelectExpr = canJoinUnit && unitNameCol
-                ? `NULLIF(LTRIM(RTRIM(CAST(u.${escapeSqlIdentifier(unitNameCol)} AS nvarchar(200)))), '')`
-                : "N''";
-            const queryEmployeeOrgMeta = async (
-                resolvedPositionOrgTypeCol: string | null,
-                resolvedPositionBsTypeCol: string | null
-            ) => {
-                const delayTypeExpr = this.buildDelayTypeExpr({
-                    positionAlias: 'p',
-                    unitAlias: 'u',
-                    positionOrgTypeExpr: 'TRY_CONVERT(int, p.org_type)',
-                    positionBsTypeExpr: 'TRY_CONVERT(int, p.bs_type)',
-                    positionOrgTypeCol: null,
-                    positionBsTypeCol: null,
-                    unitBgCol: canJoinUnit ? unitBgCol : null,
-                    unitNameCol: canJoinUnit ? unitNameCol : null,
-                    unitAbbrCol: canJoinUnit ? unitAbbrCol : null
-                });
-
-                return pool.request()
-                    .input('EmployeeIdsCsv', sql.NVarChar(sql.MAX), uniqueIds.join(','))
-                    .input('EffectiveDate', sql.DateTime, new Date())
-                    .query(`
-                        ;WITH target_ids AS (
-                            SELECT DISTINCT LTRIM(RTRIM(value)) AS employee_id
-                            FROM STRING_SPLIT(@EmployeeIdsCsv, ',')
-                            WHERE LTRIM(RTRIM(value)) <> ''
-                        ),
-                        PositionDedup AS (
-                            SELECT
-                                LTRIM(RTRIM(CAST(p.${escapeSqlIdentifier(positionIdCol)} AS nvarchar(64)))) AS position_id,
-                                ${positionEmployeeCol ? `LTRIM(RTRIM(CAST(p.${escapeSqlIdentifier(positionEmployeeCol)} AS nvarchar(32))))` : "N''"} AS employee_id,
-                                ${resolvedPositionOrgTypeCol ? `TRY_CONVERT(int, p.${escapeSqlIdentifier(resolvedPositionOrgTypeCol)})` : 'NULL'} AS org_type,
-                                ${resolvedPositionBsTypeCol ? `TRY_CONVERT(int, p.${escapeSqlIdentifier(resolvedPositionBsTypeCol)})` : 'NULL'} AS bs_type,
-                                ${positionOrgCol ? `LTRIM(RTRIM(CAST(p.${escapeSqlIdentifier(positionOrgCol)} AS nvarchar(32))))` : "N''"} AS org_unit_id,
-                                ROW_NUMBER() OVER (
-                                    PARTITION BY LTRIM(RTRIM(CAST(p.${escapeSqlIdentifier(positionIdCol)} AS nvarchar(64))))
-                                    ORDER BY ${positionOrderBy}
-                                ) AS rn
-                            FROM ${positionSource} p
-                            WHERE TRY_CONVERT(int, p.${escapeSqlIdentifier(positionSignPosCol)}) = 100
-                              ${positionSecondmentCondition}
-                        ),
-                        InfoDataDedup AS (
-                            SELECT
-                                LTRIM(RTRIM(CAST(i.${escapeSqlIdentifier(infoEmployeeCol)} AS nvarchar(32)))) AS employee_id,
-                                LTRIM(RTRIM(CAST(i.${escapeSqlIdentifier(infoPositionCol)} AS nvarchar(64)))) AS position_id,
-                                ${infoRetireYearCol ? `TRY_CONVERT(int, i.${escapeSqlIdentifier(infoRetireYearCol)})` : 'NULL'} AS retire_year,
-                                ROW_NUMBER() OVER (
-                                    PARTITION BY LTRIM(RTRIM(CAST(i.${escapeSqlIdentifier(infoPositionCol)} AS nvarchar(64))))
-                                    ORDER BY ${infoRetireYearCol ? `TRY_CONVERT(int, i.${escapeSqlIdentifier(infoRetireYearCol)}) DESC,` : ''} LTRIM(RTRIM(CAST(i.${escapeSqlIdentifier(infoEmployeeCol)} AS nvarchar(32)))) DESC
-                                ) AS rn
-                            FROM ${infoSource} i
-                        )
-                        SELECT
-                            src.employee_id,
-                            MAX(src.unit_name) AS unit_name,
-                            MAX(src.delay_type) AS delay_type
-                        FROM (
-                            SELECT
-                                COALESCE(NULLIF(i.employee_id, ''), NULLIF(p.employee_id, '')) AS employee_id,
-                                ${unitNameSelectExpr} AS unit_name,
-                                ${delayTypeExpr} AS delay_type
-                            FROM PositionDedup p
-                            INNER JOIN InfoDataDedup i
-                                ON i.position_id = p.position_id
-                               AND i.rn = 1
-                            ${unitJoinClause}
-                            WHERE p.rn = 1
-                        ) src
-                        INNER JOIN target_ids t ON t.employee_id = src.employee_id
-                        GROUP BY src.employee_id
-                    `);
-            };
-
-            let result;
-            try {
-                result = await queryEmployeeOrgMeta(positionOrgTypeCol, positionBsTypeCol);
-            } catch (error) {
-                if (!this.isMissingDelayTypeColumnError(error)) throw error;
-                result = await queryEmployeeOrgMeta(null, null);
-            }
-
+            const result = await this.queryEmployeeOrgMetaWithFallback(this.buildEmployeeOrgMetaContext({
+                pool,
+                uniqueIds,
+                infoMeta,
+                positionMeta,
+                unitMeta,
+                columns
+            }));
             const rows = Array.isArray(result.recordset) ? (result.recordset as GenericRow[]) : [];
-            rows.forEach((row) => {
-                const employeeId = this.getFirstNonEmpty(row, ['employee_id', 'EmployeeID']);
-                if (!employeeId) return;
-
-                metaMap.set(employeeId, {
-                    unitName: this.getFirstNonEmpty(row, ['unit_name', 'UnitName']),
-                    delayType: this.normalizeDelayType(this.getFirstNonEmpty(row, ['delay_type', 'DelayType']))
-                });
-            });
+            this.addEmployeeOrgMetaRows(metaMap, rows);
         } catch (error) {
             console.warn('[DelayService.getEmployeeOrgMetaMap] fallback to default org meta', error);
         }

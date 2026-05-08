@@ -427,6 +427,18 @@ interface FtpUploadAttempt {
     logUrl: string;
 }
 
+interface FtpUploadAttemptParams {
+    label: string;
+    host: string;
+    port: number;
+    secure: boolean | 'implicit';
+    rejectUnauthorized: boolean;
+    remoteDir: string;
+    remoteFileName: string;
+    transferMode?: 'default' | 'ipv4_pasv';
+    dataProtection?: 'P' | 'C';
+}
+
 const stripTrailingSlashes = (value: string): string => {
     let end = value.length;
     while (end > 0 && value[end - 1] === '/') end -= 1;
@@ -468,18 +480,23 @@ const normalizeFtpHost = (value: string): { host: string; scheme: 'ftp' | 'ftps'
     };
 };
 
-const buildFtpUploadAttempt = (
-    label: string,
-    host: string,
-    port: number,
-    secure: boolean | 'implicit',
-    rejectUnauthorized: boolean,
-    remoteDir: string,
-    remoteFileName: string,
-    transferMode: 'default' | 'ipv4_pasv' = 'default',
-    dataProtection: 'P' | 'C' = 'P'
-): FtpUploadAttempt => {
-    const scheme = secure === 'implicit' ? 'ftps' : (secure ? 'ftp+tls' : 'ftp');
+const buildFtpUploadAttempt = ({
+    label,
+    host,
+    port,
+    secure,
+    rejectUnauthorized,
+    remoteDir,
+    remoteFileName,
+    transferMode = 'default',
+    dataProtection = 'P'
+}: FtpUploadAttemptParams): FtpUploadAttempt => {
+    let scheme = 'ftp';
+    if (secure === 'implicit') {
+        scheme = 'ftps';
+    } else if (secure) {
+        scheme = 'ftp+tls';
+    }
     const joinedPath = `/${stripLeadingSlashes(path.posix.join(remoteDir, remoteFileName))}`;
     return {
         label,
@@ -616,15 +633,15 @@ const uploadFileToFtp = async (localFilePath: string): Promise<void> => {
 
     appendAttemptIfMissing(
         attempts,
-        buildFtpUploadAttempt(
-            'configured-endpoint',
+        buildFtpUploadAttempt({
+            label: 'configured-endpoint',
             host,
-            portNumber,
-            configuredSecureMode,
-            true,
-            remoteTarget.remoteDir,
-            remoteTarget.remoteFileName
-        )
+            port: portNumber,
+            secure: configuredSecureMode,
+            rejectUnauthorized: true,
+            remoteDir: remoteTarget.remoteDir,
+            remoteFileName: remoteTarget.remoteFileName
+        })
     );
 
     for (const attempt of attempts) {
@@ -649,106 +666,133 @@ const uploadFileToFtp = async (localFilePath: string): Promise<void> => {
     throw new Error(errors.join(' | '));
 };
 
+type SapSendState = {
+    resultCode: string;
+    message: string;
+    fileReady: boolean;
+    ftpSent: boolean;
+};
+
+const tryWriteSapOutboundFile = async (textfile: string, state: SapSendState): Promise<void> => {
+    try {
+        await ensureOutboundDirectory();
+        const outboundFilePath = getHRCenterSapOutboundFilePath();
+        await fs.promises.writeFile(outboundFilePath, textfile, { encoding: "utf8" });
+        state.fileReady = true;
+    } catch (error) {
+        console.error("[HRCenter SAP] Failed to write outbound file", {
+            outboundFilePath: getHRCenterSapOutboundFilePath(),
+            error
+        });
+        state.resultCode = "0";
+        state.message = "เขียนไฟล์ที่จะนำส่งระบบ SAP ไม่สำเร็จ โปรดติดต่อ Admin";
+    }
+};
+
+const tryUploadSapOutboundFile = async (ftpEnabled: boolean, state: SapSendState): Promise<void> => {
+    if (state.resultCode === "0" || !ftpEnabled) return;
+
+    try {
+        await uploadFileToFtp(getHRCenterSapOutboundFilePath());
+        state.ftpSent = true;
+    } catch (error) {
+        console.error("[HRCenter SAP] Failed to upload outbound file via FTP", {
+            outboundFilePath: getHRCenterSapOutboundFilePath(),
+            error
+        });
+        state.resultCode = "2";
+        state.message = "ส่งไฟล์ FTP ไม่สำเร็จ แต่สามารถดาวน์โหลดไฟล์ได้";
+    }
+};
+
+const shouldMarkSapSendStatus = (state: SapSendState, ftpEnabled: boolean): boolean => {
+    return state.resultCode === "1" || (state.resultCode !== "0" && !ftpEnabled);
+};
+
+const tryMarkSapSendStatus = async (
+    effectiveDate: Date,
+    employeeId: string,
+    orgUnits: string[],
+    ftpEnabled: boolean,
+    state: SapSendState
+): Promise<void> => {
+    if (!shouldMarkSapSendStatus(state, ftpEnabled)) return;
+
+    try {
+        await markSapSendStatus(effectiveDate, employeeId, orgUnits);
+    } catch (error) {
+        console.error("[HRCenter SAP] Uploaded file successfully, but failed to update SAP send status", {
+            effectiveDate: effectiveDate.toISOString(),
+            employeeId,
+            orgUnits,
+            ftpEnabled,
+            ftpSent: state.ftpSent,
+            error
+        });
+
+        state.resultCode = "2";
+        state.message = ftpEnabled && state.ftpSent
+            ? "นำส่งไฟล์เข้า SAP สำเร็จ แต่บันทึกสถานะการนำส่งในระบบไม่สำเร็จ"
+            : "สร้างไฟล์สำเร็จ แต่บันทึกสถานะการนำส่งในระบบไม่สำเร็จ";
+    }
+};
+
+const resolveSapSendMessage = (state: SapSendState, ftpEnabled: boolean): string => {
+    if (state.message) return state.message;
+    if (state.resultCode === "1") {
+        return ftpEnabled
+            ? "นำส่งเข้าบันทึกที่ระบบ SAP เสร็จสิ้น"
+            : "สร้างไฟล์สำเร็จ (ไม่ส่ง FTP จากการตั้งค่าปิดไว้)";
+    }
+    if (state.resultCode === "-1") {
+        return "มีหน่วยงานที่ค่ากรอบติดลบ โปรดตรวจสอบก่อนนำส่งเข้าบันทึกที่ระบบ SAP";
+    }
+    if (state.resultCode === "0") {
+        return "เขียนไฟล์ที่จะนำส่งระบบ SAP ไม่สำเร็จ โปรดติดต่อ Admin";
+    }
+    return "";
+};
+
 export const sendHRCenterToSapService = async (params: HRCenterSendToSapParams): Promise<HRCenterSendToSapResult> => {
     const effectiveDate = firstDayOfMonth(params.effectiveDate);
-    const employeeId = toText(params.employeeId) || 'SYSTEM';
+    const employeeId = toText(params.employeeId) || "SYSTEM";
     const orgUnits = Array.from(new Set((params.orgUnits || []).map(normalizeOrgUnitNo).filter(Boolean)));
-    const sendType = orgUnits.length > 0 ? 1 : 0;
-
-    const sendSapFtpConfig = await getConfigValue('SendSapFTP');
+    const sendSapFtpConfig = await getConfigValue("SendSapFTP");
     const ftpEnabled = isConfigTrue(sendSapFtpConfig);
-
-    let resultCode = '1';
-    let message = '';
-    let fileReady = false;
-    let ftpSent = false;
 
     await processPastTransactionChanges(effectiveDate, employeeId, orgUnits);
 
-    resultCode = await genQuotaExport(effectiveDate, employeeId, orgUnits);
+    const state: SapSendState = {
+        resultCode: await genQuotaExport(effectiveDate, employeeId, orgUnits),
+        message: "",
+        fileReady: false,
+        ftpSent: false
+    };
 
-    if (resultCode !== '-1') {
+    if (state.resultCode !== "-1") {
         const textfile = await exportText(effectiveDate, orgUnits);
-
-        try {
-            await ensureOutboundDirectory();
-            const outboundFilePath = getHRCenterSapOutboundFilePath();
-            await fs.promises.writeFile(outboundFilePath, textfile, { encoding: 'utf8' });
-            fileReady = true;
-        } catch (error) {
-            console.error('[HRCenter SAP] Failed to write outbound file', {
-                outboundFilePath: getHRCenterSapOutboundFilePath(),
-                error
-            });
-            resultCode = '0';
-            message = 'เขียนไฟล์ที่จะนำส่งระบบ SAP ไม่สำเร็จ โปรดติดต่อ Admin';
-        }
-
-        if (resultCode !== '0' && ftpEnabled) {
-            try {
-                await uploadFileToFtp(getHRCenterSapOutboundFilePath());
-                ftpSent = true;
-            } catch (error) {
-                console.error('[HRCenter SAP] Failed to upload outbound file via FTP', {
-                    outboundFilePath: getHRCenterSapOutboundFilePath(),
-                    error
-                });
-                resultCode = '2';
-                message = 'ส่งไฟล์ FTP ไม่สำเร็จ แต่สามารถดาวน์โหลดไฟล์ได้';
-            }
-        }
-
-        if (resultCode === '1' || (resultCode !== '0' && !ftpEnabled)) {
-            try {
-                await markSapSendStatus(effectiveDate, employeeId, orgUnits);
-            } catch (error) {
-                console.error('[HRCenter SAP] Uploaded file successfully, but failed to update SAP send status', {
-                    effectiveDate: effectiveDate.toISOString(),
-                    employeeId,
-                    orgUnits,
-                    ftpEnabled,
-                    ftpSent,
-                    error
-                });
-
-                resultCode = '2';
-                message = ftpEnabled && ftpSent
-                    ? 'นำส่งไฟล์เข้า SAP สำเร็จ แต่บันทึกสถานะการนำส่งในระบบไม่สำเร็จ'
-                    : 'สร้างไฟล์สำเร็จ แต่บันทึกสถานะการนำส่งในระบบไม่สำเร็จ';
-            }
-        }
-    }
-
-    if (!message) {
-        if (resultCode === '1') {
-            message = ftpEnabled
-                ? 'นำส่งเข้าบันทึกที่ระบบ SAP เสร็จสิ้น'
-                : 'สร้างไฟล์สำเร็จ (ไม่ส่ง FTP จากการตั้งค่าปิดไว้)';
-        } else if (resultCode === '-1') {
-            message = 'มีหน่วยงานที่ค่ากรอบติดลบ โปรดตรวจสอบก่อนนำส่งเข้าบันทึกที่ระบบ SAP';
-        } else if (resultCode === '0') {
-            message = 'เขียนไฟล์ที่จะนำส่งระบบ SAP ไม่สำเร็จ โปรดติดต่อ Admin';
-        }
+        await tryWriteSapOutboundFile(textfile, state);
+        await tryUploadSapOutboundFile(ftpEnabled, state);
+        await tryMarkSapSendStatus(effectiveDate, employeeId, orgUnits, ftpEnabled, state);
     }
 
     return {
-        resultCode,
-        fileReady,
+        resultCode: state.resultCode,
+        fileReady: state.fileReady,
         ftpEnabled,
-        ftpSent,
-        downloadPath: '/api/transactions/hrcenter/sap-file',
-        message
+        ftpSent: state.ftpSent,
+        downloadPath: "/api/transactions/hrcenter/sap-file",
+        message: resolveSapSendMessage(state, ftpEnabled)
     };
 };
 
 export const getHRCenterSapMinusService = async (effectiveDate: Date): Promise<DbRow[]> => {
     const pool = await poolPromise;
     const request = new sql.Request(pool);
-    request.input('EffectiveDate', sql.Date, toSqlDateOnly(firstDayOfMonth(effectiveDate)));
-    const result = await request.execute('mp_QuotaExCheckMinus');
+    request.input("EffectiveDate", sql.Date, toSqlDateOnly(firstDayOfMonth(effectiveDate)));
+    const result = await request.execute("mp_QuotaExCheckMinus");
     return (result.recordset || []) as DbRow[];
 };
-
 export const getHRCenterSapOutboundFileBufferService = async (): Promise<{ fileName: string; content: Buffer }> => {
     const filePath = getHRCenterSapOutboundFilePath();
     const content = await fs.promises.readFile(filePath);

@@ -223,6 +223,22 @@ class MenuService {
             .execute('mp_MenuPermissionUpdate');
     }
 
+    private sortMenuRightChildren(node: any) {
+        node.children.sort((a: any, b: any) => (a.SortNumber || a.MenuID) - (b.SortNumber || b.MenuID));
+    }
+
+    private attachMenuRightNode(item: any, node: any, itemMap: Map<number, any>, tree: any[]) {
+        if (!item.ParentID) {
+            tree.push(node);
+            return;
+        }
+
+        const parent = itemMap.get(item.ParentID);
+        if (!parent) return;
+
+        parent.children.push(node);
+        this.sortMenuRightChildren(parent);
+    }
     private buildMenuRightTree(items: any[]): any[] {
         const itemMap = new Map<number, any>();
         const tree: any[] = [];
@@ -233,23 +249,12 @@ class MenuService {
 
         items.forEach(item => {
             const node = itemMap.get(item.MenuID)!;
-            if (item.ParentID) {
-                const parent = itemMap.get(item.ParentID);
-                if (parent) {
-                    parent.children.push(node);
-                    parent.children.sort((a: any, b: any) => (a.SortNumber || a.MenuID) - (b.SortNumber || b.MenuID));
-                } else {
-                    if (!item.ParentID) tree.push(node); 
-                }
-            } else {
-                tree.push(node);
-            }
+            this.attachMenuRightNode(item, node, itemMap, tree);
         });
+
         tree.sort((a, b) => (a.SortNumber || a.MenuID) - (b.SortNumber || b.MenuID));
 
         for (const node of itemMap.values()) {
-            // Menu rights page should always show real hierarchy from ParentID,
-            // even when SubMenu flag is false (e.g. Report menu).
             if (!node.children || node.children.length === 0) {
                 delete node.children;
             }
@@ -257,7 +262,6 @@ class MenuService {
 
         return tree;
     }
-
     async getSubMenu(menuKey: string, employeeID?: string, preferredRole?: string) {
         if (employeeID) {
             return this.getSubMenuForUser(employeeID, menuKey, preferredRole);

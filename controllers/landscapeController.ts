@@ -108,6 +108,38 @@ const normalizeLandscapePayload = (raw: LandscapeBody): { data?: LandscapePayloa
     };
 };
 
+const normalizeLandscapeFormulaJsonValue = (formulaJsonRaw: unknown): { value?: string; message?: string } => {
+    if (typeof formulaJsonRaw === "string") {
+        return { value: formulaJsonRaw.trim() };
+    }
+
+    if (formulaJsonRaw && typeof formulaJsonRaw === "object") {
+        try {
+            return { value: JSON.stringify(formulaJsonRaw) };
+        } catch {
+            return { message: "formulaJson is not serializable JSON" };
+        }
+    }
+
+    return { value: "" };
+};
+
+const validateLandscapeFormulaFields = (params: {
+    formulaKey: string;
+    formulaName: string | null;
+    beginDate: string;
+    endDate: string;
+}): string | null => {
+    if (!params.formulaKey) return "Missing formulaKey parameter";
+    if (params.formulaKey.length > 100) return "formulaKey length must not exceed 100 characters";
+    if (!params.beginDate) return "Missing beginDate parameter";
+    if (!isValidDateOnly(params.beginDate)) return "Invalid beginDate format. Use YYYY-MM-DD";
+    if (!isValidDateOnly(params.endDate)) return "Invalid endDate format. Use YYYY-MM-DD";
+    if (params.endDate < params.beginDate) return "endDate must be greater than or equal to beginDate";
+    if (params.formulaName && params.formulaName.length > 255) return "formulaName length must not exceed 255 characters";
+    return null;
+};
+
 const normalizeLandscapeFormulaPayload = (raw: LandscapeFormulaBody): { data?: LandscapeFormulaPayload; message?: string } => {
     const formulaKey = (toTrimmedText(raw.formulaKey) || REPORT7_FORMULA_KEY).toUpperCase();
     const formulaNameRaw = toTrimmedText(raw.formulaName);
@@ -115,49 +147,19 @@ const normalizeLandscapeFormulaPayload = (raw: LandscapeFormulaBody): { data?: L
     const beginDate = toTrimmedText(raw.beginDate);
     const incomingEndDate = toTrimmedText(raw.endDate);
     const endDate = incomingEndDate || FORMULA_DEFAULT_END_DATE;
-    const isActive = raw.isActive === undefined ? true : (raw.isActive === true || raw.isActive === 1 || raw.isActive === '1');
+    const isActive = raw.isActive === undefined ? true : (raw.isActive === true || raw.isActive === 1 || raw.isActive === "1");
 
-    if (!formulaKey) {
-        return { message: 'Missing formulaKey parameter' };
-    }
-    if (formulaKey.length > 100) {
-        return { message: 'formulaKey length must not exceed 100 characters' };
-    }
-    if (!beginDate) {
-        return { message: 'Missing beginDate parameter' };
-    }
-    if (!isValidDateOnly(beginDate)) {
-        return { message: 'Invalid beginDate format. Use YYYY-MM-DD' };
-    }
-    if (!isValidDateOnly(endDate)) {
-        return { message: 'Invalid endDate format. Use YYYY-MM-DD' };
-    }
-    if (endDate < beginDate) {
-        return { message: 'endDate must be greater than or equal to beginDate' };
-    }
-    if (formulaName && formulaName.length > 255) {
-        return { message: 'formulaName length must not exceed 255 characters' };
-    }
+    const validationMessage = validateLandscapeFormulaFields({ formulaKey, formulaName, beginDate, endDate });
+    if (validationMessage) return { message: validationMessage };
 
-    let formulaJson = '';
-    if (typeof raw.formulaJson === 'string') {
-        formulaJson = raw.formulaJson.trim();
-    } else if (raw.formulaJson && typeof raw.formulaJson === 'object') {
-        try {
-            formulaJson = JSON.stringify(raw.formulaJson);
-        } catch {
-            return { message: 'formulaJson is not serializable JSON' };
-        }
-    }
+    const normalizedFormulaJson = normalizeLandscapeFormulaJsonValue(raw.formulaJson);
+    if (normalizedFormulaJson.message) return { message: normalizedFormulaJson.message };
+    if (!normalizedFormulaJson.value) return { message: "Missing formulaJson parameter" };
 
-    if (!formulaJson) {
-        return { message: 'Missing formulaJson parameter' };
-    }
-
-    const parsed = parseLandscapeFormulaJson(formulaJson);
+    const parsed = parseLandscapeFormulaJson(normalizedFormulaJson.value);
     if (!parsed) {
         return {
-            message: 'Invalid formulaJson structure for REPORT7 formula'
+            message: "Invalid formulaJson structure for REPORT7 formula"
         };
     }
 
@@ -172,7 +174,6 @@ const normalizeLandscapeFormulaPayload = (raw: LandscapeFormulaBody): { data?: L
         }
     };
 };
-
 export const getLandscape = async (c: Context) => {
     try {
         const result = await getLandscapeService();

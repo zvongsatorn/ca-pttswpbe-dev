@@ -236,17 +236,17 @@ export const upsertMainKey = async (c: Context) => {
              await updateMainKeyService(manDriverKeyId, unit, keyType, weight, user || 'SYSTEM');
         } else {
              // Insert
-             await createMainKeyService(
-                 id, 
-                 keyManId, 
-                 unit, 
-                 keyType, 
-                 weight, 
-                 user || 'SYSTEM', 
-                 insertType, 
-                 effectiveYear, 
+             await createMainKeyService({
+                 manDriverId: id,
+                 keyManId,
+                 unit,
+                 keyType,
+                 weight,
+                 createBy: user || 'SYSTEM',
+                 insertType,
+                 effectiveYear,
                  parentId
-             );
+             });
         }
 
         return c.json({ success: true, message: 'Main key saved' }, 200);
@@ -286,16 +286,16 @@ export const updateDetailKey = async (c: Context) => {
         }
 
         if (insertType === 2 || insertType === '2') {
-            await createDetailKeyService(
-                id,
-                manDriverKeyId, // This is parentId in insert case
+            await createDetailKeyService({
+                manDriverId: id,
+                parentId: manDriverKeyId, // This is parentId in insert case
                 definition,
                 coefficient,
                 remark,
-                user || 'SYSTEM',
+                createBy: user || 'SYSTEM',
                 effectiveYear,
                 yearlyData
-            );
+            });
         } else {
             await updateDetailKeyService(
                 id,
@@ -649,17 +649,105 @@ export const getFlowHistory = async (c: Context) => {
     }
 };
 
+type ManDriverFileData = {
+    displayFileName: string;
+    safeName: string;
+};
+
+type ManDriverFileError = {
+    status: number;
+    body: Record<string, unknown>;
+};
+
+const getMkdRequestNo = (details: any, id: string) => details?.header?.RequestNo || 'ID_' + id;
+
+const normalizeMkdUserId = (value: unknown) => String(value || '').trim().replace(/^0+/, '');
+
+const saveUploadedManDriverFile = async (id: string, file: File): Promise<ManDriverFileData> => {
+    const displayFileName = file.name;
+    const fileBuffer = await file.arrayBuffer();
+    const details = await getMKDDetailsService(id);
+    const requestNo = getMkdRequestNo(details, id);
+    const uploadDir = path.join(process.cwd(), 'uploads', 'mkd', requestNo);
+
+    if (!fs.existsSync(uploadDir)) {
+        fs.mkdirSync(uploadDir, { recursive: true });
+    }
+
+    const extension = path.extname(displayFileName).toLowerCase() || '.pdf';
+    const safeName = randomUUID() + extension;
+    fs.writeFileSync(path.join(uploadDir, safeName), Buffer.from(fileBuffer));
+
+    return { displayFileName, safeName };
+};
+
+const reuseExistingManDriverFile = async (
+    id: string,
+    existingFileUpload: string,
+    existingFileSourceManDriverId: string,
+    existingFileName: string,
+    updateBy: string
+): Promise<ManDriverFileData & { error?: ManDriverFileError }> => {
+    const targetDetails = await getMKDDetailsService(id);
+    const sourceDetails = await getMKDDetailsService(existingFileSourceManDriverId);
+    const targetRequestNo = getMkdRequestNo(targetDetails, id);
+    const sourceRequestNo = getMkdRequestNo(sourceDetails, existingFileSourceManDriverId);
+    const targetYear = String(targetDetails?.header?.EffectiveYear || '').trim();
+    const sourceYear = String(sourceDetails?.header?.EffectiveYear || '').trim();
+    const normalizedSourceCreateBy = normalizeMkdUserId(sourceDetails?.header?.CreateBy);
+    const normalizedUpdateBy = normalizeMkdUserId(updateBy);
+
+    if (sourceYear && targetYear && sourceYear !== targetYear) {
+        return {
+            displayFileName: '',
+            safeName: '',
+            error: { status: 400, body: { success: false, message: 'Selected file must be from the same EffectiveYear' } }
+        };
+    }
+
+    if (normalizedSourceCreateBy && normalizedUpdateBy && normalizedSourceCreateBy !== normalizedUpdateBy) {
+        return {
+            displayFileName: '',
+            safeName: '',
+            error: { status: 403, body: { success: false, message: 'Selected file must belong to the current user' } }
+        };
+    }
+
+    const sourceFilePath = path.join(process.cwd(), 'uploads', 'mkd', sourceRequestNo, existingFileUpload);
+    if (!fs.existsSync(sourceFilePath)) {
+        return {
+            displayFileName: '',
+            safeName: '',
+            error: { status: 400, body: { success: false, message: 'Selected file not found' } }
+        };
+    }
+
+    const displayFileName = existingFileName || existingFileUpload;
+    if (sourceRequestNo === targetRequestNo) {
+        return { displayFileName, safeName: existingFileUpload };
+    }
+
+    const targetUploadDir = path.join(process.cwd(), 'uploads', 'mkd', targetRequestNo);
+    if (!fs.existsSync(targetUploadDir)) {
+        fs.mkdirSync(targetUploadDir, { recursive: true });
+    }
+
+    const extension = path.extname(existingFileUpload).toLowerCase() || '.pdf';
+    const safeName = randomUUID() + extension;
+    fs.copyFileSync(sourceFilePath, path.join(targetUploadDir, safeName));
+
+    return { displayFileName, safeName };
+};
+
 export const approveManDriver = async (c: Context) => {
     try {
         const id = c.req.param('id');
         const body = await c.req.parseBody();
         
-        const approveId = body['approveId'] as string || '0';
         const status = parseInt(body['status'] as string) || 3;
-        const remark = body['remark'] as string || '';
         const conclusionNo = body['conclusionNo'] as string || '';
         const mkdApproveCount = parseInt(body['mkdApproveCount'] as string) || 0;
-        const file = body['file'] as any;
+        const file = body['file'];
         const existingFileUpload = String(body['existingFileUpload'] || '').trim();
         const existingFileSourceManDriverId = String(body['existingFileSourceManDriverId'] || '').trim();
         const existingFileName = String(body['existingFileName'] || '').trim();
@@ -667,68 +755,22 @@ export const approveManDriver = async (c: Context) => {
 
         if (!id) return c.json({ message: 'Missing MKD ID' }, 400);
 
-        let safeName = '';
-        let displayFileName = '';
+        let fileData: ManDriverFileData = { safeName: '', displayFileName: '' };
 
         if (file && file instanceof File) {
-            displayFileName = file.name;
-            const fileBuffer = await file.arrayBuffer();
-            
-            // Fetch RequestNo for folder
-            const details = await getMKDDetailsService(id);
-            const requestNo = details?.header?.RequestNo || `ID_${id}`;
-            
-            const uploadDir = path.join(process.cwd(), 'uploads', 'mkd', requestNo);
-            if (!fs.existsSync(uploadDir)) {
-                fs.mkdirSync(uploadDir, { recursive: true });
-            }
-            
-            let extension = path.extname(displayFileName).toLowerCase();
-            if (!extension) extension = ".pdf";
-            
-            safeName = `${randomUUID()}${extension}`;
-            const filePath = path.join(uploadDir, safeName);
-            fs.writeFileSync(filePath, Buffer.from(fileBuffer));
+            fileData = await saveUploadedManDriverFile(id, file);
         } else if (existingFileUpload && existingFileSourceManDriverId) {
-            // Reuse an already uploaded file from another MKD in the same year/user scope.
-            const targetDetails = await getMKDDetailsService(id);
-            const sourceDetails = await getMKDDetailsService(existingFileSourceManDriverId);
-            const targetRequestNo = targetDetails?.header?.RequestNo || `ID_${id}`;
-            const sourceRequestNo = sourceDetails?.header?.RequestNo || `ID_${existingFileSourceManDriverId}`;
-            const targetYear = String(targetDetails?.header?.EffectiveYear || '').trim();
-            const sourceYear = String(sourceDetails?.header?.EffectiveYear || '').trim();
-            const sourceCreateBy = String(sourceDetails?.header?.CreateBy || '').trim();
-            const normalizedSourceCreateBy = sourceCreateBy.replace(/^0+/, '');
-            const normalizedUpdateBy = String(updateBy || '').trim().replace(/^0+/, '');
-
-            if (sourceYear && targetYear && sourceYear !== targetYear) {
-                return c.json({ success: false, message: 'Selected file must be from the same EffectiveYear' }, 400);
+            const existingFile = await reuseExistingManDriverFile(
+                id,
+                existingFileUpload,
+                existingFileSourceManDriverId,
+                existingFileName,
+                updateBy
+            );
+            if (existingFile.error) {
+                return c.json(existingFile.error.body, existingFile.error.status as any);
             }
-
-            if (normalizedSourceCreateBy && normalizedUpdateBy && normalizedSourceCreateBy !== normalizedUpdateBy) {
-                return c.json({ success: false, message: 'Selected file must belong to the current user' }, 403);
-            }
-
-            const sourceFilePath = path.join(process.cwd(), 'uploads', 'mkd', sourceRequestNo, existingFileUpload);
-            if (!fs.existsSync(sourceFilePath)) {
-                return c.json({ success: false, message: 'Selected file not found' }, 400);
-            }
-
-            displayFileName = existingFileName || existingFileUpload;
-
-            if (sourceRequestNo === targetRequestNo) {
-                // Same folder: can reuse the same physical file id directly.
-                safeName = existingFileUpload;
-            } else {
-                const targetUploadDir = path.join(process.cwd(), 'uploads', 'mkd', targetRequestNo);
-                if (!fs.existsSync(targetUploadDir)) {
-                    fs.mkdirSync(targetUploadDir, { recursive: true });
-                }
-                const extension = path.extname(existingFileUpload).toLowerCase() || '.pdf';
-                safeName = `${randomUUID()}${extension}`;
-                const targetFilePath = path.join(targetUploadDir, safeName);
-                fs.copyFileSync(sourceFilePath, targetFilePath);
-            }
+            fileData = existingFile;
         }
 
         await approveManDriverService(
@@ -737,8 +779,8 @@ export const approveManDriver = async (c: Context) => {
             updateBy,
             mkdApproveCount,
             status,
-            displayFileName,
-            safeName
+            fileData.displayFileName,
+            fileData.safeName
         );
 
         return c.json({ success: true, message: 'Approved successfully' }, 200);
