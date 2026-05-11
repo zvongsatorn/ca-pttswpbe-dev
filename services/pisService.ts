@@ -1,5 +1,18 @@
 import configService from './configService.js';
 
+const resolveHttpsConfigUrl = (value: string, searchParams?: Record<string, string>): string => {
+    const parsed = new URL(String(value || '').trim());
+    if (parsed.protocol !== 'https:') {
+        throw new Error('PIS endpoint must use HTTPS');
+    }
+
+    Object.entries(searchParams || {}).forEach(([key, val]) => {
+        parsed.searchParams.set(key, val);
+    });
+
+    return parsed.toString();
+};
+
 class PisService {
     token: string | null = null;
     tokenExpiry: number = 0;
@@ -24,7 +37,7 @@ class PisService {
         const credentials = Buffer.from(`${username}:${password}`).toString('base64');
 
         try {
-            const response = await fetch(tokenUrl, {
+            const response = await fetch(resolveHttpsConfigUrl(tokenUrl), {
                 method: 'POST',
                 headers: {
                     'Authorization': `Basic ${credentials}`,
@@ -59,7 +72,7 @@ class PisService {
             if (!baseUrl) return null;
 
             const formattedEmpID = employeeId.replace(/^0+/, '');
-            const url = `${baseUrl}?Search_EmployeeCode=${formattedEmpID}`;
+            const url = resolveHttpsConfigUrl(baseUrl, { Search_EmployeeCode: formattedEmpID });
 
             const response = await fetch(url, {
                 headers: {
@@ -92,7 +105,7 @@ class PisService {
             if (!baseUrl) return [];
 
             const formattedEmpID = employeeId.replace(/^0+/, '');
-            const url = `${baseUrl}?in_empid=${formattedEmpID}&in_poscode=${posCode}`;
+            const url = resolveHttpsConfigUrl(baseUrl, { in_empid: formattedEmpID, in_poscode: posCode });
 
             const response = await fetch(url, {
                 headers: {

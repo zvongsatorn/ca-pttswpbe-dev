@@ -7,6 +7,14 @@ import configService from './configService.js';
 let accessToken: string | null = null;
 let tokenExpiry: number = 0;
 
+const safeEmailAddress = (value: string): string => {
+    const email = String(value || '').trim();
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || /[\r\n]/.test(email)) {
+        throw new Error('Invalid email address');
+    }
+    return email;
+};
+
 async function getAccessToken(): Promise<string> {
     const now = Date.now();
     // Use cached token if valid for at least 5 more minutes
@@ -22,7 +30,8 @@ async function getAccessToken(): Promise<string> {
         throw new Error('Azure AD credentials missing in environment variables');
     }
 
-    const url = `https://login.microsoftonline.com/${tenantId}/oauth2/v2.0/token`;
+    const safeTenantId = encodeURIComponent(tenantId);
+    const url = `https://login.microsoftonline.com/${safeTenantId}/oauth2/v2.0/token`;
     
     // Basic Auth header variant
     const auth = Buffer.from(`${clientId}:${clientSecret}`).toString('base64');
@@ -60,14 +69,14 @@ export const sendMail = async (to: string, subject: string, body: string, isHtml
         if (!sender) {
             sender = process.env.MAIL_SENDER || '';
         }
-        sender = sender.trim();
+        sender = safeEmailAddress(sender);
 
         if (!sender) {
             throw new Error('MAIL_SENDER not configured (not in DB or .env)');
         }
 
         const token = await getAccessToken();
-        const url = `https://graph.microsoft.com/v1.0/users/${sender}/sendMail`;
+        const url = `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(sender)}/sendMail`;
 
         const baseMessage: any = {
             subject: subject,
@@ -78,7 +87,7 @@ export const sendMail = async (to: string, subject: string, body: string, isHtml
             toRecipients: [
                 {
                     emailAddress: {
-                        address: to
+                        address: safeEmailAddress(to)
                     }
                 }
             ]

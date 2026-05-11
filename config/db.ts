@@ -11,12 +11,22 @@ const toPositiveInt = (value: string | undefined, fallback: number): number => {
 const dbConnectionTimeout = toPositiveInt(process.env.DB_CONNECTION_TIMEOUT_MS, 30000);
 const dbRequestTimeout = toPositiveInt(process.env.DB_REQUEST_TIMEOUT_MS, 30000);
 const trustServerCertificate = process.env.DB_TRUST_SERVER_CERTIFICATE === 'true';
+const dbServer = String(process.env.DB_SERVER || '').trim();
+const dbDatabase = String(process.env.DB_DATABASE || '').trim();
+
+if (!/^[A-Za-z0-9._-]+$/.test(dbServer)) {
+    throw new Error('Invalid DB_SERVER format');
+}
+
+if (!/^[A-Za-z0-9._-]+$/.test(dbDatabase)) {
+    throw new Error('Invalid DB_DATABASE format');
+}
 
 const config: sql.config = {
     user: process.env.DB_USER,
     password: process.env.DB_PASSWORD,
-    server: process.env.DB_SERVER!,
-    database: process.env.DB_DATABASE!,
+    server: dbServer,
+    database: dbDatabase,
     port: parseInt(process.env.DB_PORT || '1433', 10),
     pool: {
         max: 20,

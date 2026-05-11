@@ -21,17 +21,7 @@
 		"request": {
 			"method": "GET",
 			"header": [],
-			"url": {
-				"raw": "{{hostname}}/api/system/healthz",
-				"host": [
-					"{{hostname}}"
-				],
-				"path": [
-					"api",
-					"system",
-					"healthz"
-				]
-			}
+			"url": "{{hostname}}/api/system/healthz"
 		},
 		"response": []
 	}]

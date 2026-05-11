@@ -125,8 +125,37 @@ class ConfigService {
         res.on("end", () => this.resolveNativeResponse(data, res.statusCode, resolve, reject));
     }
 
+    private assertSafeOutboundUrl(url: string): URL {
+        const parsedUrl = new URL(url);
+        const hostname = parsedUrl.hostname.toLowerCase();
+
+        if (parsedUrl.protocol !== "https:") {
+            throw new Error("Outbound CAA URL must use HTTPS");
+        }
+
+        if (parsedUrl.username || parsedUrl.password) {
+            throw new Error("Outbound CAA URL must not include credentials");
+        }
+
+        if (
+            hostname === "localhost" ||
+            hostname === "::1" ||
+            hostname.startsWith("127.") ||
+            hostname.startsWith("10.") ||
+            hostname.startsWith("192.168.") ||
+            hostname.startsWith("169.254.") ||
+            /^172\.(1[6-9]|2\d|3[0-1])\./.test(hostname)
+        ) {
+            throw new Error("Outbound CAA URL host is not allowed");
+        }
+
+        return parsedUrl;
+    }
+
     private buildCaaUrl(baseUrl: string, path: string): string {
-        return baseUrl.endsWith("/") ? baseUrl + path : baseUrl + "/" + path;
+        const parsedBaseUrl = this.assertSafeOutboundUrl(baseUrl);
+        const normalizedBaseUrl = parsedBaseUrl.toString().replace(/\/?$/, "/");
+        return new URL(path.replace(/^\/+/, ""), normalizedBaseUrl).toString();
     }
 
     private hasValidToken(now: number): boolean {
@@ -172,12 +201,10 @@ class ConfigService {
             console.log("[configService] Fetching (NATIVE): " + method + " " + url);
 
             const bodyStr = payload ? JSON.stringify(payload) : undefined;
-            const parsedUrl = new URL(url);
-            const isHttps = parsedUrl.protocol === "https:";
-            const httpModule = isHttps ? https : require("node:http");
+            const parsedUrl = this.assertSafeOutboundUrl(url);
             const options = {
                 hostname: parsedUrl.hostname,
-                port: parsedUrl.port || (isHttps ? 443 : 80),
+                port: parsedUrl.port || 443,
                 path: parsedUrl.pathname + parsedUrl.search,
                 method,
                 headers: this.buildRequestHeaders(headers, bodyStr),
@@ -185,7 +212,7 @@ class ConfigService {
                 timeout: 120000,
             };
 
-            const req = httpModule.request(options, (res: any) => this.handleNativeResponse(res, resolve, reject));
+            const req = https.request(options, (res: any) => this.handleNativeResponse(res, resolve, reject));
 
             req.on("error", (err: any) => {
                 console.error("[configService] Native API request failed:", err.message);

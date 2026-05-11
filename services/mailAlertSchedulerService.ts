@@ -147,6 +147,7 @@ const getTransactionLookupRows = async (transactionNos: string[]): Promise<Trans
         new Set(
             transactionNos
                 .map((no) => String(no || '').trim())
+                .filter((no) => /^[A-Za-z0-9_-]+$/.test(no))
                 .filter(Boolean)
         )
     );
@@ -158,11 +159,7 @@ const getTransactionLookupRows = async (transactionNos: string[]): Promise<Trans
     try {
         const pool = await poolPromise;
         const request = new sql.Request(pool);
-        const placeholders = uniqueNos.map((transactionNo, index) => {
-            const paramName = `TransactionNo${index}`;
-            request.input(paramName, sql.VarChar(20), transactionNo);
-            return `@${paramName}`;
-        });
+        request.input('TransactionNosCsv', sql.VarChar(sql.MAX), uniqueNos.join(','));
 
         const query = `
             SELECT
@@ -170,7 +167,11 @@ const getTransactionLookupRows = async (transactionNos: string[]): Promise<Trans
                 TransactionType,
                 TransactionDesc
             FROM MP_Transactions WITH (NOLOCK)
-            WHERE TransactionNo IN (${placeholders.join(',')})
+            WHERE TransactionNo IN (
+                SELECT LTRIM(RTRIM(value))
+                FROM STRING_SPLIT(@TransactionNosCsv, ',')
+                WHERE LTRIM(RTRIM(value)) <> ''
+            )
         `;
 
         const result = await request.query(query);

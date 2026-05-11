@@ -30,6 +30,11 @@ const resolveProfilePicturePath = (filename: string): string | null => {
     return filePath.startsWith(`${uploadDir}${path.sep}`) ? filePath : null;
 };
 
+const resolveProfilePictureWritePath = (filename: string): string => {
+    const uploadDir = path.resolve(process.cwd(), 'uploads', 'profile_pictures');
+    return path.resolve(uploadDir, filename);
+};
+
 
 const buildProfilePictureToken = (employeeId: string, userData: any, userGroups: unknown[], safeName: string) => {
     const secretKey = process.env.JWT_SECRET;
@@ -47,14 +52,16 @@ const buildProfilePictureToken = (employeeId: string, userData: any, userGroups:
             profilePicture: safeName,
         },
         secretKey,
-        { expiresIn: "1d" }
+        { expiresIn: "8h" }
     );
 };
 
 const deleteProfilePictureIfExists = (oldFilename: string | null | undefined): void => {
     if (!oldFilename) return;
 
-    const oldPath = path.join(process.cwd(), "uploads", "profile_pictures", oldFilename);
+    const oldPath = resolveProfilePicturePath(oldFilename);
+    if (!oldPath) return;
+
     if (!fs.existsSync(oldPath)) return;
 
     try {
@@ -204,14 +211,14 @@ export const uploadProfilePicture = async (c: Context) => {
         }
 
         const safeName = `${randomUUID()}${extension}`;
-        const filePath = path.join(uploadDir, safeName);
+        const filePath = resolveProfilePictureWritePath(safeName);
         fs.writeFileSync(filePath, fileBuffer);
 
         await userService.updateUserProfilePicture(employeeId, safeName);
 
         // Regenerate Token for frontend persistence
         const userGroups = await userGroupService.getGroupsForUser(employeeId);
-        const token = buildProfilePictureToken(employeeId, userData, userGroups, safeName);
+        const token = buildProfilePictureToken(employeeId, userData || {}, userGroups, safeName);
 
         // Delete old file if it exists
         deleteProfilePictureIfExists(oldFilename);

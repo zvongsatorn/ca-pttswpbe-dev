@@ -102,6 +102,10 @@ const getDocumentTypeCategory = (transactionType: unknown): string => {
 };
 
 const normalizeText = (value: unknown): string => String(value ?? '').trim();
+const normalizeSqlToken = (value: unknown, maxLength = 20): string => {
+    const token = normalizeText(value).substring(0, maxLength);
+    return /^[A-Za-z0-9_-]+$/.test(token) ? token : '';
+};
 
 const firstNonEmptyText = (...values: unknown[]): string => {
     for (const value of values) {
@@ -182,23 +186,23 @@ const resolveDocumentEffectiveDateFromItems = async (
     itemIds: string[],
     fallback: Date
 ): Promise<Date> => {
-    const uniqueItemIds = Array.from(new Set((itemIds || []).map((itemId) => String(itemId || '').trim()).filter(Boolean)));
+    const uniqueItemIds = Array.from(new Set((itemIds || []).map((itemId) => normalizeSqlToken(itemId, 10)).filter(Boolean)));
     const fallbackMonthStart = new Date(fallback.getFullYear(), fallback.getMonth(), 1, 0, 0, 0, 0);
     if (!uniqueItemIds.length) {
         return fallbackMonthStart;
     }
 
     const req = new sql.Request(tx);
-    const placeholders = uniqueItemIds.map((itemId, idx) => {
-        const param = `TransactionNo${idx}`;
-        req.input(param, sql.VarChar(10), itemId);
-        return `@${param}`;
-    });
+    req.input('TransactionNosCsv', sql.VarChar(sql.MAX), uniqueItemIds.join(','));
 
     const res = await req.query(`
         SELECT TransactionNo, EffectiveDate
         FROM MP_Transactions WITH (NOLOCK)
-        WHERE TransactionNo IN (${placeholders.join(',')})
+        WHERE TransactionNo IN (
+            SELECT LTRIM(RTRIM(value))
+            FROM STRING_SPLIT(@TransactionNosCsv, ',')
+            WHERE LTRIM(RTRIM(value)) <> ''
+        )
           AND EffectiveDate IS NOT NULL
     `);
 
@@ -392,16 +396,12 @@ const resolveDocumentOrgFilters = async (
 };
 
 const getTransactionRowsByNos = async (pool: sql.ConnectionPool, transactionNos: string[]): Promise<MailTransactionRow[]> => {
-    const uniqueNos = Array.from(new Set((transactionNos || []).map((n) => String(n || '').trim()).filter(Boolean)));
+    const uniqueNos = Array.from(new Set((transactionNos || []).map((n) => normalizeSqlToken(n, 20)).filter(Boolean)));
     if (!uniqueNos.length) return [];
 
     try {
         const request = new sql.Request(pool);
-        const placeholders = uniqueNos.map((transactionNo, idx) => {
-            const param = `TransactionNo${idx}`;
-            request.input(param, sql.VarChar(20), transactionNo);
-            return `@${param}`;
-        });
+        request.input('TransactionNosCsv', sql.VarChar(sql.MAX), uniqueNos.join(','));
 
         const query = `
             SELECT
@@ -409,7 +409,11 @@ const getTransactionRowsByNos = async (pool: sql.ConnectionPool, transactionNos:
                 TransactionType,
                 TransactionDesc
             FROM MP_Transactions WITH (NOLOCK)
-            WHERE TransactionNo IN (${placeholders.join(',')})
+            WHERE TransactionNo IN (
+                SELECT LTRIM(RTRIM(value))
+                FROM STRING_SPLIT(@TransactionNosCsv, ',')
+                WHERE LTRIM(RTRIM(value)) <> ''
+            )
         `;
 
         const result = await request.query(query);
@@ -1403,16 +1407,30 @@ export const rejectAllDocumentService = async (documentNo: string, remark: strin
 };
 
 type DocumentLogRow = { AuditStatus?: number; UserGroupName?: string };
+type DocumentListProcedureName = 'mp_DocumentProgressListGet' | 'mp_AllDocumentsGet';
+
+const DOCUMENT_LIST_PROCEDURES = new Set<DocumentListProcedureName>([
+    'mp_DocumentProgressListGet',
+    'mp_AllDocumentsGet'
+]);
+
+const assertDocumentListProcedure = (procedureName: string): DocumentListProcedureName => {
+    if (DOCUMENT_LIST_PROCEDURES.has(procedureName as DocumentListProcedureName)) {
+        return procedureName as DocumentListProcedureName;
+    }
+    throw new Error('Unsupported document list procedure');
+};
 
 const loadDocumentListWithOptionalEmployee = async (
     pool: sql.ConnectionPool,
     procedureName: string,
     employeeId: string
 ) => {
+    const safeProcedureName = assertDocumentListProcedure(procedureName);
     try {
         const req = new sql.Request(pool);
         req.input('EmployeeID', sql.VarChar(20), employeeId);
-        return await req.execute(procedureName);
+        return await req.execute(safeProcedureName);
     } catch (error: any) {
         const message = String(error?.message || '');
         if (!message.includes('has no parameters and arguments were supplied')) {
@@ -1421,7 +1439,7 @@ const loadDocumentListWithOptionalEmployee = async (
 
         // Fallback for DB where this SP has no input parameters
         const reqNoParam = new sql.Request(pool);
-        return reqNoParam.execute(procedureName);
+        return reqNoParam.execute(safeProcedureName);
     }
 };
 

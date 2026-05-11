@@ -17,6 +17,19 @@ import {
     getExportExcelService
 } from '../services/pirService.js';
 
+const PIR_FILE_EXTENSIONS = new Set(['.pdf', '.xlsx', '.xls']);
+
+const toSafeHeaderFilename = (value: unknown, fallback: string): string => {
+    const baseName = path.basename(String(value || fallback));
+    const safeName = baseName.replace(/[\r\n"\\;]/g, '_').replace(/[^\w.\- ]/g, '_').trim();
+    return safeName || fallback;
+};
+
+const toSafeUploadExtension = (value: unknown, fallback: string): string => {
+    const extension = path.extname(String(value || '')).toLowerCase();
+    return PIR_FILE_EXTENSIONS.has(extension) ? extension : fallback;
+};
+
 // --- Tab 1: PIR ---
 export const getPIR = async (c: Context) => {
     try {
@@ -140,16 +153,24 @@ export const uploadFilePIR = async (c: Context) => {
         const fileName = file.name;
         const fileBuffer = await file.arrayBuffer();
         
-        const uploadDir = path.join(process.cwd(), 'uploads', 'pir', effYear);
+        const safeEffYear = String(effYear).trim();
+        if (!/^\d{4}$/.test(safeEffYear)) {
+            return c.json({ message: 'Invalid effYear' }, 400);
+        }
+
+        const uploadRoot = path.resolve(process.cwd(), 'uploads', 'pir');
+        const uploadDir = path.resolve(uploadRoot, safeEffYear);
+        if (!uploadDir.startsWith(`${uploadRoot}${path.sep}`)) {
+            return c.json({ message: 'Invalid upload path' }, 400);
+        }
         if (!fs.existsSync(uploadDir)) {
             fs.mkdirSync(uploadDir, { recursive: true });
         }
         
-        let extension = path.extname(fileName).toLowerCase();
-        if (!extension) extension = ".pdf";
+        const extension = toSafeUploadExtension(fileName, ".pdf");
         
         const safeName = `${randomUUID()}${extension}`;
-        const filePath = path.join(uploadDir, safeName);
+        const filePath = path.resolve(uploadDir, safeName);
         fs.writeFileSync(filePath, Buffer.from(fileBuffer));
         
         await insertFileAttachService(effYear, displayFileName, safeName, user);
@@ -169,16 +190,25 @@ export const downloadFilePIR = async (c: Context) => {
             return c.json({ message: 'Missing parameters' }, 400);
         }
         
-        const filePath = path.join(process.cwd(), 'uploads', 'pir', effYear, fileId);
+        if (!/^\d{4}$/.test(effYear) || path.basename(fileId) !== fileId) {
+            return c.json({ message: 'Invalid parameters' }, 400);
+        }
+
+        const uploadRoot = path.resolve(process.cwd(), 'uploads', 'pir');
+        const filePath = path.resolve(uploadRoot, effYear, fileId);
+        if (!filePath.startsWith(`${uploadRoot}${path.sep}`)) {
+            return c.json({ message: 'Invalid path' }, 400);
+        }
         
         if (!fs.existsSync(filePath)) {
             return c.json({ message: 'File not found' }, 404);
         }
 
         const fileBuffer = fs.readFileSync(filePath);
+        const headerFileName = toSafeHeaderFilename(fileId, 'pir-file.pdf');
         return c.body(fileBuffer, 200, {
             'Content-Type': 'application/pdf',
-            'Content-Disposition': `inline; filename="${fileId}"`
+            'Content-Disposition': `inline; filename="${headerFileName}"`
         });
     } catch (error: any) {
         console.error('Error getting file:', error);

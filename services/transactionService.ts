@@ -879,20 +879,19 @@ const normalizeDirectApproveTransactionNos = (transactionNos: string[]) => Array
     new Set(
         (transactionNos || [])
             .map((txNo) => normalizeText(txNo).substring(0, 10))
+            .filter((txNo) => /^[A-Za-z0-9_-]+$/.test(txNo))
             .filter(Boolean)
     )
 );
+
+const toTransactionNoCsv = (transactionNos: string[]) => transactionNos.join(',');
 
 const lookupDirectApproveTransactions = async (
     transaction: sql.Transaction,
     transactionNos: string[]
 ): Promise<DirectApproveTransactionRow[]> => {
     const txLookupReq = new sql.Request(transaction);
-    const txNoPlaceholders = transactionNos.map((txNo, idx) => {
-        const param = `TxNo${idx}`;
-        txLookupReq.input(param, sql.VarChar(10), txNo);
-        return `@${param}`;
-    });
+    txLookupReq.input('TransactionNosCsv', sql.VarChar(sql.MAX), toTransactionNoCsv(transactionNos));
 
     const txLookupRes = await txLookupReq.query(`
         SELECT
@@ -909,7 +908,11 @@ const lookupDirectApproveTransactions = async (
                 ELSE 0
             END AS HasDocument
         FROM MP_Transactions t WITH (NOLOCK)
-        WHERE t.TransactionNo IN (${txNoPlaceholders.join(',')})
+        WHERE t.TransactionNo IN (
+            SELECT LTRIM(RTRIM(value))
+            FROM STRING_SPLIT(@TransactionNosCsv, ',')
+            WHERE LTRIM(RTRIM(value)) <> ''
+        )
     `);
 
     return txLookupRes.recordset || [];
@@ -924,11 +927,11 @@ const lookupReturnParentDocuments = async (
     if (returnRows.length === 0) return parentDocByReturnTx;
 
     const returnParentReq = new sql.Request(transaction);
-    const returnPlaceholders = returnRows.map((row, idx) => {
-        const param = `ReturnTx${idx}`;
-        returnParentReq.input(param, sql.VarChar(10), normalizeText(row.TransactionNo).substring(0, 10));
-        return `@${param}`;
-    });
+    returnParentReq.input(
+        'ReturnTransactionNosCsv',
+        sql.VarChar(sql.MAX),
+        toTransactionNoCsv(returnRows.map((row) => normalizeText(row.TransactionNo).substring(0, 10)).filter((txNo) => /^[A-Za-z0-9_-]+$/.test(txNo)))
+    );
     const returnParentRes = await returnParentReq.query(`
         SELECT
             t.TransactionNo,
@@ -938,7 +941,11 @@ const lookupReturnParentDocuments = async (
             ON diBorrow.ItemID = t.RefTransactionNo
         LEFT JOIN MP_Document dBorrow WITH (NOLOCK)
             ON dBorrow.DocumentNo = diBorrow.DocumentNo
-        WHERE t.TransactionNo IN (${returnPlaceholders.join(',')})
+        WHERE t.TransactionNo IN (
+            SELECT LTRIM(RTRIM(value))
+            FROM STRING_SPLIT(@ReturnTransactionNosCsv, ',')
+            WHERE LTRIM(RTRIM(value)) <> ''
+        )
     `);
     (returnParentRes.recordset || []).forEach((row: any) => {
         const txNo = normalizeText(row?.TransactionNo).substring(0, 10);
@@ -1122,11 +1129,11 @@ const getReturnedAmountByBorrowTx = async (pool: sql.ConnectionPool, borrowTrans
     if (borrowTransactionNos.length === 0) return returnedAmountByBorrowTx;
 
     const pendingReq = new sql.Request(pool);
-    const placeholders = borrowTransactionNos.map((txNo, idx) => {
-        const param = `BorrowTx${idx}`;
-        pendingReq.input(param, sql.VarChar(10), txNo);
-        return `@${param}`;
-    });
+    pendingReq.input(
+        'BorrowTransactionNosCsv',
+        sql.VarChar(sql.MAX),
+        toTransactionNoCsv(borrowTransactionNos.map((txNo) => normalizeText(txNo).substring(0, 10)).filter((txNo) => /^[A-Za-z0-9_-]+$/.test(txNo)))
+    );
 
     const pendingSql = `
         SELECT
@@ -1135,7 +1142,11 @@ const getReturnedAmountByBorrowTx = async (pool: sql.ConnectionPool, borrowTrans
         FROM MP_Transactions WITH (NOLOCK)
         WHERE TransactionType = 7
           AND Status IN (1, 2, 3)
-          AND RefTransactionNo IN (${placeholders.join(',')})
+          AND RefTransactionNo IN (
+              SELECT LTRIM(RTRIM(value))
+              FROM STRING_SPLIT(@BorrowTransactionNosCsv, ',')
+              WHERE LTRIM(RTRIM(value)) <> ''
+          )
         GROUP BY RefTransactionNo
     `;
     const pendingRes = await pendingReq.query(pendingSql);
@@ -1374,19 +1385,14 @@ const getTransactionNosFromRows = (rows: any[]) => Array.from(
     new Set(
         rows
             .map((row: any) => String(row?.TransactionNo || '').trim())
+            .filter((txNo) => /^[A-Za-z0-9_-]+$/.test(txNo))
             .filter(Boolean)
     )
 );
 
-const buildReturnTransactionPlaceholders = (request: sql.Request, transactionNos: string[]) => transactionNos.map((txNo, idx) => {
-    const paramName = 'ReturnTx' + idx;
-    request.input(paramName, sql.VarChar(10), txNo);
-    return '@' + paramName;
-});
-
 const getReturnTransactionDetails = async (pool: sql.ConnectionPool, transactionNos: string[]) => {
     const detailReq = new sql.Request(pool);
-    const placeholders = buildReturnTransactionPlaceholders(detailReq, transactionNos);
+    detailReq.input('ReturnTransactionNosCsv', sql.VarChar(sql.MAX), toTransactionNoCsv(transactionNos));
     const detailSql = `
         SELECT
             t.TransactionNo,
@@ -1400,7 +1406,11 @@ const getReturnTransactionDetails = async (pool: sql.ConnectionPool, transaction
             t.SpecFlag,
             t.LineStaffFlag
         FROM MP_Transactions t WITH (NOLOCK)
-        WHERE t.TransactionNo IN (${placeholders.join(',')})
+        WHERE t.TransactionNo IN (
+            SELECT LTRIM(RTRIM(value))
+            FROM STRING_SPLIT(@ReturnTransactionNosCsv, ',')
+            WHERE LTRIM(RTRIM(value)) <> ''
+        )
     `;
 
     const detailResult = await detailReq.query(detailSql);
@@ -1465,6 +1475,16 @@ const executeHRCenterOrgUnitProcedure = async (
     employeeId: string,
     userGroupNo: string
 ) => {
+    const allowedProcedures = new Set([
+        "mp_HRCenter_OrgUnit_GetDataByEffDate_ByChild",
+        "mp_HRCenter_OrgUnit_GetDataAll_ByChild",
+        "mp_HRCenter_OrgUnit_GetTrans",
+        "mp_HRCenter_OrgUnit_GetAll"
+    ]);
+    if (!allowedProcedures.has(procedureName)) {
+        throw new Error("Unsupported HR Center procedure");
+    }
+
     const req = new sql.Request(pool);
     req.input("EffectiveDate", sql.Date, toSqlDateOnly(effectiveDate));
     req.input("EmployeeID", sql.VarChar(10), employeeId);

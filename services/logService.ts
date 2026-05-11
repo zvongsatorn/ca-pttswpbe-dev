@@ -14,6 +14,11 @@ const executeLogActionProcedure = async (
     fromDate: Date,
     toDate: Date
 ): Promise<Record<string, unknown>[]> => {
+    const allowedProcedures = new Set(['mp_LogActionUserGet', 'mp_LogActionExportExcel']);
+    if (!allowedProcedures.has(procedureName)) {
+        throw new Error('Unsupported log action procedure');
+    }
+
     try {
         const pool = await poolPromise;
         const request = new sql.Request(pool);

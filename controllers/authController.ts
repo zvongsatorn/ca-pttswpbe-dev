@@ -107,7 +107,7 @@ const signLoginToken = (user: { EmployeeID: string; Name: string; Email: string 
             profilePicture: userData.ProfilePicture || '',
         },
         secretKey,
-        { expiresIn: '1d' }
+        { expiresIn: '8h' }
     );
 };
 const getSsoCaaData = async (type: string, accessToken: string, systemToken: string) => {

@@ -29,6 +29,18 @@ import { existsSync } from 'fs';
 import path from 'path';
 
 const THAI_MONTH_NAMES = ['มกราคม', 'กุมภาพันธ์', 'มีนาคม', 'เมษายน', 'พฤษภาคม', 'มิถุนายน', 'กรกฎาคม', 'สิงหาคม', 'กันยายน', 'ตุลาคม', 'พฤศจิกายน', 'ธันวาคม'];
+const TRANSACTION_FILE_EXTENSIONS = new Set(['.pdf', '.xlsx', '.xls', '.doc', '.docx', '.png', '.jpg', '.jpeg']);
+
+const toSafeHeaderFilename = (value: unknown, fallback: string): string => {
+    const baseName = path.basename(String(value || fallback));
+    const safeName = baseName.replace(/[\r\n"\\;]/g, '_').replace(/[^\w.\- ]/g, '_').trim();
+    return safeName || fallback;
+};
+
+const toSafeUploadExtension = (value: unknown, fallback: string): string => {
+    const extension = path.extname(String(value || '')).toLowerCase();
+    return TRANSACTION_FILE_EXTENSIONS.has(extension) ? extension : fallback;
+};
 
 const parseEffectiveDateForStructureDebug = (
     monthRaw: unknown,
@@ -141,8 +153,7 @@ const saveUploadedTransactionFile = async (fileEntry: File | null): Promise<{ fi
     }
 
     const originalName = fileEntry.name;
-    let extension = path.extname(originalName).toLowerCase();
-    if (!extension) extension = ".pdf";
+    const extension = toSafeUploadExtension(originalName, ".pdf");
 
     const { randomUUID } = await import("crypto");
     const safeName = randomUUID() + extension;
@@ -581,9 +592,10 @@ export const downloadHRCenterSapFile = async (c: Context) => {
 
         const file = await getHRCenterSapOutboundFileBufferService();
         const fileContent = Uint8Array.from(file.content);
+        const fileName = toSafeHeaderFilename(file.fileName, 'hrcenter_sap_outbound.txt');
         return c.body(fileContent, 200, {
             'Content-Type': 'text/plain; charset=utf-8',
-            'Content-Disposition': `attachment; filename="${file.fileName}"`,
+            'Content-Disposition': `attachment; filename="${fileName}"`,
             'Cache-Control': 'no-store'
         });
     } catch (error: any) {

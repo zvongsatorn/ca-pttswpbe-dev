@@ -46,6 +46,19 @@ const normalizeUserGroupNo = (value: string): string => {
     return /^\d+$/.test(trimmed) ? trimmed.padStart(2, '0') : trimmed;
 };
 
+const MKD_FILE_EXTENSIONS = new Set(['.pdf', '.xlsx', '.xls', '.png', '.jpg', '.jpeg']);
+
+const toSafeHeaderFilename = (value: unknown, fallback: string): string => {
+    const baseName = path.basename(String(value || fallback));
+    const safeName = baseName.replace(/[\r\n"\\;]/g, '_').replace(/[^\w.\- ]/g, '_').trim();
+    return safeName || fallback;
+};
+
+const toSafeUploadExtension = (value: unknown, fallback: string): string => {
+    const extension = path.extname(String(value || '')).toLowerCase();
+    return MKD_FILE_EXTENSIONS.has(extension) ? extension : fallback;
+};
+
 export const getStartYear = async (c: Context) => {
     try {
         const result = await getStartYearService();
@@ -364,18 +377,17 @@ export const uploadFile = async (c: Context) => {
         
         // Fetch RequestNo to use as folder name
         const details = await getMKDDetailsService(id);
-        const requestNo = details?.header?.RequestNo || `ID_${id}`;
+        const requestNo = getMkdRequestNo(details, id);
         
-        const uploadDir = path.join(process.cwd(), 'uploads', 'mkd', requestNo);
+        const uploadDir = resolveMkdUploadPath(requestNo);
         if (!fs.existsSync(uploadDir)) {
             fs.mkdirSync(uploadDir, { recursive: true });
         }
         
-        let extension = path.extname(fileName).toLowerCase();
-        if (!extension) extension = ".pdf";
+        const extension = toSafeUploadExtension(fileName, ".pdf");
         
         const safeName = `${randomUUID()}${extension}`;
-        const filePath = path.join(uploadDir, safeName);
+        const filePath = resolveMkdUploadPath(requestNo, safeName);
         fs.writeFileSync(filePath, Buffer.from(fileBuffer));
         
         // Save ONLY the filename in FileUpload column to match 50-char limit
@@ -659,7 +671,24 @@ type ManDriverFileError = {
     body: Record<string, unknown>;
 };
 
-const getMkdRequestNo = (details: any, id: string) => details?.header?.RequestNo || 'ID_' + id;
+const SAFE_UPLOAD_SEGMENT_PATTERN = /^[A-Za-z0-9._-]+$/;
+const MKD_UPLOAD_ROOT = path.resolve(process.cwd(), 'uploads', 'mkd');
+
+const toSafeUploadSegment = (value: unknown, fallback = ''): string => {
+    const segment = path.basename(String(value || fallback).trim());
+    if (!segment || segment !== String(value || fallback).trim() || !SAFE_UPLOAD_SEGMENT_PATTERN.test(segment)) {
+        throw new Error('Invalid upload path segment');
+    }
+    return segment;
+};
+
+const getMkdRequestNo = (details: any, id: string) => toSafeUploadSegment(details?.header?.RequestNo || `ID_${id}`);
+
+const resolveMkdUploadPath = (...segments: string[]): string => {
+    const fullPath = path.resolve(MKD_UPLOAD_ROOT, ...segments.map((segment) => toSafeUploadSegment(segment)));
+    if (fullPath !== MKD_UPLOAD_ROOT && fullPath.startsWith(`${MKD_UPLOAD_ROOT}${path.sep}`)) return fullPath;
+    throw new Error('Invalid MKD upload path');
+};
 
 const normalizeMkdUserId = (value: unknown) => String(value || '').trim().replace(/^0+/, '');
 
@@ -668,15 +697,15 @@ const saveUploadedManDriverFile = async (id: string, file: File): Promise<ManDri
     const fileBuffer = await file.arrayBuffer();
     const details = await getMKDDetailsService(id);
     const requestNo = getMkdRequestNo(details, id);
-    const uploadDir = path.join(process.cwd(), 'uploads', 'mkd', requestNo);
+    const uploadDir = resolveMkdUploadPath(requestNo);
 
     if (!fs.existsSync(uploadDir)) {
         fs.mkdirSync(uploadDir, { recursive: true });
     }
 
-    const extension = path.extname(displayFileName).toLowerCase() || '.pdf';
+    const extension = toSafeUploadExtension(displayFileName, '.pdf');
     const safeName = randomUUID() + extension;
-    fs.writeFileSync(path.join(uploadDir, safeName), Buffer.from(fileBuffer));
+    fs.writeFileSync(resolveMkdUploadPath(requestNo, safeName), Buffer.from(fileBuffer));
 
     return { displayFileName, safeName };
 };
@@ -713,7 +742,7 @@ const reuseExistingManDriverFile = async (
         };
     }
 
-    const sourceFilePath = path.join(process.cwd(), 'uploads', 'mkd', sourceRequestNo, existingFileUpload);
+    const sourceFilePath = resolveMkdUploadPath(sourceRequestNo, existingFileUpload);
     if (!fs.existsSync(sourceFilePath)) {
         return {
             displayFileName: '',
@@ -727,14 +756,14 @@ const reuseExistingManDriverFile = async (
         return { displayFileName, safeName: existingFileUpload };
     }
 
-    const targetUploadDir = path.join(process.cwd(), 'uploads', 'mkd', targetRequestNo);
+    const targetUploadDir = resolveMkdUploadPath(targetRequestNo);
     if (!fs.existsSync(targetUploadDir)) {
         fs.mkdirSync(targetUploadDir, { recursive: true });
     }
 
-    const extension = path.extname(existingFileUpload).toLowerCase() || '.pdf';
+    const extension = toSafeUploadExtension(existingFileUpload, '.pdf');
     const safeName = randomUUID() + extension;
-    fs.copyFileSync(sourceFilePath, path.join(targetUploadDir, safeName));
+    fs.copyFileSync(sourceFilePath, resolveMkdUploadPath(targetRequestNo, safeName));
 
     return { displayFileName, safeName };
 };
@@ -803,7 +832,7 @@ export const getFile = async (c: Context) => {
         const details = await getMKDDetailsService(id);
         const requestNo = details?.header?.RequestNo || `ID_${id}`;
         
-        const filePath = path.join(process.cwd(), 'uploads', 'mkd', requestNo, fileId);
+        const filePath = resolveMkdUploadPath(requestNo, fileId);
         console.log('[DEBUG] getFile:', { id, fileId, requestNo, filePath, exists: fs.existsSync(filePath) });
         
         if (!fs.existsSync(filePath)) {
@@ -811,9 +840,10 @@ export const getFile = async (c: Context) => {
         }
 
         const fileBuffer = fs.readFileSync(filePath);
+        const headerFileName = toSafeHeaderFilename(fileId, 'mkd-file.pdf');
         return c.body(fileBuffer, 200, {
             'Content-Type': 'application/pdf',
-            'Content-Disposition': `inline; filename="${fileId}"`
+            'Content-Disposition': `inline; filename="${headerFileName}"`
         });
     } catch (error: any) {
         console.error('Error getting file:', error);
@@ -833,7 +863,8 @@ export const filesProxy = async (c: Context) => {
             return c.json({ message: 'Invalid path' }, 403);
         }
 
-        const fullPath = path.join(process.cwd(), 'uploads', 'mkd', filePathParam);
+        const safePathParts = filePathParam.split('/').filter(Boolean).map((part) => toSafeUploadSegment(part));
+        const fullPath = resolveMkdUploadPath(...safePathParts);
         
         if (!fs.existsSync(fullPath)) {
             console.log('[Proxy Logic] File not found:', fullPath);
@@ -841,7 +872,7 @@ export const filesProxy = async (c: Context) => {
         }
 
         const fileBuffer = fs.readFileSync(fullPath);
-        const fileName = path.basename(fullPath);
+        const fileName = toSafeHeaderFilename(path.basename(fullPath), 'mkd-file');
         const extension = path.extname(fileName).toLowerCase();
 
         // Map extension to content type
