@@ -11,17 +11,40 @@ const toPositiveInt = (value: string | undefined, fallback: number): number => {
 const dbConnectionTimeout = toPositiveInt(process.env.DB_CONNECTION_TIMEOUT_MS, 30000);
 const dbRequestTimeout = toPositiveInt(process.env.DB_REQUEST_TIMEOUT_MS, 30000);
 const trustServerCertificate = process.env.DB_TRUST_SERVER_CERTIFICATE === 'true';
-const dbServer = String(process.env.DB_SERVER || '').trim();
-const dbDatabase = String(process.env.DB_DATABASE || '').trim();
+type SafeDbHost = string & { readonly __safeDbHost: unique symbol };
+type SafeDbName = string & { readonly __safeDbName: unique symbol };
+
+const getAllowedDbHostSuffixes = (): string[] => String(process.env.DB_ALLOWED_HOST_SUFFIXES || '')
+    .split(',')
+    .map((item) => item.trim().toLowerCase())
+    .filter(Boolean);
+
+const toSafeDbHost = (value: string | undefined): SafeDbHost => {
+    const host = String(value || '').trim();
+    if (!/^[A-Za-z0-9._-]+$/.test(host)) {
+        throw new Error('Invalid DB_SERVER format');
+    }
+
+    const normalized = host.toLowerCase();
+    const allowedSuffixes = getAllowedDbHostSuffixes();
+    if (allowedSuffixes.length > 0 && !allowedSuffixes.some((suffix) => normalized === suffix || normalized.endsWith(`.${suffix}`))) {
+        throw new Error('DB_SERVER host is not allowed');
+    }
+
+    return host as SafeDbHost;
+};
+
+const toSafeDbName = (value: string | undefined): SafeDbName => {
+    const database = String(value || '').trim();
+    if (!/^[A-Za-z0-9._-]+$/.test(database)) {
+        throw new Error('Invalid DB_DATABASE format');
+    }
+    return database as SafeDbName;
+};
+
+const dbServer = toSafeDbHost(process.env.DB_SERVER);
+const dbDatabase = toSafeDbName(process.env.DB_DATABASE);
 const dbPort = toPositiveInt(process.env.DB_PORT, 1433);
-
-if (!/^[A-Za-z0-9._-]+$/.test(dbServer)) {
-    throw new Error('Invalid DB_SERVER format');
-}
-
-if (!/^[A-Za-z0-9._-]+$/.test(dbDatabase)) {
-    throw new Error('Invalid DB_DATABASE format');
-}
 
 if (dbPort > 65535) {
     throw new Error('Invalid DB_PORT format');

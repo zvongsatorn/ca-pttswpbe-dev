@@ -2,6 +2,7 @@ import { sql, poolPromise } from '../config/db.js';
 import { sendMail, resolveMailRecipient } from './mailService.js';
 import { createMailLog } from './mailLogService.js';
 import { resetSentSapStatusForTransactions } from './sapSendStatusService.js';
+import { queryAllowlistedSql, toAllowlistedSql } from './sqlSafetyUtils.js';
 
 const sendMailWithLog = async (params: {
     recipient: string | null;
@@ -416,7 +417,7 @@ const getTransactionRowsByNos = async (pool: sql.ConnectionPool, transactionNos:
             )
         `;
 
-        const result = await request.query(query);
+        const result = await queryAllowlistedSql(request, toAllowlistedSql(query));
         return (result.recordset || []).map((row: any) => {
             const transactionType = Number(row?.TransactionType);
             return {

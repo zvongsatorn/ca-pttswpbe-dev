@@ -5,7 +5,9 @@ import {
     buildSqlFragmentList,
     buildSqlInParams,
     escapeSqlIdentifier,
-    pickColumnName
+    pickColumnName,
+    queryAllowlistedSql,
+    toAllowlistedSql
 } from './sqlSafetyUtils.js';
 
 export interface CostPayload {
@@ -373,10 +375,10 @@ const insertCostRecord = async (
     const request = pool.request();
     bindCostPayload(request, payload);
 
-    await request.query(`
+    await queryAllowlistedSql(request, toAllowlistedSql(`
         INSERT INTO ${tableSource} (${insertColumns})
         VALUES (${insertValues})
-    `);
+    `));
 };
 
 const updateCostByKey = async (
@@ -407,11 +409,11 @@ const updateCostByKey = async (
     const request = pool.request();
     bindCostPayload(request, payload);
 
-    const result = await request.query(`
+    const result = await queryAllowlistedSql(request, toAllowlistedSql(`
         UPDATE ${tableSource}
         SET ${updateSetSql}
         WHERE ${keyMatchCondition(resolved)}
-    `);
+    `));
 
     return result.rowsAffected?.[0] || 0;
 };
@@ -425,11 +427,11 @@ const existsCostByKey = async (
     const request = pool.request();
     bindCostPayload(request, payload);
 
-    const result = await request.query(`
+    const result = await queryAllowlistedSql(request, toAllowlistedSql(`
         SELECT TOP (1) 1 AS exists_flag
         FROM ${tableSource}
         WHERE ${keyMatchCondition(resolved)}
-    `);
+    `));
 
     return Array.isArray(result.recordset) && result.recordset.length > 0;
 };
@@ -456,10 +458,9 @@ export const getCostRecordsService = async (fromDate: string, toDate: string): P
     const tableSource = buildCostTableSource(resolved);
     const orderBySql = buildCostOrderBySql(resolved, 'src');
 
-    const result = await pool.request()
+    const result = await queryAllowlistedSql(pool.request()
         .input('FromDate', sql.Date, fromDate)
-        .input('ToDate', sql.Date, toDate)
-        .query(`
+        .input('ToDate', sql.Date, toDate), toAllowlistedSql(`
             SELECT
                 LTRIM(RTRIM(CAST(src.${escapeSqlIdentifier(resolved.orgCol)} AS nvarchar(64)))) AS OrgUnitNo,
                 LTRIM(RTRIM(CAST(src.${escapeSqlIdentifier(resolved.levelCol)} AS nvarchar(32)))) AS LevelGroupNo,
@@ -473,7 +474,7 @@ export const getCostRecordsService = async (fromDate: string, toDate: string): P
             WHERE 1 = 1
             ${rangeDateCondition(resolved, 'src')}
             ORDER BY ${orderBySql}
-        `);
+        `));
 
     const rows = Array.isArray(result.recordset)
         ? (result.recordset as Array<Record<string, unknown>>)
@@ -550,7 +551,7 @@ export const updateCostRecordService = async (
     bindCostPayload(request, original, 'Original');
     bindCostPayload(request, next, 'Next');
 
-    const result = await request.query(`
+    const result = await queryAllowlistedSql(request, toAllowlistedSql(`
         ;WITH target AS (
             SELECT TOP (1) *
             FROM ${tableSource}
@@ -559,7 +560,7 @@ export const updateCostRecordService = async (
         )
         UPDATE target
         SET ${updateSetSql}
-    `);
+    `));
 
     return (result.rowsAffected?.[0] || 0) > 0;
 };
@@ -573,7 +574,7 @@ export const deleteCostRecordService = async (original: CostPayload): Promise<bo
     const request = pool.request();
     bindCostPayload(request, original, 'Original');
 
-    const result = await request.query(`
+    const result = await queryAllowlistedSql(request, toAllowlistedSql(`
         ;WITH target AS (
             SELECT TOP (1) *
             FROM ${tableSource}
@@ -581,7 +582,7 @@ export const deleteCostRecordService = async (original: CostPayload): Promise<bo
             ORDER BY ${orderBySql}
         )
         DELETE FROM target
-    `);
+    `));
 
     return (result.rowsAffected?.[0] || 0) > 0;
 };

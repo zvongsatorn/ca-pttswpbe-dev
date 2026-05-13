@@ -365,7 +365,7 @@ export const getReport1ExcelData = async (c: Context) => {
             return c.json({ status: 400, message: "Missing required parameters: effectiveDate, employeeId" }, 400);
         }
 
-        console.log('[Backend Excel] Starting generation for ' + effectiveDateStr + ', employee: ' + employeeId);
+        console.log('[Backend Excel] Starting report 1 Excel generation.');
         const data = await getReport1ExcelDataService(effectiveDateStr, employeeId, userGroupNo);
 
         if (!data || data.length === 0) {

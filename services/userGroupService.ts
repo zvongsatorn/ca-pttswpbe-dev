@@ -262,12 +262,12 @@ class UserGroupService {
 
     async getGroupsForUser(employeeID: string) {
         const pool = await poolPromise;
-        console.log(`Fetching groups for user: ${employeeID}`);
+        console.log('Fetching groups for user.');
         const result = await pool.request()
             .input('EmployeeID', sql.VarChar(8), employeeID)
             .execute('mp_UserInGroupByEmployeeID');
 
-        console.log(`Found ${result.recordset.length} groups for user ${employeeID}`);
+        console.log(`Found ${result.recordset.length} groups for user.`);
         return result.recordset.map((row: any) => ({
             userGroupNo: row.UserGroupNo,
             userGroupName: row.UserGroupName,

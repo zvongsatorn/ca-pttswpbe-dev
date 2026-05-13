@@ -2,6 +2,7 @@ import { sql, poolPromise } from '../config/db.js';
 import configService from './configService.js';
 import { sendMail } from './mailService.js';
 import { createMailLog } from './mailLogService.js';
+import { queryAllowlistedSql, toAllowlistedSql } from './sqlSafetyUtils.js';
 
 export type AlertType = 'START' | 'END';
 type SendMode = '0' | '1' | '2';
@@ -174,7 +175,7 @@ const getTransactionLookupRows = async (transactionNos: string[]): Promise<Trans
             )
         `;
 
-        const result = await request.query(query);
+        const result = await queryAllowlistedSql(request, toAllowlistedSql(query));
         return (result.recordset || []).map((row: any) => {
             const transactionType = Number(row?.TransactionType);
             return {
@@ -214,7 +215,7 @@ const getTransactionItemsByDocumentNo = async (documentNo: string): Promise<Debu
             ORDER BY d.ItemID, t.TransactionType
         `;
 
-        const result = await request.query(query);
+        const result = await queryAllowlistedSql(request, toAllowlistedSql(query));
         return (result.recordset || [])
             .map((row: any) => ({
                 transactionNo: String(row?.TransactionNo || '').trim(),
@@ -624,7 +625,7 @@ const processOneRecipient = async (params: {
     });
 
     if (sendResult.isSend === 0) {
-        console.log(`[MailAlertScheduler] ${sendResult.message} (${recipient.Email})`);
+        console.log(`[MailAlertScheduler] ${sendResult.message}`);
     }
 
     await createMailLog({
@@ -679,7 +680,7 @@ const processAlertByType = async (alertType: AlertType, configType: number, toda
                 addressLoginUrl
             });
         } catch (error) {
-            console.error(`[MailAlertScheduler] Failed recipient ${recipient.EmployeeID}/${recipient.Email}:`, error);
+            console.error('[MailAlertScheduler] Failed recipient while sending alert:', error);
         }
     }
 

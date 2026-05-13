@@ -24,8 +24,13 @@ import {
     getHRCenterSapOutboundFileMetaService
 } from '../services/hrcenterSapService.js';
 import { validateTransactionCreationWindowService } from '../services/calendarService.js';
-import { writeFile, mkdir } from 'fs/promises';
-import { existsSync } from 'fs';
+import {
+    resolveSafeChildPath,
+    safeExistsSync,
+    safeMkdirSync,
+    safeWriteFileSync,
+    type SafeFilePath
+} from '../services/fileSafetyUtils.js';
 import path from 'path';
 
 const THAI_MONTH_NAMES = ['มกราคม', 'กุมภาพันธ์', 'มีนาคม', 'เมษายน', 'พฤษภาคม', 'มิถุนายน', 'กรกฎาคม', 'สิงหาคม', 'กันยายน', 'ตุลาคม', 'พฤศจิกายน', 'ธันวาคม'];
@@ -43,17 +48,13 @@ const toSafeUploadExtension = (value: unknown, fallback: string): string => {
     return TRANSACTION_FILE_EXTENSIONS.has(extension) ? extension : fallback;
 };
 
-const resolveTransactionUploadPath = (filename: string): string => {
+const resolveTransactionUploadPath = (filename: string): SafeFilePath => {
     const safeFilename = path.basename(filename || '');
     if (!safeFilename || safeFilename !== filename) {
         throw new Error('Invalid transaction upload filename');
     }
 
-    const filePath = path.resolve(TRANSACTION_UPLOAD_ROOT, safeFilename);
-    if (!filePath.startsWith(`${TRANSACTION_UPLOAD_ROOT}${path.sep}`)) {
-        throw new Error('Invalid transaction upload path');
-    }
-    return filePath;
+    return resolveSafeChildPath(TRANSACTION_UPLOAD_ROOT, [safeFilename]);
 };
 
 const parseEffectiveDateForStructureDebug = (
@@ -161,8 +162,9 @@ const parseDraftRequest = async (c: Context): Promise<{ body: Record<string, any
 const saveUploadedTransactionFile = async (fileEntry: File | null): Promise<{ fileName: string | null; fileUrl: string | undefined } | null> => {
     if (!fileEntry) return null;
 
-    if (!existsSync(TRANSACTION_UPLOAD_ROOT)) {
-        await mkdir(TRANSACTION_UPLOAD_ROOT, { recursive: true });
+    const uploadRoot = resolveSafeChildPath(TRANSACTION_UPLOAD_ROOT, []);
+    if (!safeExistsSync(uploadRoot)) {
+        safeMkdirSync(uploadRoot);
     }
 
     const originalName = fileEntry.name;
@@ -172,7 +174,7 @@ const saveUploadedTransactionFile = async (fileEntry: File | null): Promise<{ fi
     const safeName = randomUUID() + extension;
     const savedFilePath = resolveTransactionUploadPath(safeName);
     const fileBuffer = Buffer.from(await fileEntry.arrayBuffer());
-    await writeFile(savedFilePath, fileBuffer);
+    safeWriteFileSync(savedFilePath, fileBuffer);
 
     return { fileName: originalName, fileUrl: safeName };
 };
@@ -324,7 +326,7 @@ export const deleteDraftTransaction = async (c: Context) => {
     try {
         const id = c.req.param('id')?.trim();
         const employeeId = c.req.query('employeeId')?.trim() || 'SYSTEM';
-        console.log(`[DELETE /draft/:id] Requested delete for TransactionNo: '${id}', by: '${employeeId}'`);
+        console.log('[DELETE /draft/:id] Requested draft transaction delete.');
 
         if (!id) {
             return c.json({ status: 400, message: "Transaction ID is required" }, 400);

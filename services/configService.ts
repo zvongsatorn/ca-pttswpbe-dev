@@ -108,11 +108,11 @@ class ConfigService {
     }
 
     private resolveNativeResponse(data: string, statusCode: number | undefined, resolve: (value: any) => void, reject: (reason?: any) => void) {
-        console.log("[configService] Native Response status: " + statusCode);
+        console.log("[configService] Native response status: " + statusCode);
 
         if (statusCode && statusCode >= 400) {
-            console.error("[configService] Request failed with status " + statusCode + ": " + data);
-            reject(new Error("HTTP " + statusCode + ": " + (data || "Request failed")));
+            console.error("[configService] Request failed with status " + statusCode);
+            reject(new Error("HTTP " + statusCode + ": Request failed"));
             return;
         }
 
@@ -163,10 +163,8 @@ class ConfigService {
     }
 
     private decodeTokenObject(encodedData: string): any {
-        console.log("[configService] Data snippet: " + encodedData.substring(0, 20) + "...");
         const decodedString = Buffer.from(encodedData, "base64").toString("utf-8");
-        console.log("[configService] Decoded Data length: " + decodedString.length);
-        console.log("[configService] Decoded snippet: " + decodedString.substring(0, 50) + "...");
+        console.log("[configService] Decoding CA&A token response.");
 
         let tokenObject = JSON.parse(decodedString);
         if (typeof tokenObject === "string") tokenObject = JSON.parse(tokenObject);
@@ -180,8 +178,7 @@ class ConfigService {
             const tokenObject = this.decodeTokenObject(data.Data);
             return tokenObject.access_token || "";
         } catch (e: any) {
-            console.error("[configService] Initial JSON parse failed:", e.message);
-            console.error("Error decoding CAA token data:", e);
+            console.error("[configService] Error decoding CA&A token data:", e.message);
             return "";
         }
     }
@@ -198,7 +195,7 @@ class ConfigService {
      */
     public async curlRequest(url: string, method: string, headers: Record<string, string>, payload?: any): Promise<any> {
         return new Promise((resolve, reject) => {
-            console.log("[configService] Fetching (NATIVE): " + method + " " + url);
+            console.log("[configService] Fetching CA&A endpoint with native HTTPS: " + method);
 
             const bodyStr = payload ? JSON.stringify(payload) : undefined;
             const parsedUrl = this.assertSafeOutboundUrl(url);
@@ -249,7 +246,7 @@ class ConfigService {
 
             const tokenUrl = this.buildCaaUrl(baseUrl, "auth/getJWT");
             const authHeader = "Basic " + Buffer.from(username + ":" + password).toString("base64");
-            console.log("[configService] Fetching token from: " + tokenUrl + " with user: " + username);
+            console.log("[configService] Fetching CA&A token.");
 
             const data: any = await this.curlRequest(tokenUrl, "POST", { "Authorization": authHeader });
             console.log("[configService] Token response keys:", Object.keys(data || {}));

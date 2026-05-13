@@ -3,6 +3,14 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { randomUUID } from 'crypto';
 import {
+    resolveSafeChildPath,
+    safeExistsSync,
+    safeMkdirSync,
+    safeReadFileSync,
+    safeWriteFileSync,
+    type SafeFilePath
+} from '../services/fileSafetyUtils.js';
+import {
     getPIRService,
     insertPIRService,
     deletePIRService,
@@ -36,17 +44,19 @@ const isSafeGeneratedFileName = (value: unknown): boolean => {
 
 const TEMPLATE_ROOT = path.resolve(process.cwd(), 'template');
 
-const resolveTemplatePath = (filename: string): string => {
+const resolveTemplatePath = (filename: string): SafeFilePath => {
     const safeFilename = path.basename(filename || '');
     if (!safeFilename || safeFilename !== filename || !/^[\w.-]+\.xlsx$/i.test(safeFilename)) {
         throw new Error('Invalid template filename');
     }
 
-    const templatePath = path.resolve(TEMPLATE_ROOT, safeFilename);
-    if (!templatePath.startsWith(`${TEMPLATE_ROOT}${path.sep}`)) {
-        throw new Error('Invalid template path');
-    }
-    return templatePath;
+    return resolveSafeChildPath(TEMPLATE_ROOT, [safeFilename]);
+};
+
+const PIR_UPLOAD_ROOT = path.resolve(process.cwd(), 'uploads', 'pir');
+
+const resolvePirUploadPath = (...segments: string[]): SafeFilePath => {
+    return resolveSafeChildPath(PIR_UPLOAD_ROOT, segments);
 };
 
 // --- Tab 1: PIR ---
@@ -177,23 +187,16 @@ export const uploadFilePIR = async (c: Context) => {
             return c.json({ message: 'Invalid effYear' }, 400);
         }
 
-        const uploadRoot = path.resolve(process.cwd(), 'uploads', 'pir');
-        const uploadDir = path.resolve(uploadRoot, safeEffYear);
-        if (!uploadDir.startsWith(`${uploadRoot}${path.sep}`)) {
-            return c.json({ message: 'Invalid upload path' }, 400);
-        }
-        if (!fs.existsSync(uploadDir)) {
-            fs.mkdirSync(uploadDir, { recursive: true });
+        const uploadDir = resolvePirUploadPath(safeEffYear);
+        if (!safeExistsSync(uploadDir)) {
+            safeMkdirSync(uploadDir);
         }
         
         const extension = toSafeUploadExtension(fileName, ".pdf");
         
         const safeName = `${randomUUID()}${extension}`;
-        const filePath = path.resolve(uploadDir, safeName);
-        if (!filePath.startsWith(`${uploadDir}${path.sep}`)) {
-            return c.json({ message: 'Invalid upload path' }, 400);
-        }
-        fs.writeFileSync(filePath, Buffer.from(fileBuffer));
+        const filePath = resolvePirUploadPath(safeEffYear, safeName);
+        safeWriteFileSync(filePath, Buffer.from(fileBuffer));
         
         await insertFileAttachService(effYear, displayFileName, safeName, user);
         return c.json({ success: true, message: "File uploaded successfully" }, 200);
@@ -216,17 +219,13 @@ export const downloadFilePIR = async (c: Context) => {
             return c.json({ message: 'Invalid parameters' }, 400);
         }
 
-        const uploadRoot = path.resolve(process.cwd(), 'uploads', 'pir');
-        const filePath = path.resolve(uploadRoot, effYear, fileId);
-        if (!filePath.startsWith(`${uploadRoot}${path.sep}`)) {
-            return c.json({ message: 'Invalid path' }, 400);
-        }
+        const filePath = resolvePirUploadPath(effYear, fileId);
         
-        if (!fs.existsSync(filePath)) {
+        if (!safeExistsSync(filePath)) {
             return c.json({ message: 'File not found' }, 404);
         }
 
-        const fileBuffer = fs.readFileSync(filePath);
+        const fileBuffer = safeReadFileSync(filePath);
         const headerFileName = toSafeHeaderFilename(fileId, 'pir-file.pdf');
         return c.body(fileBuffer, 200, {
             'Content-Type': 'application/pdf',
@@ -319,7 +318,7 @@ export const exportExcel = async (c: Context) => {
         const effMonthStr = effectiveMonth.length === 1 ? `0${effectiveMonth}` : effectiveMonth;
         const formattedDate = `${effectiveYear}-${effMonthStr}-01`;
 
-        console.log('Export Params:', { formattedDate, userGroupNo, employeeId, effectiveYear, bgNo, divisionNo, orgUnitNo });
+        console.log('PIR export requested.');
         const result = await getExportExcelService(
             formattedDate,
             userGroupNo,
@@ -340,11 +339,11 @@ export const getPIRTemplate = async (c: Context) => {
     try {
         const filePath = resolveTemplatePath('templateimproverate.xlsx');
         
-        if (!fs.existsSync(filePath)) {
+        if (!safeExistsSync(filePath)) {
             return c.json({ success: false, message: 'Template file not found' }, 404);
         }
 
-        const fileBuffer = fs.readFileSync(filePath);
+        const fileBuffer = safeReadFileSync(filePath);
         return c.body(fileBuffer, 200, {
             'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
             'Content-Disposition': 'attachment; filename="templateimproverate.xlsx"'

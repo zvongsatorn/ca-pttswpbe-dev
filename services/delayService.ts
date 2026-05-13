@@ -63,6 +63,12 @@ type TableMeta = {
     columns: Map<string, string>;
 };
 
+type TableMetaSelection = {
+    row: GenericRow;
+    schemaName: string;
+    tableName: string;
+};
+
 type GenericRow = Record<string, unknown>;
 
 type EmployeeProfileResult = {
@@ -123,6 +129,9 @@ type EmployeeOptionsQueryContext = EmployeeOrgMetaQueryContext & {
     effectiveDate: Date;
 };
 
+type DelayObjectType = 'U' | 'IF' | 'TF';
+type AllowlistedSql = string & { readonly __allowlistedSql: unique symbol };
+
 const INFO_TABLE_CANDIDATES = ['InfoData', 'infodata'];
 const POSITION_TABLE_CANDIDATES = ['fn_InterfacePosition', 'InterfacePosition', 'interfaceposition'];
 const DELAY_METADATA_SCHEMA_CANDIDATES = ['dbo', 'db_owner'];
@@ -148,10 +157,77 @@ const UNIT_NAME_COL_CANDIDATES = ['UnitName', 'OrgUnitName', 'Name'];
 const UNIT_ABBR_COL_CANDIDATES = ['UnitAbbr', 'OrgUnitAbbr', 'ShortName', 'Abbr'];
 const UNIT_BG_COL_CANDIDATES = ['BGNo', 'BgNo', 'BGNO'];
 const NON_COUNT_DELAY_YEAR = 9999;
+const ALLOWED_OBJECT_FULL_NAMES: Record<string, string> = {
+    'dbo.InfoData': '[dbo].[InfoData]',
+    'dbo.infodata': '[dbo].[infodata]',
+    'dbo.fn_InterfacePosition': '[dbo].[fn_InterfacePosition]',
+    'dbo.InterfacePosition': '[dbo].[InterfacePosition]',
+    'dbo.interfaceposition': '[dbo].[interfaceposition]',
+    'dbo.MP_Delay': '[dbo].[MP_Delay]',
+    'dbo.mp_delay': '[dbo].[mp_delay]',
+    'dbo.fn_InterfaceUnit': '[dbo].[fn_InterfaceUnit]',
+    'dbo.InterfaceUnit': '[dbo].[InterfaceUnit]',
+    'dbo.interfaceunit': '[dbo].[interfaceunit]',
+    'db_owner.InfoData': '[db_owner].[InfoData]',
+    'db_owner.infodata': '[db_owner].[infodata]',
+    'db_owner.fn_InterfacePosition': '[db_owner].[fn_InterfacePosition]',
+    'db_owner.InterfacePosition': '[db_owner].[InterfacePosition]',
+    'db_owner.interfaceposition': '[db_owner].[interfaceposition]',
+    'db_owner.MP_Delay': '[db_owner].[MP_Delay]',
+    'db_owner.mp_delay': '[db_owner].[mp_delay]',
+    'db_owner.fn_InterfaceUnit': '[db_owner].[fn_InterfaceUnit]',
+    'db_owner.InterfaceUnit': '[db_owner].[InterfaceUnit]',
+    'db_owner.interfaceunit': '[db_owner].[interfaceunit]'
+};
 
 const toTrimText = (value: unknown): string => String(value || '').trim();
+const SQL_PARAM_NAME_PATTERN = /^@[A-Za-z_]\w*$/;
 
 class DelayService {
+    private pickAllowedName(value: unknown, allowedNames: readonly string[], sourceLabel: string): string {
+        const normalizedValue = toTrimText(value).toLowerCase();
+        const matched = allowedNames.find((name) => name.toLowerCase() === normalizedValue);
+        if (!matched) {
+            throw new Error(`Unsupported ${sourceLabel}: ${toTrimText(value)}`);
+        }
+        return matched;
+    }
+
+    private normalizeObjectType(value: unknown): DelayObjectType {
+        const objectType = toTrimText(value).toUpperCase();
+        if (objectType !== 'U' && objectType !== 'IF' && objectType !== 'TF') {
+            throw new Error(`Unsupported delay object type: ${toTrimText(value)}`);
+        }
+        return objectType;
+    }
+
+    private normalizeSqlParamName(value: string): string {
+        if (!SQL_PARAM_NAME_PATTERN.test(value)) {
+            throw new Error(`Unsupported SQL parameter name: ${value}`);
+        }
+        return value;
+    }
+
+    private toAllowlistedSql(command: string): AllowlistedSql {
+        if (!command.trim()) {
+            throw new Error('Empty SQL command');
+        }
+        return command as AllowlistedSql;
+    }
+
+    // Dynamic SQL here is limited to allowlisted object/column identifiers; values stay bound as parameters.
+    private queryAllowlistedSql(request: sql.Request, command: AllowlistedSql): Promise<sql.IResult<GenericRow>> {
+        return request.query<GenericRow>(command);
+    }
+
+    private getAllowedObjectFullName(meta: TableMeta): string {
+        const fullName = ALLOWED_OBJECT_FULL_NAMES[`${meta.schemaName}.${meta.tableName}`];
+        if (!fullName) {
+            throw new Error(`Unsupported delay object source: ${meta.schemaName}.${meta.tableName}`);
+        }
+        return fullName;
+    }
+
     private isMissingDelayTypeColumnError(error: unknown): boolean {
         const message = String((error as { message?: unknown })?.message || error || '').toLowerCase();
         return message.includes('invalid column name') && (
@@ -170,17 +246,22 @@ class DelayService {
         return objectExact * 100 + schemaRank * 10 + typeRank;
     }
 
-    private selectTableMetaRow(rows: GenericRow[], tableCandidates: string[]): GenericRow | null {
+    private selectTableMetaRow(rows: GenericRow[], tableCandidates: string[]): TableMetaSelection | null {
         for (const candidate of tableCandidates) {
             const matched = rows
                 .filter((row) => toTrimText(row.object_name).toLowerCase() === candidate.toLowerCase())
                 .sort((a, b) => this.rankTableCandidate(a, candidate) - this.rankTableCandidate(b, candidate));
             if (matched.length > 0) {
-                return matched[0];
+                const schemaName = this.pickAllowedName(matched[0].schema_name, DELAY_METADATA_SCHEMA_CANDIDATES, 'delay schema');
+                return {
+                    row: matched[0],
+                    schemaName,
+                    tableName: candidate
+                };
             }
         }
 
-        return [...rows].sort((a, b) => this.rankTableCandidate(a, tableCandidates[0]) - this.rankTableCandidate(b, tableCandidates[0]))[0] || null;
+        return null;
     }
 
     private async getTableMeta(
@@ -192,7 +273,7 @@ class DelayService {
         const { placeholders: objectPlaceholders, params: objectParams } = buildSqlInParams(tableCandidates.map((name) => name.toLowerCase()), 'delayObject');
         const { placeholders: schemaPlaceholders, params: schemaParams } = buildSqlInParams(DELAY_METADATA_SCHEMA_CANDIDATES, 'delaySchema');
         const tableRequest = bindSqlInputParams(pool.request(), [...objectParams, ...schemaParams]);
-        const tableRes = await tableRequest.query(`
+        const tableRes = await this.queryAllowlistedSql(tableRequest, this.toAllowlistedSql(`
             SELECT
                 o.object_id,
                 s.name AS schema_name,
@@ -210,7 +291,7 @@ class DelayService {
             WHERE o.type IN ('U', 'IF', 'TF')
               AND LOWER(o.name) IN (${objectPlaceholders})
               AND s.name IN (${schemaPlaceholders})
-        `);
+        `));
 
         const rows = Array.isArray(tableRes.recordset)
             ? (tableRes.recordset as GenericRow[])
@@ -220,21 +301,22 @@ class DelayService {
         const selected = this.selectTableMetaRow(rows, tableCandidates);
         if (!selected) return null;
 
-        const schemaName = toTrimText(selected.schema_name);
-        const tableName = toTrimText(selected.object_name);
-        const objectType = toTrimText(selected.object_type);
-        const objectId = Number(selected.object_id || 0);
-        const parameterCount = Number(selected.parameter_count || 0);
+        const schemaName = selected.schemaName;
+        const tableName = selected.tableName;
+        const objectType = this.normalizeObjectType(selected.row.object_type);
+        const objectId = Number(selected.row.object_id || 0);
+        const parameterCount = Number(selected.row.parameter_count || 0);
         if (!schemaName || !tableName) return null;
 
         const objectName = `${schemaName}.${tableName}`;
-        const columnsRes = await pool.request()
-            .input('objectId', sql.Int, objectId)
-            .query(`
+        const columnsRes = await this.queryAllowlistedSql(
+            pool.request().input('objectId', sql.Int, objectId),
+            this.toAllowlistedSql(`
                 SELECT c.name
                 FROM sys.columns c
                 WHERE c.object_id = @objectId
-            `);
+            `)
+        );
 
         const columnRows = Array.isArray(columnsRes.recordset)
             ? (columnsRes.recordset as GenericRow[])
@@ -267,16 +349,18 @@ class DelayService {
     }
 
     private buildSqlSource(meta: TableMeta, effectiveDateParamName = '@EffectiveDate'): string {
+        const safeEffectiveDateParamName = this.normalizeSqlParamName(effectiveDateParamName);
+        const fullName = this.getAllowedObjectFullName(meta);
         if (meta.objectType === 'U') {
-            return meta.fullName;
+            return fullName;
         }
 
         const paramCount = Number.isFinite(meta.parameterCount) ? Math.max(0, meta.parameterCount) : 0;
         if (paramCount === 0) {
-            return `${meta.fullName}()`;
+            return `${fullName}()`;
         }
         if (paramCount === 1) {
-            return `${meta.fullName}(${effectiveDateParamName})`;
+            return `${fullName}(${safeEffectiveDateParamName})`;
         }
 
         throw new Error(`Unsupported delay function parameter count: ${meta.objectName}`);
@@ -462,9 +546,9 @@ class DelayService {
         const positionSecondmentCondition = positionSecondmentTextCol
             ? `AND UPPER(LTRIM(RTRIM(CAST(p.${escapeSqlIdentifier(positionSecondmentTextCol)} AS nvarchar(64))))) = ${String.fromCharCode(39)}EMPLOYEE${String.fromCharCode(39)}`
             : "";
-        const result = await pool.request()
-            .input("EffectiveDate", sql.DateTime, new Date())
-            .query(`
+        const result = await this.queryAllowlistedSql(
+            pool.request().input("EffectiveDate", sql.DateTime, new Date()),
+            this.toAllowlistedSql(`
                 SELECT DISTINCT
                     TRY_CONVERT(int, i.${escapeSqlIdentifier(infoRetireYearCol)}) AS retire_year
                 FROM ${infoSource} i
@@ -475,20 +559,21 @@ class DelayService {
                   ${positionSecondmentCondition}
                   AND TRY_CONVERT(int, i.${escapeSqlIdentifier(infoRetireYearCol)}) IS NOT NULL
                 ORDER BY TRY_CONVERT(int, i.${escapeSqlIdentifier(infoRetireYearCol)}) ASC
-            `);
+            `)
+        );
 
         return this.mapRetireYearRows(result.recordset);
     }
 
     private async getRetireYearOptionsFromDelayTable(pool: sql.ConnectionPool): Promise<number[]> {
-        const fallbackResult = await pool.request().query(`
+        const fallbackResult = await this.queryAllowlistedSql(pool.request(), this.toAllowlistedSql(`
             SELECT DISTINCT
                 TRY_CONVERT(int, DelayYear) AS retire_year
             FROM MP_Delay
             WHERE TRY_CONVERT(int, DelayYear) IS NOT NULL
               AND TRY_CONVERT(int, DelayYear) <> ${NON_COUNT_DELAY_YEAR}
             ORDER BY TRY_CONVERT(int, DelayYear) ASC
-        `);
+        `));
 
         return this.mapRetireYearRows(fallbackResult.recordset);
     }
@@ -638,11 +723,11 @@ class DelayService {
         resolvedPositionOrgTypeCol: string | null,
         resolvedPositionBsTypeCol: string | null
     ) {
-        return context.pool.request()
+        const request = context.pool.request()
             .input('RetireYear', sql.Int, typeof context.retireYear === 'number' && Number.isFinite(context.retireYear) ? context.retireYear : null)
             .input('KeywordLike', sql.NVarChar(128), context.keywordLike)
-            .input('EffectiveDate', sql.DateTime, context.effectiveDate)
-            .query(this.buildEmployeeOptionsQuery(context, resolvedPositionOrgTypeCol, resolvedPositionBsTypeCol));
+            .input('EffectiveDate', sql.DateTime, context.effectiveDate);
+        return this.queryAllowlistedSql(request, this.toAllowlistedSql(this.buildEmployeeOptionsQuery(context, resolvedPositionOrgTypeCol, resolvedPositionBsTypeCol)));
     }
 
     private async queryEmployeeOptionsWithFallback(context: EmployeeOptionsQueryContext) {
@@ -826,10 +911,10 @@ class DelayService {
         resolvedPositionOrgTypeCol: string | null,
         resolvedPositionBsTypeCol: string | null
     ) {
-        return context.pool.request()
+        const request = context.pool.request()
             .input('EmployeeID', sql.VarChar(32), context.normalizedEmployeeId)
-            .input('EffectiveDate', sql.DateTime, new Date())
-            .query(this.buildEmployeeProfileQuery(context, resolvedPositionOrgTypeCol, resolvedPositionBsTypeCol));
+            .input('EffectiveDate', sql.DateTime, new Date());
+        return this.queryAllowlistedSql(request, this.toAllowlistedSql(this.buildEmployeeProfileQuery(context, resolvedPositionOrgTypeCol, resolvedPositionBsTypeCol)));
     }
 
     private async queryEmployeeProfileWithFallback(context: EmployeeProfileQueryContext) {
@@ -901,7 +986,7 @@ class DelayService {
                 .input('EmployeeIdsCsv', sql.NVarChar(sql.MAX), uniqueIds.join(','))
                 .input('EffectiveDate', sql.DateTime, new Date());
 
-            const result = await request.query(`
+            const result = await this.queryAllowlistedSql(request, this.toAllowlistedSql(`
                 ;WITH target_ids AS (
                     SELECT DISTINCT LTRIM(RTRIM(value)) AS employee_id
                     FROM STRING_SPLIT(@EmployeeIdsCsv, ',')
@@ -921,7 +1006,7 @@ class DelayService {
                 WHERE src.employee_id <> ''
                   AND src.employee_name <> ''
                 GROUP BY src.employee_id
-            `);
+            `));
 
             const rows = Array.isArray(result.recordset) ? (result.recordset as GenericRow[]) : [];
             rows.forEach((row) => {
@@ -953,10 +1038,10 @@ class DelayService {
 
             if (!infoEmployeeCol || !infoPositionNameCol) return positionMap;
 
-            const result = await pool.request()
+            const request = pool.request()
                 .input('EmployeeIdsCsv', sql.NVarChar(sql.MAX), uniqueIds.join(','))
-                .input('EffectiveDate', sql.DateTime, new Date())
-                .query(`
+                .input('EffectiveDate', sql.DateTime, new Date());
+            const result = await this.queryAllowlistedSql(request, this.toAllowlistedSql(`
                     ;WITH target_ids AS (
                         SELECT DISTINCT LTRIM(RTRIM(value)) AS employee_id
                         FROM STRING_SPLIT(@EmployeeIdsCsv, ',')
@@ -976,7 +1061,7 @@ class DelayService {
                     WHERE src.employee_id <> ''
                       AND src.pos_name <> ''
                     GROUP BY src.employee_id
-                `);
+                `));
 
             const rows = Array.isArray(result.recordset) ? (result.recordset as GenericRow[]) : [];
             rows.forEach((row) => {
@@ -1124,10 +1209,10 @@ class DelayService {
         resolvedPositionOrgTypeCol: string | null,
         resolvedPositionBsTypeCol: string | null
     ) {
-        return context.pool.request()
+        const request = context.pool.request()
             .input('EmployeeIdsCsv', sql.NVarChar(sql.MAX), context.uniqueIds.join(','))
-            .input('EffectiveDate', sql.DateTime, new Date())
-            .query(this.buildEmployeeOrgMetaQuery(context, resolvedPositionOrgTypeCol, resolvedPositionBsTypeCol));
+            .input('EffectiveDate', sql.DateTime, new Date());
+        return this.queryAllowlistedSql(request, this.toAllowlistedSql(this.buildEmployeeOrgMetaQuery(context, resolvedPositionOrgTypeCol, resolvedPositionBsTypeCol)));
     }
 
     private async queryEmployeeOrgMetaWithFallback(context: EmployeeOrgMetaQueryContext) {
@@ -1227,9 +1312,9 @@ class DelayService {
         const delayMeta = await this.getDelayTableMeta(pool);
         const hasRetirementYear = Boolean(delayMeta?.columns.get('retirementyear'));
         const hasDelayType = Boolean(delayMeta?.columns.get('delaytype'));
-        const result = await pool.request()
-            .input('DelayID', sql.VarChar(18), delayId)
-            .query(`
+        const result = await this.queryAllowlistedSql(
+            pool.request().input('DelayID', sql.VarChar(18), delayId),
+            this.toAllowlistedSql(`
                 SELECT
                     CAST(DelayID AS varchar(18)) AS DelayID,
                     LTRIM(RTRIM(CAST(EmployeeID AS varchar(20)))) AS EmployeeID,
@@ -1240,7 +1325,8 @@ class DelayService {
                     ${hasDelayType ? 'CAST(DelayType AS int)' : 'NULL'} AS DelayType
                 FROM MP_Delay
                 WHERE CAST(DelayID AS varchar(18)) = @DelayID
-            `);
+            `)
+        );
 
         const rows = Array.isArray(result.recordset) ? (result.recordset as GenericRow[]) : [];
         if (rows.length === 0) return null;
@@ -1286,7 +1372,7 @@ class DelayService {
             ? ' ORDER BY RetirementYear DESC, DelayYear DESC, EmployeeID ASC, DelayID ASC'
             : ' ORDER BY DelayYear DESC, EmployeeID ASC, DelayID ASC';
 
-        const result = await request.query(query);
+        const result = await this.queryAllowlistedSql(request, this.toAllowlistedSql(query));
         const rows = Array.isArray(result.recordset) ? (result.recordset as GenericRow[]) : [];
         const employeeIds = rows.map((row) => this.getFirstNonEmpty(row, ['EmployeeID']));
         const [directory, infoNameMap, infoPositionMap, orgMetaMap] = await Promise.all([
@@ -1474,7 +1560,7 @@ class DelayService {
             .input('DelayType', sql.Int, delayType)
             .input('UserID', sql.VarChar(10), payload.userId)
             .input('Now', sql.DateTime, now);
-        const insertResult = await insertRequest.query(this.buildInsertDelaySql(hasRetirementYear, hasDelayType));
+        const insertResult = await this.queryAllowlistedSql(insertRequest, this.toAllowlistedSql(this.buildInsertDelaySql(hasRetirementYear, hasDelayType)));
 
         const createdDelayId = String(insertResult.recordset?.[0]?.DelayID || '').trim();
         if (!createdDelayId) {
@@ -1528,7 +1614,7 @@ class DelayService {
             .input('DelayType', sql.Int, delayType)
             .input('UserID', sql.VarChar(10), payload.userId)
             .input('Now', sql.DateTime, now);
-        const updateResult = await updateRequest.query(this.buildUpdateDelaySql(hasRetirementYear, hasDelayType));
+        const updateResult = await this.queryAllowlistedSql(updateRequest, this.toAllowlistedSql(this.buildUpdateDelaySql(hasRetirementYear, hasDelayType)));
 
         const affected = updateResult.rowsAffected?.[0] || 0;
         if (affected === 0) {

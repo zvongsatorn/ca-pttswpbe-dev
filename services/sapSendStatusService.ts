@@ -1,4 +1,5 @@
 import { sql } from '../config/db.js';
+import { queryAllowlistedSql, toAllowlistedSql } from './sqlSafetyUtils.js';
 
 const normalizeText = (value: unknown): string => String(value ?? '').trim();
 
@@ -24,7 +25,7 @@ export const resetSentSapStatusForTransactions = async (
     const request = new sql.Request(transaction);
     request.input('TransactionNosCsv', sql.VarChar(sql.MAX), normalizedTransactionNos.join(','));
 
-    const result = await request.query(`
+    const result = await queryAllowlistedSql(request, toAllowlistedSql(`
         WITH TargetSendSap AS (
             SELECT DISTINCT
                 CAST(t.EffectiveDate AS date) AS EffectiveDate,
@@ -44,7 +45,7 @@ export const resetSentSapStatusForTransactions = async (
             ON CAST(sap.EffectiveDate AS date) = target.EffectiveDate
            AND LTRIM(RTRIM(sap.OrgUnitNo)) = target.OrgUnitNo
         WHERE sap.SendSapStatus = 2;
-    `);
+    `));
 
     return (result.rowsAffected || []).reduce((total, count) => total + count, 0);
 };

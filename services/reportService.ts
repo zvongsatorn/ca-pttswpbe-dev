@@ -5,7 +5,9 @@ import {
     buildAllowedObjectFullName,
     buildSqlInParams,
     escapeSqlIdentifier,
-    pickColumnName
+    pickColumnName,
+    queryAllowlistedSql,
+    toAllowlistedSql
 } from './sqlSafetyUtils.js';
 
 type Report08LevelMap = Map<string, Map<string, number>>;
@@ -725,9 +727,10 @@ const getReport08PositionMap = async (
     `;
 
     const request = bindSqlInputParams(pool.request(), levelParams);
-    const res = await request
-        .input('EffectiveDate', sql.DateTime, effectiveDate)
-        .query(query);
+    const res = await queryAllowlistedSql(
+        request.input('EffectiveDate', sql.DateTime, effectiveDate),
+        toAllowlistedSql(query)
+    );
 
     return normalizeReport08RowsToMap(Array.isArray(res.recordset) ? res.recordset as Array<Record<string, unknown>> : []);
 };
@@ -776,10 +779,12 @@ const getReport08CostMap = async (
     `;
 
     const request = bindSqlInputParams(pool.request(), levelParams);
-    const res = await request
-        .input('FromDate', sql.DateTime, fromDate)
-        .input('ToDate', sql.DateTime, toDate)
-        .query(query);
+    const res = await queryAllowlistedSql(
+        request
+            .input('FromDate', sql.DateTime, fromDate)
+            .input('ToDate', sql.DateTime, toDate),
+        toAllowlistedSql(query)
+    );
 
     return normalizeReport08RowsToMap(Array.isArray(res.recordset) ? res.recordset as Array<Record<string, unknown>> : []);
 };
@@ -2044,10 +2049,9 @@ const getReport09RetirementLevelFilter = async (
             ? `TRY_CONVERT(int, lg.${escapeSqlIdentifier(orderColumn)})`
             : 'NULL';
 
-        const selectedResult = await pool.request()
+        const selectedResult = await queryAllowlistedSql(pool.request()
             .input('EffectiveYearAD', sql.Int, effectiveYearAD)
-            .input('EffectiveYearBE', sql.Int, effectiveYearBE)
-            .query(`
+            .input('EffectiveYearBE', sql.Int, effectiveYearBE), toAllowlistedSql(`
                 SELECT TOP (1)
                     LTRIM(RTRIM(CAST(LevelGroupNo AS nvarchar(16)))) AS LevelGroupNo
                 FROM MP_BUSupportRateRemark
@@ -2056,16 +2060,16 @@ const getReport09RetirementLevelFilter = async (
                 ORDER BY
                     CASE WHEN EffectiveYear = @EffectiveYearBE THEN 0 ELSE 1 END,
                     TRY_CONVERT(bigint, BUSupportRateRemarkID) DESC
-            `);
+            `));
 
         const selectedLevelGroupNo = toTrimText(selectedResult.recordset?.[0]?.LevelGroupNo);
         if (!selectedLevelGroupNo) {
             return { selectedLevelGroupNo: '', allowedLevelGroupNos: [] };
         }
 
-        const levelsResult = await pool.request()
-            .input('SelectedLevelGroupNo', sql.VarChar(16), selectedLevelGroupNo)
-            .query(`
+        const levelsResult = await queryAllowlistedSql(
+            pool.request().input('SelectedLevelGroupNo', sql.VarChar(16), selectedLevelGroupNo),
+            toAllowlistedSql(`
                 ;WITH Selected AS (
                     SELECT TOP (1)
                         ${orderExpr} AS SelectedOrder
@@ -2083,7 +2087,8 @@ const getReport09RetirementLevelFilter = async (
                 ORDER BY
                     ${orderExprForAlias} DESC,
                     LTRIM(RTRIM(CAST(lg.LevelGroupNo AS nvarchar(16))))
-            `);
+            `)
+        );
 
         const levelRows = Array.isArray(levelsResult.recordset)
             ? levelsResult.recordset as Array<Record<string, unknown>>
@@ -2347,11 +2352,10 @@ const getReport09RetirementMap = async (
     `;
 
     const request = bindSqlInputParams(pool.request(), levelFilterParams);
-    const result = await request
+    const result = await queryAllowlistedSql(request
         .input('FromYear', sql.Int, fromYear)
         .input('ToYear', sql.Int, toYear)
-        .input('EffectiveDate', sql.DateTime, structureDate)
-        .query(query);
+        .input('EffectiveDate', sql.DateTime, structureDate), toAllowlistedSql(query));
 
     return buildReport09RetirementMap(result.recordset);
 };
@@ -2641,11 +2645,13 @@ export const getReport09AuditService = async (
     `;
 
     const request = bindSqlInputParams(pool.request(), levelConditionParams);
-    const result = await request
-        .input('FromYear', sql.Int, fromYear)
-        .input('ToYear', sql.Int, toYear)
-        .input('EffectiveDate', sql.DateTime, structureDate)
-        .query(query);
+    const result = await queryAllowlistedSql(
+        request
+            .input('FromYear', sql.Int, fromYear)
+            .input('ToYear', sql.Int, toYear)
+            .input('EffectiveDate', sql.DateTime, structureDate),
+        toAllowlistedSql(query)
+    );
 
     const rows = mapReport09AuditRows(result.recordset);
 

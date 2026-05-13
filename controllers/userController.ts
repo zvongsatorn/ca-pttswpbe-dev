@@ -5,8 +5,18 @@ import * as path from 'path';
 import { randomUUID } from 'crypto';
 import jwt from 'jsonwebtoken';
 import userGroupService from '../services/userGroupService.js';
+import {
+    resolveSafeChildPath,
+    safeExistsSync,
+    safeMkdirSync,
+    safeReadFileSync,
+    safeUnlinkSync,
+    safeWriteFileSync,
+    type SafeFilePath
+} from '../services/fileSafetyUtils.js';
 
 const PROFILE_PICTURE_MAX_BYTES = 5 * 1024 * 1024;
+const JWT_ACCESS_TOKEN_EXPIRES_IN = '30m';
 const PROFILE_PICTURE_CONTENT_TYPES: Record<string, string> = {
     '.jpg': 'image/jpeg',
     '.jpeg': 'image/jpeg',
@@ -22,7 +32,9 @@ const isSafeProfilePictureFilename = (filename: string): boolean => {
     return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\.(jpg|jpeg|png|webp)$/i.test(filename);
 };
 
-const resolveProfilePicturePath = (filename: string): string | null => {
+const PROFILE_PICTURE_UPLOAD_ROOT = path.resolve(process.cwd(), 'uploads', 'profile_pictures');
+
+const resolveProfilePicturePath = (filename: string): SafeFilePath | null => {
     const safeFilename = path.basename(filename || '');
     if (!safeFilename || safeFilename !== filename) return null;
     if (!isSafeProfilePictureFilename(safeFilename)) return null;
@@ -30,18 +42,11 @@ const resolveProfilePicturePath = (filename: string): string | null => {
     const extension = path.extname(safeFilename).toLowerCase();
     if (!isAllowedProfilePictureExtension(extension)) return null;
 
-    const uploadDir = path.resolve(process.cwd(), 'uploads', 'profile_pictures');
-    const filePath = path.resolve(uploadDir, safeFilename);
-    return filePath.startsWith(`${uploadDir}${path.sep}`) ? filePath : null;
+    return resolveSafeChildPath(PROFILE_PICTURE_UPLOAD_ROOT, [safeFilename]);
 };
 
-const resolveProfilePictureWritePath = (filename: string): string => {
-    const uploadDir = path.resolve(process.cwd(), 'uploads', 'profile_pictures');
-    const filePath = path.resolve(uploadDir, filename);
-    if (!filePath.startsWith(`${uploadDir}${path.sep}`)) {
-        throw new Error('Invalid profile picture path');
-    }
-    return filePath;
+const resolveProfilePictureWritePath = (filename: string): SafeFilePath => {
+    return resolveSafeChildPath(PROFILE_PICTURE_UPLOAD_ROOT, [filename]);
 };
 
 
@@ -61,7 +66,7 @@ const buildProfilePictureToken = (employeeId: string, userData: any, userGroups:
             profilePicture: safeName,
         },
         secretKey,
-        { expiresIn: "1h" }
+        { expiresIn: JWT_ACCESS_TOKEN_EXPIRES_IN }
     );
 };
 
@@ -71,13 +76,13 @@ const deleteProfilePictureIfExists = (oldFilename: string | null | undefined): v
     const oldPath = resolveProfilePicturePath(oldFilename);
     if (!oldPath) return;
 
-    if (!fs.existsSync(oldPath)) return;
+    if (!safeExistsSync(oldPath)) return;
 
     try {
-        fs.unlinkSync(oldPath);
-        console.log("Deleted old profile picture: " + oldFilename);
+        safeUnlinkSync(oldPath);
+        console.log("Deleted old profile picture.");
     } catch (err) {
-        console.error("Failed to delete old profile picture " + oldFilename + ":", err);
+        console.error("Failed to delete old profile picture:", err);
     }
 };
 const isValidEmailAddress = (email: string): boolean => {
@@ -201,7 +206,7 @@ export const uploadProfilePicture = async (c: Context) => {
 
         // Get old profile picture to delete later
         const userData = await userService.getUserWithPassword(employeeId);
-        const oldFilename = userData?.ProfilePicture;
+        const oldFilename = typeof userData?.ProfilePicture === 'string' ? userData.ProfilePicture : undefined;
 
         const fileName = String(file.name || '');
         const extension = path.extname(fileName).toLowerCase();
@@ -214,14 +219,14 @@ export const uploadProfilePicture = async (c: Context) => {
             return c.json({ success: false, message: 'Image file is too large' }, 400);
         }
 
-        const uploadDir = path.resolve(process.cwd(), 'uploads', 'profile_pictures');
-        if (!fs.existsSync(uploadDir)) {
-            fs.mkdirSync(uploadDir, { recursive: true });
+        const uploadDir = resolveSafeChildPath(PROFILE_PICTURE_UPLOAD_ROOT, []);
+        if (!safeExistsSync(uploadDir)) {
+            safeMkdirSync(uploadDir);
         }
 
         const safeName = `${randomUUID()}${extension}`;
         const filePath = resolveProfilePictureWritePath(safeName);
-        fs.writeFileSync(filePath, fileBuffer);
+        safeWriteFileSync(filePath, fileBuffer);
 
         await userService.updateUserProfilePicture(employeeId, safeName);
 
@@ -253,11 +258,11 @@ export const uploadProfilePicture = async (c: Context) => {
         const filePath = resolveProfilePicturePath(filename);
         if (!filePath) return c.json({ message: 'Invalid filename' }, 400);
 
-        if (!fs.existsSync(filePath)) {
+        if (!safeExistsSync(filePath)) {
             return c.json({ message: 'File not found' }, 404);
         }
 
-        const fileBuffer = fs.readFileSync(filePath);
+        const fileBuffer = safeReadFileSync(filePath);
         const ext = path.extname(filename).toLowerCase();
         const contentType = PROFILE_PICTURE_CONTENT_TYPES[ext] || 'application/octet-stream';
 

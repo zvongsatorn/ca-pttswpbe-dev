@@ -89,7 +89,7 @@ class MenuService {
                 bestRole = this.getRoleFromRow(roleResult.recordset[0] as Record<string, unknown>);
             }
         } catch (error) {
-            console.error(`[MenuService] Failed to resolve role from mp_UserGroupRoleGet for employee ${employeeID}:`, error);
+            console.error('[MenuService] Failed to resolve role from mp_UserGroupRoleGet:', error);
         }
 
         if (!bestRole) {
@@ -105,7 +105,7 @@ class MenuService {
         } catch (error) {
             const fallbackRole = this.normalizeRoleValue(preferredRole);
             if (fallbackRole && fallbackRole !== bestRole) {
-                console.warn(`[MenuService] Falling back to preferred role ${fallbackRole} for employee ${employeeID}`);
+                console.warn('[MenuService] Falling back to preferred role.');
                 return await this.getMenuForRole(fallbackRole);
             }
             throw error;

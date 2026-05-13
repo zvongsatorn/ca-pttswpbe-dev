@@ -3,6 +3,7 @@
  * Uses Microsoft Graph API via OAuth2 Client Credentials flow
  */
 import configService from './configService.js';
+import { fetchSafeHttpUrl, toSafeHeaderValue, toSafeHttpsUrl, type SafeHttpUrl } from './httpSafetyUtils.js';
 
 let accessToken: string | null = null;
 let tokenExpiry: number = 0;
@@ -21,13 +22,12 @@ const safeEmailAddress = (value: string): string => {
     return email;
 };
 
-const safeHeaderValue = (value: unknown, name: string): string => {
-    const text = String(value || '').trim();
-    if (!text || /[\r\n]/.test(text)) {
-        throw new Error(`Invalid ${name}`);
-    }
-    return text;
+const isAllowedMicrosoftHostname = (hostname: string): boolean => {
+    const normalized = hostname.toLowerCase();
+    return normalized === 'login.microsoftonline.com' || normalized === 'graph.microsoft.com';
 };
+
+const resolveMicrosoftUrl = (value: string): SafeHttpUrl => toSafeHttpsUrl(value, isAllowedMicrosoftHostname);
 
 async function getAccessToken(): Promise<string> {
     const now = Date.now();
@@ -44,17 +44,17 @@ async function getAccessToken(): Promise<string> {
         throw new Error('Azure AD credentials missing in environment variables');
     }
 
-    const safeTenantId = encodeURIComponent(safeHeaderValue(tenantId, 'Azure tenant id'));
-    const url = `https://login.microsoftonline.com/${safeTenantId}/oauth2/v2.0/token`;
+    const safeTenantId = encodeURIComponent(toSafeHeaderValue(tenantId, 'Azure tenant id'));
+    const url = resolveMicrosoftUrl(`https://login.microsoftonline.com/${safeTenantId}/oauth2/v2.0/token`);
     
     // Basic Auth header variant
-    const auth = Buffer.from(`${safeHeaderValue(clientId, 'Azure client id')}:${safeHeaderValue(clientSecret, 'Azure client secret')}`).toString('base64');
+    const auth = Buffer.from(`${toSafeHeaderValue(clientId, 'Azure client id')}:${toSafeHeaderValue(clientSecret, 'Azure client secret')}`).toString('base64');
     
     const params = new URLSearchParams();
     params.append('scope', 'https://graph.microsoft.com/.default');
     params.append('grant_type', 'client_credentials');
 
-    const response = await fetch(url, {
+    const response = await fetchSafeHttpUrl(url, {
         method: 'POST',
         headers: {
             'Authorization': `Basic ${auth}`,
@@ -70,7 +70,7 @@ async function getAccessToken(): Promise<string> {
     }
 
     const data: any = await response.json();
-    accessToken = safeHeaderValue(data.access_token, 'Graph access token');
+    accessToken = toSafeHeaderValue(data.access_token, 'Graph access token');
     // expires_in is in seconds
     tokenExpiry = now + (data.expires_in * 1000);
     
@@ -89,8 +89,8 @@ export const sendMail = async (to: string, subject: string, body: string, isHtml
             throw new Error('MAIL_SENDER not configured (not in DB or .env)');
         }
 
-        const token = safeHeaderValue(await getAccessToken(), 'Graph access token');
-        const url = `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(sender)}/sendMail`;
+        const token = toSafeHeaderValue(await getAccessToken(), 'Graph access token');
+        const url = resolveMicrosoftUrl(`https://graph.microsoft.com/v1.0/users/${encodeURIComponent(sender)}/sendMail`);
 
         const baseMessage: any = {
             subject: subject,
@@ -114,7 +114,7 @@ export const sendMail = async (to: string, subject: string, body: string, isHtml
             saveToSentItems: 'false'
         };
 
-        const response = await fetch(url, {
+        const response = await fetchSafeHttpUrl(url, {
             method: 'POST',
             headers: {
                 'Authorization': `Bearer ${token}`,
@@ -125,11 +125,11 @@ export const sendMail = async (to: string, subject: string, body: string, isHtml
 
         if (!response.ok) {
             const error = await response.text();
-            console.error(`Error sending email to ${to}:`, error);
+            console.error('[MailService] Error sending email.');
             return { success: false, error };
         }
 
-        console.log(`[MailService] Email sent successfully to ${to}`);
+        console.log('[MailService] Email sent successfully.');
         return { success: true };
     } catch (error: any) {
         console.error(`[MailService] Exception sending email:`, error.message);
@@ -155,9 +155,9 @@ export const resolveMailRecipient = async (configKey: string, originalRecipient:
         }
 
         if (status === '2') {
-            console.log(`[MailService] Redirecting mail from ${originalRecipient} to test address: ${testEmail} (Value1=2)`);
+            console.log(`[MailService] Redirecting mail to configured test address for ${configKey} (Value1=2)`);
             if (!testEmail || testEmail.trim() === '') {
-                console.warn(`[MailService] Test email (Value2) is not configured. Returning null to avoid sending to real user ${originalRecipient}.`);
+                console.warn('[MailService] Test email (Value2) is not configured. Returning null to avoid sending to real user.');
                 return null;
             }
             return testEmail.trim();

@@ -24,8 +24,7 @@ export const getTrackingUsers = async (c: Context) => {
         const userGroupNo = (c.req.query('UserGroupNo') || c.req.query('userGroupNo') || '').trim();
         const employeeId = (c.req.query('EmployeeID') || c.req.query('employeeID') || c.req.query('employeeId') || '').trim();
 
-        console.log('--- API: getTrackingUsers ---');
-        console.log('Month:', dmonth, 'Year:', dyear, 'UserGroup:', userGroupNo, 'EmpID:', employeeId);
+        console.log('Tracking users requested.');
 
         if (!dmonth || !dyear || !userGroupNo || !employeeId) {
             console.warn('Missing parameters in getTrackingUsers');
@@ -52,8 +51,7 @@ export const getTrackingUnits = async (c: Context) => {
         const userGroupNo = (c.req.query('UserGroupNo') || c.req.query('userGroupNo') || '').trim();
         const employeeId = (c.req.query('employeeID') || c.req.query('EmployeeID') || c.req.query('employeeId') || '').trim();
 
-        console.log('--- API: getTrackingUnits ---');
-        console.log('Month:', dmonth, 'Year:', dyear, 'UserGroup:', userGroupNo, 'EmpID:', employeeId);
+        console.log('Tracking units requested.');
 
         if (!dmonth || !dyear || !userGroupNo || !employeeId) {
             console.warn('Missing parameters in getTrackingUnits');

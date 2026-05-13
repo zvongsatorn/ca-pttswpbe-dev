@@ -1,4 +1,5 @@
 import { poolPromise, sql } from '../config/db.js';
+import { queryAllowlistedSql, toAllowlistedSql } from './sqlSafetyUtils.js';
 
 export interface InsertLogActionParams {
     employeeId: string;
@@ -49,11 +50,11 @@ export const getMenuNameByIdService = async (menuId: number): Promise<string | n
     const request = new sql.Request(pool);
     request.input('MenuID', sql.Int, menuId);
 
-    const result = await request.query(`
+    const result = await queryAllowlistedSql(request, toAllowlistedSql(`
         SELECT TOP 1 MenuName
         FROM dbo.MP_Menu
         WHERE MenuID = @MenuID
-    `);
+    `));
 
     const menuName = result.recordset?.[0]?.MenuName;
     if (menuName === null || menuName === undefined) return null;

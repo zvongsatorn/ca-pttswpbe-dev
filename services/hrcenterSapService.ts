@@ -1,7 +1,14 @@
 import { sql, poolPromise } from '../config/db.js';
-import fs from 'node:fs';
 import path from 'node:path';
 import { Client, enterPassiveModeIPv4 } from 'basic-ftp';
+import {
+    resolveSafeChildPath,
+    safeMkdirAsync,
+    safeReadFileAsync,
+    safeStatAsync,
+    safeWriteTextFileAsync,
+    type SafeFilePath
+} from './fileSafetyUtils.js';
 
 const OUTBOUND_DIR_NAME = 'Outbound';
 const OUTBOUND_FILE_NAME = 'Input_ZHROMI040.txt';
@@ -119,19 +126,15 @@ const resolveOutboundDir = (): string => {
     return path.resolve(process.cwd(), ...OUTBOUND_DIR_DEFAULT_SEGMENTS);
 };
 
-const getOutboundDir = (): string => resolveOutboundDir();
-export const getHRCenterSapOutboundFilePath = (): string => {
+const getOutboundDir = (): SafeFilePath => resolveSafeChildPath(resolveOutboundDir(), []);
+export const getHRCenterSapOutboundFilePath = (): SafeFilePath => {
     const outboundDir = getOutboundDir();
-    const outboundFilePath = path.resolve(outboundDir, OUTBOUND_FILE_NAME);
-    if (!isPathInside(outboundFilePath, outboundDir)) {
-        throw new Error('Invalid SAP outbound file path');
-    }
-    return outboundFilePath;
+    return resolveSafeChildPath(outboundDir, [OUTBOUND_FILE_NAME]);
 };
 
 const ensureOutboundDirectory = async (): Promise<void> => {
     const dir = getOutboundDir();
-    await fs.promises.mkdir(dir, { recursive: true });
+    await safeMkdirAsync(dir);
 };
 
 const createOrgUnitTable = (orgUnits: string[]): sql.Table => {
@@ -719,7 +722,7 @@ const tryWriteSapOutboundFile = async (textfile: string, state: SapSendState): P
     try {
         await ensureOutboundDirectory();
         const outboundFilePath = getHRCenterSapOutboundFilePath();
-        await fs.promises.writeFile(outboundFilePath, textfile, { encoding: "utf8" });
+        await safeWriteTextFileAsync(outboundFilePath, textfile);
         state.fileReady = true;
     } catch (error) {
         console.error("[HRCenter SAP] Failed to write outbound file", {
@@ -837,7 +840,7 @@ export const getHRCenterSapMinusService = async (effectiveDate: Date): Promise<D
 };
 export const getHRCenterSapOutboundFileBufferService = async (): Promise<{ fileName: string; content: Buffer }> => {
     const filePath = getHRCenterSapOutboundFilePath();
-    const content = await fs.promises.readFile(filePath);
+    const content = await safeReadFileAsync(filePath);
     return {
         fileName: OUTBOUND_FILE_NAME,
         content
@@ -847,7 +850,7 @@ export const getHRCenterSapOutboundFileBufferService = async (): Promise<{ fileN
 export const getHRCenterSapOutboundFileMetaService = async (): Promise<{ fileName: string; filePath: string; exists: boolean; modifiedAt?: string }> => {
     const filePath = getHRCenterSapOutboundFilePath();
     try {
-        const stat = await fs.promises.stat(filePath);
+        const stat = await safeStatAsync(filePath);
         return {
             fileName: OUTBOUND_FILE_NAME,
             filePath,

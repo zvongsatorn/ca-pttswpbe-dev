@@ -6,6 +6,8 @@ export type SqlInputParam = {
     value: unknown;
 };
 
+export type AllowlistedSql = string & { readonly __allowlistedSql: unique symbol };
+
 type SqlRequestLike = {
     input: (name: string, type: any, value: unknown) => unknown;
 };
@@ -63,6 +65,20 @@ export const bindSqlInputParams = <T extends SqlRequestLike>(request: T, params:
     return request;
 };
 
+export const toAllowlistedSql = (command: string): AllowlistedSql => {
+    if (!String(command || '').trim()) {
+        throw new Error('Empty SQL command');
+    }
+    return command as AllowlistedSql;
+};
+
+export const queryAllowlistedSql = <T = Record<string, unknown>>(
+    request: sql.Request,
+    command: AllowlistedSql
+): Promise<sql.IResult<T>> => {
+    return request.query<T>(command);
+};
+
 export const buildSqlFragmentList = (parts: string[]): string => {
     if (!parts.length) throw new Error('Empty SQL fragment list');
     parts.forEach((part) => {
@@ -81,7 +97,7 @@ export const pickColumnName = (columns: Map<string, string>, candidates: string[
 
     for (const candidate of candidates) {
         const found = columns.get(candidate.toLowerCase());
-        if (found && SQL_IDENTIFIER_PATTERN.test(found)) return found;
+        if (found && SQL_IDENTIFIER_PATTERN.test(found) && SQL_IDENTIFIER_PATTERN.test(candidate)) return candidate;
     }
 
     return null;

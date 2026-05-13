@@ -986,21 +986,21 @@ const filterMkdApprovalFlow = (rawFlow: any[]): any[] => {
 };
 
 const loadNewMkdApprovalFlow = async (employeeId: string) => {
-    console.log(`[requestApproveMKDService] Fetching info for employee: ${employeeId}`);
+    console.log('[requestApproveMKDService] Fetching requester info.');
     const empInfo = await pisService.getEmployeeInfo(employeeId);
     if (!empInfo) {
-        console.error(`[requestApproveMKDService] Employee info not found for ${employeeId}`);
+        console.error('[requestApproveMKDService] Employee info not found.');
         throw new Error(`ไม่พบข้อมูลพนักงาน (${employeeId}) ในระบบ PIS`);
     }
 
     const posCode = empInfo.POSCODE || empInfo.poscode;
     const requesterDisplayName = `${empInfo.FNAME || ''} ${empInfo.LNAME || ''}`.trim() || employeeId;
-    console.log(`[requestApproveMKDService] Employee: ${empInfo.FNAME} ${empInfo.LNAME}, PosCode: ${posCode}`);
-    console.log(`[requestApproveMKDService] Fetching flow for ${employeeId} / ${posCode}`);
+    console.log('[requestApproveMKDService] Requester info resolved.');
+    console.log('[requestApproveMKDService] Fetching approval flow.');
 
     const rawFlow = await pisService.getApprovalFlow(employeeId, posCode);
     if (!rawFlow || rawFlow.length === 0) {
-        console.error(`[requestApproveMKDService] No flow steps returned for ${employeeId}`);
+        console.error('[requestApproveMKDService] No flow steps returned.');
         throw new Error('ไม่พบสายการอนุมัติ (Approval Flow) ในระบบ PIS สำหรับตำแหน่งนี้');
     }
 
@@ -1168,7 +1168,7 @@ const notifyFirstMkdApprover = async (
 };
 
 export const requestApproveMKDService = async (manDriverId: string, employeeId: string, approveIdStr?: string) => {
-    console.log(`[requestApproveMKDService] Start. ManDriverID: ${manDriverId}, EmployeeID: ${employeeId}, ApproveIDStr: ${approveIdStr}`);
+    console.log('[requestApproveMKDService] Start.');
 
     const approveId = parseMkdApproveId(approveIdStr);
 
@@ -1376,7 +1376,7 @@ const findPendingMkdApprovalStep = async (transaction: sql.Transaction, approveI
 
     const histResult = await findReq.execute('mp_ManDriverApproveHistFindPending');
     if (!histResult.recordset || histResult.recordset.length === 0) {
-        console.error('[submitMKDApproveActionService] Step not found:', { approveId, employeeId, repCode });
+        console.error('[submitMKDApproveActionService] Step not found.');
         throw new Error('ไม่พบขั้นตอนการอนุมัติที่รอดำเนินการสำหรับผู้ใช้นี้ (No pending approval step for this Employee ID)');
     }
 

@@ -8,6 +8,8 @@ import userGroupService from '../services/userGroupService.js';
 import * as userService from '../services/userService.js';
 import { insertLogActionService } from '../services/logService.js';
 
+const JWT_ACCESS_TOKEN_EXPIRES_IN = '30m';
+
 const createTemporaryPassword = () => {
     const suffix = randomBytes(12).toString('base64url');
     return `Tmp-${suffix}9!`;
@@ -83,7 +85,7 @@ const mapLoginUser = (userData: any, employeeId: string) => ({
 const ensureLoginUserGroups = async (employeeId: string) => {
     let userGroups = await userGroupService.getGroupsForUser(employeeId);
     if (userGroups.length === 0) {
-        console.log('[Login] User ' + employeeId + ' has no groups, auto-assigning to group 08 (OTHER)');
+        console.log('[Login] User has no groups, auto-assigning to group 08 (OTHER)');
         await userGroupService.insertUserInGroup('08', employeeId, 'SYSTEM');
         userGroups = await userGroupService.getGroupsForUser(employeeId);
     }
@@ -107,7 +109,7 @@ const signLoginToken = (user: { EmployeeID: string; Name: string; Email: string 
             profilePicture: userData.ProfilePicture || '',
         },
         secretKey,
-        { expiresIn: '1h' }
+        { expiresIn: JWT_ACCESS_TOKEN_EXPIRES_IN }
     );
 };
 const getSsoCaaData = async (type: string, accessToken: string, systemToken: string) => {
@@ -152,15 +154,15 @@ const getSsoCaaData = async (type: string, accessToken: string, systemToken: str
 const decodeSsoCaaData = (caaData: any) => {
     if (!caaData?.Data) return caaData;
 
-    try {
-        const decodedString = Buffer.from(caaData.Data, 'base64').toString('utf-8');
-        const decodedData = JSON.parse(decodedString);
-        console.log('[SSO] Decoded CA&A Data:', JSON.stringify(decodedData));
-        return decodedData;
-    } catch (e) {
-        console.warn("[SSO] Failed to decode CA&A Data field, using raw response");
-        return caaData;
-    }
+        try {
+            const decodedString = Buffer.from(caaData.Data, 'base64').toString('utf-8');
+            const decodedData = JSON.parse(decodedString);
+            console.log('[SSO] Decoded CA&A data successfully.');
+            return decodedData;
+        } catch (e) {
+            console.warn("[SSO] Failed to decode CA&A Data field, using raw response");
+            return caaData;
+        }
 };
 
 const findSsoUserByEmail = async (email: string) => {
@@ -169,7 +171,7 @@ const findSsoUserByEmail = async (email: string) => {
     const userData: any = await userService.getUserByEmail(email);
     const employeeId = String(userData?.EmployeeID || '');
     if (employeeId) {
-        console.log('[SSO] Identified user by email: ' + email + ' -> EmployeeID: ' + employeeId);
+        console.log('[SSO] Identified user by email lookup.');
     }
 
     return { employeeId, userData };
@@ -192,7 +194,7 @@ const mapSsoUser = (userData: any, employeeId: string, email: string) => ({
 const ensureSsoUserGroups = async (employeeId: string) => {
     let userGroups = await userGroupService.getGroupsForUser(employeeId);
     if (userGroups.length === 0) {
-        console.log('[SSO] User ' + employeeId + ' has no groups, auto-assigning to group 08 (OTHER)');
+        console.log('[SSO] User has no groups, auto-assigning to group 08 (OTHER)');
         await userGroupService.insertUserInGroup('08', employeeId, 'SYSTEM');
         userGroups = await userGroupService.getGroupsForUser(employeeId);
     }
@@ -234,9 +236,7 @@ class AuthController {
             const storedPassword = extractPassword(userData as Record<string, unknown>);
 
             if (!storedPassword) {
-                console.warn(
-                    `[Login] Password field not found/empty in MP_User for ${EmployeeID}. Available keys: ${Object.keys(userData || {}).join(", ")}`
-                );
+                console.warn('[Login] Local password is not configured for requested user.');
                 return c.json({ message: "User does not have a local password set" }, 401);
             }
 
@@ -322,7 +322,7 @@ class AuthController {
 
             const ssoUser = await findSsoUserByEmail(email);
             if (!ssoUser.employeeId) {
-                console.warn('[SSO] User with email ' + email + ' authenticated via Microsoft but NOT FOUND in MP_User table.');
+                console.warn('[SSO] Microsoft-authenticated user was not found in MP_User table.');
                 return c.json({ 
                     message: 'User (' + email + ') is not registered in the Manpower Planning system. Please contact admin.',
                     error: 'USER_NOT_FOUND'
@@ -334,7 +334,7 @@ class AuthController {
                 return c.json({ message: 'User authenticated via Microsoft but not found in System' }, 401);
             }
 
-            console.log('[SSO] User Data retrieved:', JSON.stringify(userData));
+            console.log('[SSO] User data retrieved for authenticated employee.');
 
             const user = mapSsoUser(userData, ssoUser.employeeId, email);
             const userGroups = await ensureSsoUserGroups(ssoUser.employeeId);
@@ -386,7 +386,7 @@ class AuthController {
         try {
             const body = await c.req.json();
             const { email } = body;
-            console.log(`[Registration] Verify Email Request for: ${email}`);
+            console.log('[Registration] Verify email request received.');
 
             if (!email) {
                 return c.json({ message: 'Email is required' }, 400);
@@ -397,7 +397,7 @@ class AuthController {
             const appUser = await configService.getConfig('CAA_USER');
             const targetUrl = `${caaUrl.endsWith('/') ? caaUrl : caaUrl + '/'}azt/doservice`;
 
-            console.log(`[Registration] Using appUser: ${appUser}, token prefix: ${token?.substring(0, 10)}...`);
+            console.log('[Registration] CA&A app user resolved.');
 
             const b2cTenantId = await configService.getConfig('CAA_TENANT_ID');
             const b2cClientId = await configService.getConfig('CAA_CLIENT_ID');
@@ -441,8 +441,7 @@ class AuthController {
                 return c.json({ message: 'Unable to retrieve CA&A token' }, 502);
             }
 
-            console.log(`[Registration] Verify Email Payload (Encoded Params):`, JSON.stringify(payload, null, 2));
-            console.log(`[Registration] Using token prefix: ${token.slice(0, 20)}...`);
+            console.log('[Registration] CA&A token retrieved.');
 
             // Use Python workaround for stability on corporate networks
             // Send payload as ROOT JSON (no 'v' wrapping)
@@ -461,8 +460,8 @@ class AuthController {
     registerCreateAccount = async (c: Context) => {
         try {
             const body = await c.req.json();
-            const { email, firstName, lastName } = body;
-            console.log(`[Registration] Create Account Request for: ${email} (${firstName} ${lastName})`);
+            const { email } = body;
+            console.log('[Registration] Create account request received.');
 
             if (!email) {
                 return c.json({ message: 'Email is required' }, 400);
@@ -487,7 +486,7 @@ class AuthController {
                 ]
             };
 
-            console.log(`[Registration] Create Account Payload (Encoded Params):`, JSON.stringify(payload, null, 2));
+            console.log('[Registration] Create account payload prepared.');
 
             // Use Python workaround for stability on corporate networks
             // Send payload as ROOT JSON (no 'v' wrapping)

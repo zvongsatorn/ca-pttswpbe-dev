@@ -1,4 +1,5 @@
 import { sql, poolPromise } from '../config/db.js';
+import { queryAllowlistedSql, toAllowlistedSql } from './sqlSafetyUtils.js';
 
 interface RetirementRateInput {
     year: number;
@@ -259,7 +260,7 @@ class RetirementService {
                     request.input('AsOfDate', sql.Date, asOfDate);
                 }
 
-                const result = await request.query(plan.sqlText);
+                const result = await queryAllowlistedSql(request, toAllowlistedSql(plan.sqlText));
                 const rows = Array.isArray(result.recordset) ? result.recordset as Array<Record<string, unknown>> : [];
                 const options = this.mapRetirementLevelOptions(rows);
                 if (options.length > 0) {
@@ -326,7 +327,7 @@ class RetirementService {
             request.input('TargetEffectiveYear', sql.Int, targetEffectiveYear);
         }
 
-        const result = await request.query(this.buildRateRowsSql(targetEffectiveYear));
+        const result = await queryAllowlistedSql(request, toAllowlistedSql(this.buildRateRowsSql(targetEffectiveYear)));
         return Array.isArray(result.recordset) ? result.recordset : [];
     }
 
@@ -397,9 +398,8 @@ class RetirementService {
     }
 
     private async getRemarkFromTable(pool: sql.ConnectionPool, effectiveYear: number) {
-        const result = await pool.request()
-            .input('EffectiveYear', sql.Int, effectiveYear)
-            .query(this.buildRemarkSql());
+        const request = pool.request().input('EffectiveYear', sql.Int, effectiveYear);
+        const result = await queryAllowlistedSql(request, toAllowlistedSql(this.buildRemarkSql()));
 
         if (!Array.isArray(result.recordset) || result.recordset.length === 0) return null;
         return this.mapRemarkRow(result.recordset[0] as Record<string, unknown>);

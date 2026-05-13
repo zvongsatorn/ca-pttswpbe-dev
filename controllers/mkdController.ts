@@ -2,6 +2,15 @@ import { Context } from 'hono';
 import { randomUUID } from 'crypto';
 import ExcelJS from 'exceljs';
 import {
+    resolveSafeChildPath,
+    safeCopyFileSync,
+    safeExistsSync,
+    safeMkdirSync,
+    safeReadFileSync,
+    safeWriteFileSync,
+    type SafeFilePath
+} from '../services/fileSafetyUtils.js';
+import {
     getStartYearService,
     getHistoryManDriverService,
     checkDupManDriverService,
@@ -65,17 +74,13 @@ const isSafeGeneratedFileName = (value: unknown): boolean => {
 
 const TEMPLATE_ROOT = path.resolve(process.cwd(), 'template');
 
-const resolveTemplatePath = (filename: string): string => {
+const resolveTemplatePath = (filename: string): SafeFilePath => {
     const safeFilename = path.basename(filename || '');
     if (!safeFilename || safeFilename !== filename || !/^[\w.-]+\.xlsx$/i.test(safeFilename)) {
         throw new Error('Invalid template filename');
     }
 
-    const templatePath = path.resolve(TEMPLATE_ROOT, safeFilename);
-    if (!templatePath.startsWith(`${TEMPLATE_ROOT}${path.sep}`)) {
-        throw new Error('Invalid template path');
-    }
-    return templatePath;
+    return resolveSafeChildPath(TEMPLATE_ROOT, [safeFilename]);
 };
 
 export const getStartYear = async (c: Context) => {
@@ -399,15 +404,15 @@ export const uploadFile = async (c: Context) => {
         const requestNo = getMkdRequestNo(details, id);
         
         const uploadDir = resolveMkdUploadPath(requestNo);
-        if (!fs.existsSync(uploadDir)) {
-            fs.mkdirSync(uploadDir, { recursive: true });
+        if (!safeExistsSync(uploadDir)) {
+            safeMkdirSync(uploadDir);
         }
         
         const extension = toSafeUploadExtension(fileName, ".pdf");
         
         const safeName = `${randomUUID()}${extension}`;
         const filePath = resolveMkdUploadPath(requestNo, safeName);
-        fs.writeFileSync(filePath, Buffer.from(fileBuffer));
+        safeWriteFileSync(filePath, Buffer.from(fileBuffer));
         
         // Save ONLY the filename in FileUpload column to match 50-char limit
         await uploadFileService(id, displayFileName, safeName, user);
@@ -703,10 +708,8 @@ const toSafeUploadSegment = (value: unknown, fallback = ''): string => {
 
 const getMkdRequestNo = (details: any, id: string) => toSafeUploadSegment(details?.header?.RequestNo || `ID_${id}`);
 
-const resolveMkdUploadPath = (...segments: string[]): string => {
-    const fullPath = path.resolve(MKD_UPLOAD_ROOT, ...segments.map((segment) => toSafeUploadSegment(segment)));
-    if (fullPath !== MKD_UPLOAD_ROOT && fullPath.startsWith(`${MKD_UPLOAD_ROOT}${path.sep}`)) return fullPath;
-    throw new Error('Invalid MKD upload path');
+const resolveMkdUploadPath = (...segments: string[]): SafeFilePath => {
+    return resolveSafeChildPath(MKD_UPLOAD_ROOT, segments.map((segment) => toSafeUploadSegment(segment)));
 };
 
 const normalizeMkdUserId = (value: unknown) => String(value || '').trim().replace(/^0+/, '');
@@ -718,13 +721,13 @@ const saveUploadedManDriverFile = async (id: string, file: File): Promise<ManDri
     const requestNo = getMkdRequestNo(details, id);
     const uploadDir = resolveMkdUploadPath(requestNo);
 
-    if (!fs.existsSync(uploadDir)) {
-        fs.mkdirSync(uploadDir, { recursive: true });
+    if (!safeExistsSync(uploadDir)) {
+        safeMkdirSync(uploadDir);
     }
 
     const extension = toSafeUploadExtension(displayFileName, '.pdf');
     const safeName = randomUUID() + extension;
-    fs.writeFileSync(resolveMkdUploadPath(requestNo, safeName), Buffer.from(fileBuffer));
+    safeWriteFileSync(resolveMkdUploadPath(requestNo, safeName), Buffer.from(fileBuffer));
 
     return { displayFileName, safeName };
 };
@@ -762,7 +765,7 @@ const reuseExistingManDriverFile = async (
     }
 
     const sourceFilePath = resolveMkdUploadPath(sourceRequestNo, existingFileUpload);
-    if (!fs.existsSync(sourceFilePath)) {
+    if (!safeExistsSync(sourceFilePath)) {
         return {
             displayFileName: '',
             safeName: '',
@@ -776,13 +779,13 @@ const reuseExistingManDriverFile = async (
     }
 
     const targetUploadDir = resolveMkdUploadPath(targetRequestNo);
-    if (!fs.existsSync(targetUploadDir)) {
-        fs.mkdirSync(targetUploadDir, { recursive: true });
+    if (!safeExistsSync(targetUploadDir)) {
+        safeMkdirSync(targetUploadDir);
     }
 
     const extension = toSafeUploadExtension(existingFileUpload, '.pdf');
     const safeName = randomUUID() + extension;
-    fs.copyFileSync(sourceFilePath, resolveMkdUploadPath(targetRequestNo, safeName));
+    safeCopyFileSync(sourceFilePath, resolveMkdUploadPath(targetRequestNo, safeName));
 
     return { displayFileName, safeName };
 };
@@ -855,13 +858,13 @@ export const getFile = async (c: Context) => {
         const requestNo = details?.header?.RequestNo || `ID_${id}`;
         
         const filePath = resolveMkdUploadPath(requestNo, fileId);
-        console.log('[DEBUG] getFile:', { id, fileId, requestNo, filePath, exists: fs.existsSync(filePath) });
+        console.log('[DEBUG] getFile:', { id, fileId, requestNo, filePath, exists: safeExistsSync(filePath) });
         
-        if (!fs.existsSync(filePath)) {
+        if (!safeExistsSync(filePath)) {
             return c.json({ message: 'File not found' }, 404);
         }
 
-        const fileBuffer = fs.readFileSync(filePath);
+        const fileBuffer = safeReadFileSync(filePath);
         const headerFileName = toSafeHeaderFilename(fileId, 'mkd-file.pdf');
         return c.body(fileBuffer, 200, {
             'Content-Type': 'application/pdf',
@@ -892,12 +895,12 @@ export const filesProxy = async (c: Context) => {
         }
         const fullPath = resolveMkdUploadPath(...safePathParts);
         
-        if (!fs.existsSync(fullPath)) {
+        if (!safeExistsSync(fullPath)) {
             console.log('[Proxy Logic] File not found:', fullPath);
             return c.json({ message: 'File not found' }, 404);
         }
 
-        const fileBuffer = fs.readFileSync(fullPath);
+        const fileBuffer = safeReadFileSync(fullPath);
         const fileName = toSafeHeaderFilename(path.basename(fullPath), 'mkd-file');
         const extension = path.extname(fileName).toLowerCase();
 
@@ -1053,7 +1056,7 @@ export const downloadMasterKeyTemplate = async (c: Context) => {
     try {
         const templatePath = resolveTemplatePath('templatekeyman.xlsx');
         
-        if (!fs.existsSync(templatePath)) {
+            if (!safeExistsSync(templatePath)) {
             return c.json({ message: 'Template file not found' }, 404);
         }
 
@@ -1088,7 +1091,7 @@ export const downloadMasterKeyTemplate = async (c: Context) => {
         }
 
         // Default: just return the raw template
-        const fileBuffer = fs.readFileSync(templatePath);
+        const fileBuffer = safeReadFileSync(templatePath);
         return c.body(fileBuffer, 200, {
             'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
             'Content-Disposition': `attachment; filename="templatekeyman.xlsx"`

@@ -1,4 +1,5 @@
 import configService from './configService.js';
+import { fetchSafeHttpUrl, toSafeHeaderValue, toSafeHttpsUrl, type SafeHttpUrl } from './httpSafetyUtils.js';
 
 const DEFAULT_ALLOWED_PIS_HOST_SUFFIXES = ['pttplc.com', 'pttdigital.com'];
 
@@ -17,34 +18,8 @@ const isAllowedPisHostname = (hostname: string): boolean => {
     ));
 };
 
-const resolveHttpsConfigUrl = (value: string, searchParams?: Record<string, string>): string => {
-    const parsed = new URL(String(value || '').trim());
-    if (parsed.protocol !== 'https:') {
-        throw new Error('PIS endpoint must use HTTPS');
-    }
-    if (parsed.username || parsed.password || parsed.hash) {
-        throw new Error('PIS endpoint contains unsupported URL parts');
-    }
-    if (parsed.port && parsed.port !== '443') {
-        throw new Error('PIS endpoint uses unsupported port');
-    }
-    if (!isAllowedPisHostname(parsed.hostname)) {
-        throw new Error('PIS endpoint host is not allowed');
-    }
-
-    Object.entries(searchParams || {}).forEach(([key, val]) => {
-        parsed.searchParams.set(key, val);
-    });
-
-    return parsed.toString();
-};
-
-const safeHeaderValue = (value: unknown, name: string): string => {
-    const text = String(value || '').trim();
-    if (!text || /[\r\n]/.test(text)) {
-        throw new Error(`Invalid ${name}`);
-    }
-    return text;
+const resolveHttpsConfigUrl = (value: string, searchParams?: Record<string, string>): SafeHttpUrl => {
+    return toSafeHttpsUrl(value, isAllowedPisHostname, searchParams);
 };
 
 const safePisIdentifier = (value: unknown): string => {
@@ -72,10 +47,10 @@ class PisService {
             return "";
         }
 
-        const credentials = Buffer.from(`${safeHeaderValue(username, 'PIS username')}:${safeHeaderValue(password, 'PIS password')}`).toString('base64');
+        const credentials = Buffer.from(`${toSafeHeaderValue(username, 'PIS username')}:${toSafeHeaderValue(password, 'PIS password')}`).toString('base64');
 
         try {
-            const response = await fetch(resolveHttpsConfigUrl(tokenUrl), {
+            const response = await fetchSafeHttpUrl(resolveHttpsConfigUrl(tokenUrl), {
                 method: 'POST',
                 headers: {
                     'Authorization': `Basic ${credentials}`,
@@ -92,7 +67,7 @@ class PisService {
             }
 
             const data: any = await response.json();
-            this.token = safeHeaderValue(data.access_token, 'PIS access token');
+            this.token = toSafeHeaderValue(data.access_token, 'PIS access token');
             this.tokenExpiry = Date.now() + (data.expires_in || 3600) * 1000 - 60000; // Subtract 1 min for safety
             return this.token || "";
         } catch (error) {
@@ -112,9 +87,9 @@ class PisService {
             const formattedEmpID = safePisIdentifier(employeeId);
             const url = resolveHttpsConfigUrl(baseUrl, { Search_EmployeeCode: formattedEmpID });
 
-            const response = await fetch(url, {
+            const response = await fetchSafeHttpUrl(url, {
                 headers: {
-                    'Authorization': `Bearer ${safeHeaderValue(token, 'PIS access token')}`,
+                    'Authorization': `Bearer ${toSafeHeaderValue(token, 'PIS access token')}`,
                     'Accept': 'application/json'
                 }
             });
@@ -145,9 +120,9 @@ class PisService {
             const formattedEmpID = safePisIdentifier(employeeId);
             const url = resolveHttpsConfigUrl(baseUrl, { in_empid: formattedEmpID, in_poscode: safePisIdentifier(posCode) });
 
-            const response = await fetch(url, {
+            const response = await fetchSafeHttpUrl(url, {
                 headers: {
-                    'Authorization': `Bearer ${safeHeaderValue(token, 'PIS access token')}`,
+                    'Authorization': `Bearer ${toSafeHeaderValue(token, 'PIS access token')}`,
                     'Accept': 'application/json'
                 }
             });

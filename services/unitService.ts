@@ -1,4 +1,5 @@
 import { sql, poolPromise } from '../config/db.js';
+import { queryAllowlistedSql, toAllowlistedSql } from './sqlSafetyUtils.js';
 
 const toSqlDateOnly = (value: Date | string): Date => {
     const parsed = value instanceof Date ? value : new Date(String(value));
@@ -41,25 +42,25 @@ const getOtherUnitsFromInfoData = async (pool: sql.ConnectionPool, empId: string
 
     let infoResult;
     try {
-        infoResult = await infoReq.query(`
+        infoResult = await queryAllowlistedSql(infoReq, toAllowlistedSql(`
             SELECT DISTINCT
                 LTRIM(RTRIM(CAST(UNITCODE AS varchar(20)))) AS OrgUnitNo
             FROM dbo.InfoData
             WHERE NULLIF(LTRIM(RTRIM(CAST(UNITCODE AS varchar(20)))), '') IS NOT NULL
               AND LTRIM(RTRIM(CAST(CODE AS varchar(20)))) IN (@EmployeeID, @EmployeeIDNoZero)
-        `);
+        `));
     } catch (error: any) {
         const message = String(error?.message || '').toLowerCase();
         if (!message.includes('invalid object name')) {
             throw error;
         }
-        infoResult = await infoReq.query(`
+        infoResult = await queryAllowlistedSql(infoReq, toAllowlistedSql(`
             SELECT DISTINCT
                 LTRIM(RTRIM(CAST(UNITCODE AS varchar(20)))) AS OrgUnitNo
             FROM dbo.infodata
             WHERE NULLIF(LTRIM(RTRIM(CAST(UNITCODE AS varchar(20)))), '') IS NOT NULL
               AND LTRIM(RTRIM(CAST(CODE AS varchar(20)))) IN (@EmployeeID, @EmployeeIDNoZero)
-        `);
+        `));
     }
 
     const orgUnitNos = Array.from(
