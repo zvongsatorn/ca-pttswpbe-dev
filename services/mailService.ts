@@ -9,7 +9,13 @@ let tokenExpiry: number = 0;
 
 const safeEmailAddress = (value: string): string => {
     const email = String(value || '').trim();
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || /[\r\n]/.test(email)) {
+    const atIndex = email.indexOf('@');
+    const domain = atIndex > 0 ? email.slice(atIndex + 1) : '';
+    const hasSingleAt = atIndex > 0 && atIndex === email.lastIndexOf('@');
+    const hasDotInDomain = domain.includes('.') && !domain.startsWith('.') && !domain.endsWith('.');
+    const hasInvalidWhitespace = email.split('').some((char) => char.trim() === '');
+
+    if (!hasSingleAt || !hasDotInDomain || hasInvalidWhitespace) {
         throw new Error('Invalid email address');
     }
     return email;
@@ -68,7 +74,7 @@ async function getAccessToken(): Promise<string> {
     // expires_in is in seconds
     tokenExpiry = now + (data.expires_in * 1000);
     
-    return accessToken!;
+    return accessToken;
 }
 
 export const sendMail = async (to: string, subject: string, body: string, isHtml: boolean = true) => {

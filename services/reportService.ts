@@ -1,5 +1,12 @@
 import { sql, poolPromise } from '../config/db.js';
 import { calculateReport7ShapeGapMetrics } from '../config/report7FormulaConfig.js';
+import {
+    bindSqlInputParams,
+    buildAllowedObjectFullName,
+    buildSqlInParams,
+    escapeSqlIdentifier,
+    pickColumnName
+} from './sqlSafetyUtils.js';
 
 type Report08LevelMap = Map<string, Map<string, number>>;
 type Report09OrgYearMap = Map<string, Map<number, { support: number; bu: number }>>;
@@ -462,84 +469,15 @@ export const getReport03FilterOptionsService = async (
     }
 };
 
-const SQL_IDENTIFIER_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
-
-const escapeSqlIdentifier = (value: string): string => {
-    if (!SQL_IDENTIFIER_PATTERN.test(value)) {
-        throw new Error(`Unsupported SQL identifier: ${value}`);
-    }
-    return `[${value}]`;
-};
-
-const buildAllowedObjectFullName = (
-    schemaName: string,
-    objectName: string,
-    allowedSchemas: string[],
-    allowedObjects: string[]
-): string => {
-    const normalizedSchema = schemaName.trim().toLowerCase();
-    const normalizedObject = objectName.trim().toLowerCase();
-    const matchedSchema = allowedSchemas.find((schema) => schema === schemaName)
-        || allowedSchemas.find((schema) => schema.toLowerCase() === normalizedSchema);
-    const matchedObject = allowedObjects.find((object) => object === objectName)
-        || allowedObjects.find((object) => object.toLowerCase() === normalizedObject);
-
-    if (!matchedSchema || !matchedObject) {
-        throw new Error(`Unsupported report object source: ${schemaName}.${objectName}`);
-    }
-
-    return `${escapeSqlIdentifier(matchedSchema)}.${escapeSqlIdentifier(matchedObject)}`;
-};
-
-const pickColumnName = (columns: Map<string, string>, candidates: string[]): string | null => {
-    for (const candidate of candidates) {
-        const found = columns.get(candidate.toLowerCase());
-        if (found === candidate) return candidate;
-    }
-
-    for (const candidate of candidates) {
-        const found = columns.get(candidate.toLowerCase());
-        if (found && SQL_IDENTIFIER_PATTERN.test(found)) return found;
-    }
-
-    return null;
-};
-
 type MetaRow = Record<string, unknown>;
-type SqlInputParam = {
-    name: string;
-    type: unknown;
-    value: unknown;
-};
-
-const buildSqlInParams = (
-    values: readonly unknown[],
-    prefix: string,
-    type: unknown = sql.NVarChar(128)
-): { placeholders: string; params: SqlInputParam[] } => {
-    const params = values.map((value, index) => ({
-        name: `${prefix}${index}`,
-        type,
-        value
-    }));
-
-    return {
-        placeholders: params.map((param) => `@${param.name}`).join(','),
-        params
-    };
-};
-
-const bindSqlInputParams = (request: any, params: SqlInputParam[]) => {
-    params.forEach((param) => request.input(param.name, param.type as any, param.value));
-    return request;
-};
 
 const buildReportObjectSource = (meta: TableMeta, allowedObjects: string[]): string => {
     const expected = buildAllowedObjectFullName(
         meta.schemaName,
         meta.tableName,
         REPORT_METADATA_SCHEMA_CANDIDATES,
-        allowedObjects
+        allowedObjects,
+        'report object'
     );
     if (meta.fullName !== expected) {
         throw new Error(`Unsupported resolved report object source: ${meta.objectName}`);
@@ -601,7 +539,8 @@ const buildTableMeta = async (
         schemaName,
         tableName,
         REPORT_METADATA_SCHEMA_CANDIDATES,
-        allowedObjects
+        allowedObjects,
+        'report object'
     );
 
     return {

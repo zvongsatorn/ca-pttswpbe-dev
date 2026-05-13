@@ -83,10 +83,18 @@ const isPathInside = (childPath: string, parentPath: string): boolean => {
 
 const normalizeOutboundPath = (value: string): string => {
     const trimmed = toText(value);
-    if (!trimmed || /[\u0000-\u001F\u007F]/.test(trimmed)) {
+    if (!trimmed || hasControlCharacter(trimmed)) {
         throw new Error('Invalid SAP outbound path');
     }
     return path.resolve(process.cwd(), trimmed);
+};
+
+const hasControlCharacter = (value: string): boolean => {
+    for (let index = 0; index < value.length; index += 1) {
+        const code = value.charCodeAt(index);
+        if (code <= 31 || code === 127) return true;
+    }
+    return false;
 };
 
 const getOutboundAllowedRoot = (): string => {

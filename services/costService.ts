@@ -1,4 +1,12 @@
 import { poolPromise, sql } from '../config/db.js';
+import {
+    bindSqlInputParams,
+    buildAllowedObjectFullName,
+    buildSqlFragmentList,
+    buildSqlInParams,
+    escapeSqlIdentifier,
+    pickColumnName
+} from './sqlSafetyUtils.js';
 
 export interface CostPayload {
     orgUnitNo: string;
@@ -41,12 +49,6 @@ type ResolvedCostTable = TableMeta & {
     endDateCol: string | null;
 };
 
-type SqlInputParam = {
-    name: string;
-    type: unknown;
-    value: unknown;
-};
-
 const COST_TABLE_CANDIDATES = ['MP_CostEmployee', 'MP_CostEmp', 'CostEmployee'];
 const COST_SCHEMA_CANDIDATES = ['dbo', 'db_owner'];
 const ORG_COL_CANDIDATES = ['OrgUnitID', 'OrgUnitId', 'OrgUnitNo', 'OrgUnitNO', 'OrgUnit', 'UnitNo', 'UnitCode', 'OrgNo'];
@@ -59,100 +61,27 @@ const NOTE_COL_CANDIDATES = ['Note', 'Remark', 'Description', 'Memo'];
 
 const BASE_TEMPLATE_HEADERS = ['OrgUnitNo', 'LevelGroupNo', 'EffectiveDate'];
 
-const SQL_IDENTIFIER_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
-
-const escapeSqlIdentifier = (value: string): string => {
-    if (!SQL_IDENTIFIER_PATTERN.test(value)) {
-        throw new Error(`Unsupported SQL identifier: ${value}`);
-    }
-    return `[${value}]`;
+const buildCostOrderBySql = (resolved: ResolvedCostTable, alias = 'src'): string => {
+    const aliasPrefix = alias ? `${alias}.` : '';
+    return buildSqlFragmentList([
+        `${dateExpr(resolved, alias)} DESC`,
+        `${aliasPrefix}${escapeSqlIdentifier(resolved.orgCol)}`,
+        `${aliasPrefix}${escapeSqlIdentifier(resolved.levelCol)}`
+    ]);
 };
-
-const buildAllowedTableFullName = (
-    schemaName: string,
-    tableName: string,
-    allowedSchemas: string[],
-    allowedTables: string[]
-): string => {
-    const normalizedSchema = schemaName.trim().toLowerCase();
-    const normalizedTable = tableName.trim().toLowerCase();
-    const matchedSchema = allowedSchemas.find((schema) => schema === schemaName)
-        || allowedSchemas.find((schema) => schema.toLowerCase() === normalizedSchema);
-    const matchedTable = allowedTables.find((table) => table === tableName)
-        || allowedTables.find((table) => table.toLowerCase() === normalizedTable);
-
-    if (!matchedSchema || !matchedTable) {
-        throw new Error(`Unsupported table source: ${schemaName}.${tableName}`);
-    }
-
-    return `${escapeSqlIdentifier(matchedSchema)}.${escapeSqlIdentifier(matchedTable)}`;
-};
-
-const buildSqlInParams = (
-    values: unknown[],
-    prefix: string,
-    type: unknown = sql.NVarChar(128)
-): { placeholders: string; params: SqlInputParam[] } => {
-    const params = values.map((value, index) => ({
-        name: `${prefix}${index}`,
-        type,
-        value
-    }));
-
-    return {
-        placeholders: params.map((param) => `@${param.name}`).join(','),
-        params
-    };
-};
-
-const bindSqlInputParams = (request: sql.Request, params: SqlInputParam[]) => {
-    params.forEach((param) => request.input(param.name, param.type as any, param.value));
-    return request;
-};
-
-const SQL_FRAGMENT_PATTERN = /^[A-Za-z0-9_\[\]@().=,\s]+$/;
-
-const buildSqlFragmentList = (parts: string[]): string => {
-    if (!parts.length) throw new Error('Empty SQL fragment list');
-    parts.forEach((part) => {
-        if (!SQL_FRAGMENT_PATTERN.test(part)) {
-            throw new Error(`Unsupported SQL fragment: ${part}`);
-        }
-    });
-    return parts.join(', ');
-};
-
-const buildCostOrderBySql = (resolved: ResolvedCostTable, alias = 'src'): string => buildSqlFragmentList([
-    `${dateExpr(resolved, alias)} DESC`,
-    `${alias ? `${alias}.` : ''}${escapeSqlIdentifier(resolved.orgCol)}`,
-    `${alias ? `${alias}.` : ''}${escapeSqlIdentifier(resolved.levelCol)}`
-]);
 
 const buildCostTableSource = (resolved: ResolvedCostTable): string => {
-    const expected = buildAllowedTableFullName(
+    const expected = buildAllowedObjectFullName(
         resolved.schemaName,
         resolved.tableName,
         COST_SCHEMA_CANDIDATES,
-        COST_TABLE_CANDIDATES
+        COST_TABLE_CANDIDATES,
+        'cost table'
     );
     if (resolved.fullName !== expected) {
         throw new Error(`Unsupported resolved cost table source: ${resolved.objectName}`);
     }
     return expected;
-};
-
-const pickColumnName = (columns: Map<string, string>, candidates: string[]): string | null => {
-    for (const candidate of candidates) {
-        const found = columns.get(candidate.toLowerCase());
-        if (found === candidate) return candidate;
-    }
-
-    for (const candidate of candidates) {
-        const found = columns.get(candidate.toLowerCase());
-        if (found && SQL_IDENTIFIER_PATTERN.test(found)) return found;
-    }
-
-    return null;
 };
 
 const toDateString = (value: unknown): string => {
@@ -268,11 +197,12 @@ const getTableMeta = async (
         columns.set(colName.toLowerCase(), colName);
     });
 
-    const fullName = buildAllowedTableFullName(
+    const fullName = buildAllowedObjectFullName(
         schemaName,
         tableName,
         COST_SCHEMA_CANDIDATES,
-        COST_TABLE_CANDIDATES
+        COST_TABLE_CANDIDATES,
+        'cost table'
     );
 
     return {

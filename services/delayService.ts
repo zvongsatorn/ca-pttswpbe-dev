@@ -1,4 +1,12 @@
 import { sql, poolPromise } from '../config/db.js';
+import {
+    bindSqlInputParams,
+    buildAllowedObjectFullName,
+    buildSqlFragmentList,
+    buildSqlInParams,
+    escapeSqlIdentifier,
+    pickColumnName
+} from './sqlSafetyUtils.js';
 import userGroupService from './userGroupService.js';
 
 export interface DelayRecord {
@@ -141,89 +149,7 @@ const UNIT_ABBR_COL_CANDIDATES = ['UnitAbbr', 'OrgUnitAbbr', 'ShortName', 'Abbr'
 const UNIT_BG_COL_CANDIDATES = ['BGNo', 'BgNo', 'BGNO'];
 const NON_COUNT_DELAY_YEAR = 9999;
 
-const SQL_IDENTIFIER_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
-
-const escapeSqlIdentifier = (value: string): string => {
-    if (!SQL_IDENTIFIER_PATTERN.test(value)) {
-        throw new Error(`Unsupported SQL identifier: ${value}`);
-    }
-    return `[${value}]`;
-};
-
-const buildAllowedObjectFullName = (
-    schemaName: string,
-    objectName: string,
-    allowedSchemas: string[],
-    allowedObjects: string[]
-): string => {
-    const normalizedSchema = schemaName.trim().toLowerCase();
-    const normalizedObject = objectName.trim().toLowerCase();
-    const matchedSchema = allowedSchemas.find((schema) => schema === schemaName)
-        || allowedSchemas.find((schema) => schema.toLowerCase() === normalizedSchema);
-    const matchedObject = allowedObjects.find((object) => object === objectName)
-        || allowedObjects.find((object) => object.toLowerCase() === normalizedObject);
-
-    if (!matchedSchema || !matchedObject) {
-        throw new Error(`Unsupported delay object source: ${schemaName}.${objectName}`);
-    }
-
-    return `${escapeSqlIdentifier(matchedSchema)}.${escapeSqlIdentifier(matchedObject)}`;
-};
 const toTrimText = (value: unknown): string => String(value || '').trim();
-
-type SqlInputParam = {
-    name: string;
-    type: unknown;
-    value: unknown;
-};
-
-const buildSqlInParams = (
-    values: unknown[],
-    prefix: string,
-    type: unknown = sql.NVarChar(128)
-): { placeholders: string; params: SqlInputParam[] } => {
-    const params = values.map((value, index) => ({
-        name: `${prefix}${index}`,
-        type,
-        value
-    }));
-
-    return {
-        placeholders: params.map((param) => `@${param.name}`).join(','),
-        params
-    };
-};
-
-const bindSqlInputParams = (request: sql.Request, params: SqlInputParam[]) => {
-    params.forEach((param) => request.input(param.name, param.type as any, param.value));
-    return request;
-};
-
-const SQL_FRAGMENT_PATTERN = /^[A-Za-z0-9_\[\]@().=,\s]+$/;
-
-const buildSqlFragmentList = (parts: string[]): string => {
-    if (!parts.length) throw new Error('Empty SQL fragment list');
-    parts.forEach((part) => {
-        if (!SQL_FRAGMENT_PATTERN.test(part)) {
-            throw new Error(`Unsupported SQL fragment: ${part}`);
-        }
-    });
-    return parts.join(', ');
-};
-
-const pickColumnName = (columns: Map<string, string>, candidates: string[]): string | null => {
-    for (const candidate of candidates) {
-        const found = columns.get(candidate.toLowerCase());
-        if (found === candidate) return candidate;
-    }
-
-    for (const candidate of candidates) {
-        const found = columns.get(candidate.toLowerCase());
-        if (found && SQL_IDENTIFIER_PATTERN.test(found)) return found;
-    }
-
-    return null;
-};
 
 class DelayService {
     private isMissingDelayTypeColumnError(error: unknown): boolean {
@@ -325,7 +251,8 @@ class DelayService {
             schemaName,
             tableName,
             DELAY_METADATA_SCHEMA_CANDIDATES,
-            tableCandidates
+            tableCandidates,
+            'delay object'
         );
 
         return {

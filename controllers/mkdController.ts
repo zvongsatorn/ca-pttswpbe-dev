@@ -67,7 +67,7 @@ const TEMPLATE_ROOT = path.resolve(process.cwd(), 'template');
 
 const resolveTemplatePath = (filename: string): string => {
     const safeFilename = path.basename(filename || '');
-    if (!safeFilename || safeFilename !== filename || !/^[A-Za-z0-9._-]+\.xlsx$/i.test(safeFilename)) {
+    if (!safeFilename || safeFilename !== filename || !/^[\w.-]+\.xlsx$/i.test(safeFilename)) {
         throw new Error('Invalid template filename');
     }
 
