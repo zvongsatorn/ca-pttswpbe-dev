@@ -30,6 +30,25 @@ const toSafeUploadExtension = (value: unknown, fallback: string): string => {
     return PIR_FILE_EXTENSIONS.has(extension) ? extension : fallback;
 };
 
+const isSafeGeneratedFileName = (value: unknown): boolean => {
+    return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\.(pdf|xlsx|xls)$/i.test(String(value || '').trim());
+};
+
+const TEMPLATE_ROOT = path.resolve(process.cwd(), 'template');
+
+const resolveTemplatePath = (filename: string): string => {
+    const safeFilename = path.basename(filename || '');
+    if (!safeFilename || safeFilename !== filename || !/^[A-Za-z0-9._-]+\.xlsx$/i.test(safeFilename)) {
+        throw new Error('Invalid template filename');
+    }
+
+    const templatePath = path.resolve(TEMPLATE_ROOT, safeFilename);
+    if (!templatePath.startsWith(`${TEMPLATE_ROOT}${path.sep}`)) {
+        throw new Error('Invalid template path');
+    }
+    return templatePath;
+};
+
 // --- Tab 1: PIR ---
 export const getPIR = async (c: Context) => {
     try {
@@ -171,6 +190,9 @@ export const uploadFilePIR = async (c: Context) => {
         
         const safeName = `${randomUUID()}${extension}`;
         const filePath = path.resolve(uploadDir, safeName);
+        if (!filePath.startsWith(`${uploadDir}${path.sep}`)) {
+            return c.json({ message: 'Invalid upload path' }, 400);
+        }
         fs.writeFileSync(filePath, Buffer.from(fileBuffer));
         
         await insertFileAttachService(effYear, displayFileName, safeName, user);
@@ -190,7 +212,7 @@ export const downloadFilePIR = async (c: Context) => {
             return c.json({ message: 'Missing parameters' }, 400);
         }
         
-        if (!/^\d{4}$/.test(effYear) || path.basename(fileId) !== fileId) {
+        if (!/^\d{4}$/.test(effYear) || path.basename(fileId) !== fileId || !isSafeGeneratedFileName(fileId)) {
             return c.json({ message: 'Invalid parameters' }, 400);
         }
 
@@ -316,7 +338,7 @@ export const exportExcel = async (c: Context) => {
 };
 export const getPIRTemplate = async (c: Context) => {
     try {
-        const filePath = path.join(process.cwd(), 'template', 'templateimproverate.xlsx');
+        const filePath = resolveTemplatePath('templateimproverate.xlsx');
         
         if (!fs.existsSync(filePath)) {
             return c.json({ success: false, message: 'Template file not found' }, 404);

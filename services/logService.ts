@@ -26,7 +26,9 @@ const executeLogActionProcedure = async (
         request.input('FromDate', sql.DateTime, fromDate);
         request.input('ToDate', sql.DateTime, toDate);
 
-        const result = await request.execute(procedureName);
+        const result = procedureName === 'mp_LogActionUserGet'
+            ? await request.execute('mp_LogActionUserGet')
+            : await request.execute('mp_LogActionExportExcel');
         return result.recordset || [];
     } catch (error) {
         console.error(`Error executing ${procedureName}:`, error);

@@ -41,7 +41,14 @@ type ResolvedCostTable = TableMeta & {
     endDateCol: string | null;
 };
 
+type SqlInputParam = {
+    name: string;
+    type: unknown;
+    value: unknown;
+};
+
 const COST_TABLE_CANDIDATES = ['MP_CostEmployee', 'MP_CostEmp', 'CostEmployee'];
+const COST_SCHEMA_CANDIDATES = ['dbo', 'db_owner'];
 const ORG_COL_CANDIDATES = ['OrgUnitID', 'OrgUnitId', 'OrgUnitNo', 'OrgUnitNO', 'OrgUnit', 'UnitNo', 'UnitCode', 'OrgNo'];
 const LEVEL_COL_CANDIDATES = ['LevelGroupNo', 'LevelGroupNO', 'LevelNo', 'GroupNo', 'PositionLevel'];
 const EFFECTIVE_COL_CANDIDATES = ['EffectiveDate', 'CheckDate', 'DataDate', 'MonthDate', 'TranDate'];
@@ -52,14 +59,99 @@ const NOTE_COL_CANDIDATES = ['Note', 'Remark', 'Description', 'Memo'];
 
 const BASE_TEMPLATE_HEADERS = ['OrgUnitNo', 'LevelGroupNo', 'EffectiveDate'];
 
-const escapeSqlString = (value: string): string => value.replace(/'/g, "''");
-const escapeSqlIdentifier = (value: string): string => `[${value.replace(/]/g, ']]')}]`;
+const SQL_IDENTIFIER_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+const escapeSqlIdentifier = (value: string): string => {
+    if (!SQL_IDENTIFIER_PATTERN.test(value)) {
+        throw new Error(`Unsupported SQL identifier: ${value}`);
+    }
+    return `[${value}]`;
+};
+
+const buildAllowedTableFullName = (
+    schemaName: string,
+    tableName: string,
+    allowedSchemas: string[],
+    allowedTables: string[]
+): string => {
+    const normalizedSchema = schemaName.trim().toLowerCase();
+    const normalizedTable = tableName.trim().toLowerCase();
+    const matchedSchema = allowedSchemas.find((schema) => schema === schemaName)
+        || allowedSchemas.find((schema) => schema.toLowerCase() === normalizedSchema);
+    const matchedTable = allowedTables.find((table) => table === tableName)
+        || allowedTables.find((table) => table.toLowerCase() === normalizedTable);
+
+    if (!matchedSchema || !matchedTable) {
+        throw new Error(`Unsupported table source: ${schemaName}.${tableName}`);
+    }
+
+    return `${escapeSqlIdentifier(matchedSchema)}.${escapeSqlIdentifier(matchedTable)}`;
+};
+
+const buildSqlInParams = (
+    values: unknown[],
+    prefix: string,
+    type: unknown = sql.NVarChar(128)
+): { placeholders: string; params: SqlInputParam[] } => {
+    const params = values.map((value, index) => ({
+        name: `${prefix}${index}`,
+        type,
+        value
+    }));
+
+    return {
+        placeholders: params.map((param) => `@${param.name}`).join(','),
+        params
+    };
+};
+
+const bindSqlInputParams = (request: sql.Request, params: SqlInputParam[]) => {
+    params.forEach((param) => request.input(param.name, param.type as any, param.value));
+    return request;
+};
+
+const SQL_FRAGMENT_PATTERN = /^[A-Za-z0-9_\[\]@().=,\s]+$/;
+
+const buildSqlFragmentList = (parts: string[]): string => {
+    if (!parts.length) throw new Error('Empty SQL fragment list');
+    parts.forEach((part) => {
+        if (!SQL_FRAGMENT_PATTERN.test(part)) {
+            throw new Error(`Unsupported SQL fragment: ${part}`);
+        }
+    });
+    return parts.join(', ');
+};
+
+const buildCostOrderBySql = (resolved: ResolvedCostTable, alias = 'src'): string => buildSqlFragmentList([
+    `${dateExpr(resolved, alias)} DESC`,
+    `${alias ? `${alias}.` : ''}${escapeSqlIdentifier(resolved.orgCol)}`,
+    `${alias ? `${alias}.` : ''}${escapeSqlIdentifier(resolved.levelCol)}`
+]);
+
+const buildCostTableSource = (resolved: ResolvedCostTable): string => {
+    const expected = buildAllowedTableFullName(
+        resolved.schemaName,
+        resolved.tableName,
+        COST_SCHEMA_CANDIDATES,
+        COST_TABLE_CANDIDATES
+    );
+    if (resolved.fullName !== expected) {
+        throw new Error(`Unsupported resolved cost table source: ${resolved.objectName}`);
+    }
+    return expected;
+};
 
 const pickColumnName = (columns: Map<string, string>, candidates: string[]): string | null => {
     for (const candidate of candidates) {
         const found = columns.get(candidate.toLowerCase());
-        if (found) return found;
+        if (found === candidate) return candidate;
     }
+
+    for (const candidate of candidates) {
+        const found = columns.get(candidate.toLowerCase());
+        if (found && SQL_IDENTIFIER_PATTERN.test(found)) return found;
+    }
+
     return null;
 };
 
@@ -128,12 +220,15 @@ const getTableMeta = async (
 ): Promise<TableMeta | null> => {
     if (!tableCandidates.length) return null;
 
-    const inList = tableCandidates.map((name) => `'${escapeSqlString(name.toLowerCase())}'`).join(',');
-    const tableRes = await pool.request().query(`
+    const { placeholders: tablePlaceholders, params: tableParams } = buildSqlInParams(tableCandidates.map((name) => name.toLowerCase()), 'costTable');
+    const { placeholders: schemaPlaceholders, params: schemaParams } = buildSqlInParams(COST_SCHEMA_CANDIDATES, 'costSchema');
+    const tableRequest = bindSqlInputParams(pool.request(), [...tableParams, ...schemaParams]);
+    const tableRes = await tableRequest.query(`
         SELECT s.name AS schema_name, t.name AS table_name
         FROM sys.tables t
         INNER JOIN sys.schemas s ON s.schema_id = t.schema_id
-        WHERE LOWER(t.name) IN (${inList})
+        WHERE LOWER(t.name) IN (${tablePlaceholders})
+          AND s.name IN (${schemaPlaceholders})
     `);
 
     const rows = Array.isArray(tableRes.recordset)
@@ -173,11 +268,18 @@ const getTableMeta = async (
         columns.set(colName.toLowerCase(), colName);
     });
 
+    const fullName = buildAllowedTableFullName(
+        schemaName,
+        tableName,
+        COST_SCHEMA_CANDIDATES,
+        COST_TABLE_CANDIDATES
+    );
+
     return {
         schemaName,
         tableName,
         objectName,
-        fullName: `${escapeSqlIdentifier(schemaName)}.${escapeSqlIdentifier(tableName)}`,
+        fullName,
         columns
     };
 };
@@ -309,6 +411,7 @@ const insertCostRecord = async (
     resolved: ResolvedCostTable,
     payload: CostPayload
 ): Promise<void> => {
+    const tableSource = buildCostTableSource(resolved);
     const columns: string[] = [
         escapeSqlIdentifier(resolved.orgCol),
         escapeSqlIdentifier(resolved.levelCol),
@@ -334,13 +437,15 @@ const insertCostRecord = async (
         columns.push(escapeSqlIdentifier(resolved.endDateCol));
         values.push('@EffectiveDate');
     }
+    const insertColumns = buildSqlFragmentList(columns);
+    const insertValues = buildSqlFragmentList(values);
 
     const request = pool.request();
     bindCostPayload(request, payload);
 
     await request.query(`
-        INSERT INTO ${resolved.fullName} (${columns.join(', ')})
-        VALUES (${values.join(', ')})
+        INSERT INTO ${tableSource} (${insertColumns})
+        VALUES (${insertValues})
     `);
 };
 
@@ -349,6 +454,7 @@ const updateCostByKey = async (
     resolved: ResolvedCostTable,
     payload: CostPayload
 ): Promise<number> => {
+    const tableSource = buildCostTableSource(resolved);
     const setParts: string[] = [
         `${escapeSqlIdentifier(resolved.amountCol)} = @Cost`
     ];
@@ -366,13 +472,14 @@ const updateCostByKey = async (
     if (resolved.endDateCol) {
         setParts.push(`${escapeSqlIdentifier(resolved.endDateCol)} = @EffectiveDate`);
     }
+    const updateSetSql = buildSqlFragmentList(setParts);
 
     const request = pool.request();
     bindCostPayload(request, payload);
 
     const result = await request.query(`
-        UPDATE ${resolved.fullName}
-        SET ${setParts.join(', ')}
+        UPDATE ${tableSource}
+        SET ${updateSetSql}
         WHERE ${keyMatchCondition(resolved)}
     `);
 
@@ -384,12 +491,13 @@ const existsCostByKey = async (
     resolved: ResolvedCostTable,
     payload: CostPayload
 ): Promise<boolean> => {
+    const tableSource = buildCostTableSource(resolved);
     const request = pool.request();
     bindCostPayload(request, payload);
 
     const result = await request.query(`
         SELECT TOP (1) 1 AS exists_flag
-        FROM ${resolved.fullName}
+        FROM ${tableSource}
         WHERE ${keyMatchCondition(resolved)}
     `);
 
@@ -415,6 +523,8 @@ const upsertWithResolved = async (
 export const getCostRecordsService = async (fromDate: string, toDate: string): Promise<CostRecord[]> => {
     const pool = await poolPromise;
     const resolved = await resolveCostTable(pool);
+    const tableSource = buildCostTableSource(resolved);
+    const orderBySql = buildCostOrderBySql(resolved, 'src');
 
     const result = await pool.request()
         .input('FromDate', sql.Date, fromDate)
@@ -429,10 +539,10 @@ export const getCostRecordsService = async (fromDate: string, toDate: string): P
                     : `CAST('' AS nvarchar(200))`
                 } AS Note,
                 CAST(COALESCE(TRY_CONVERT(decimal(18,4), src.${escapeSqlIdentifier(resolved.amountCol)}), 0) AS decimal(18,4)) AS Cost
-            FROM ${resolved.fullName} src
+            FROM ${tableSource} src
             WHERE 1 = 1
             ${rangeDateCondition(resolved, 'src')}
-            ORDER BY ${dateExpr(resolved, 'src')} DESC, src.${escapeSqlIdentifier(resolved.orgCol)}, src.${escapeSqlIdentifier(resolved.levelCol)}
+            ORDER BY ${orderBySql}
         `);
 
     const rows = Array.isArray(result.recordset)
@@ -482,6 +592,8 @@ export const updateCostRecordService = async (
 ): Promise<boolean> => {
     const pool = await poolPromise;
     const resolved = await resolveCostTable(pool);
+    const tableSource = buildCostTableSource(resolved);
+    const orderBySql = buildCostOrderBySql(resolved, '');
 
     const setParts: string[] = [
         `${escapeSqlIdentifier(resolved.orgCol)} = @NextOrgUnitNo`,
@@ -502,6 +614,7 @@ export const updateCostRecordService = async (
     if (resolved.endDateCol) {
         setParts.push(`${escapeSqlIdentifier(resolved.endDateCol)} = @NextEffectiveDate`);
     }
+    const updateSetSql = buildSqlFragmentList(setParts);
 
     const request = pool.request();
     bindCostPayload(request, original, 'Original');
@@ -510,12 +623,12 @@ export const updateCostRecordService = async (
     const result = await request.query(`
         ;WITH target AS (
             SELECT TOP (1) *
-            FROM ${resolved.fullName}
+            FROM ${tableSource}
             WHERE ${originalMatchCondition(resolved)}
-            ORDER BY ${dateExpr(resolved, '')} DESC
+            ORDER BY ${orderBySql}
         )
         UPDATE target
-        SET ${setParts.join(', ')}
+        SET ${updateSetSql}
     `);
 
     return (result.rowsAffected?.[0] || 0) > 0;
@@ -524,6 +637,8 @@ export const updateCostRecordService = async (
 export const deleteCostRecordService = async (original: CostPayload): Promise<boolean> => {
     const pool = await poolPromise;
     const resolved = await resolveCostTable(pool);
+    const tableSource = buildCostTableSource(resolved);
+    const orderBySql = buildCostOrderBySql(resolved, '');
 
     const request = pool.request();
     bindCostPayload(request, original, 'Original');
@@ -531,9 +646,9 @@ export const deleteCostRecordService = async (original: CostPayload): Promise<bo
     const result = await request.query(`
         ;WITH target AS (
             SELECT TOP (1) *
-            FROM ${resolved.fullName}
+            FROM ${tableSource}
             WHERE ${originalMatchCondition(resolved)}
-            ORDER BY ${dateExpr(resolved, '')} DESC
+            ORDER BY ${orderBySql}
         )
         DELETE FROM target
     `);

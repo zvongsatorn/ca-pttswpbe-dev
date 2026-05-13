@@ -1489,7 +1489,18 @@ const executeHRCenterOrgUnitProcedure = async (
     req.input("EffectiveDate", sql.Date, toSqlDateOnly(effectiveDate));
     req.input("EmployeeID", sql.VarChar(10), employeeId);
     req.input("UserGroupNO", sql.VarChar(2), userGroupNo);
-    return req.execute(procedureName);
+    switch (procedureName) {
+        case "mp_HRCenter_OrgUnit_GetDataByEffDate_ByChild":
+            return req.execute("mp_HRCenter_OrgUnit_GetDataByEffDate_ByChild");
+        case "mp_HRCenter_OrgUnit_GetDataAll_ByChild":
+            return req.execute("mp_HRCenter_OrgUnit_GetDataAll_ByChild");
+        case "mp_HRCenter_OrgUnit_GetTrans":
+            return req.execute("mp_HRCenter_OrgUnit_GetTrans");
+        case "mp_HRCenter_OrgUnit_GetAll":
+            return req.execute("mp_HRCenter_OrgUnit_GetAll");
+        default:
+            throw new Error("Unsupported HR Center procedure");
+    }
 };
 
 const executeHRCenterOrgUnitProcedureWithFallback = async (

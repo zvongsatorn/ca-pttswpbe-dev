@@ -18,9 +18,14 @@ const isAllowedProfilePictureExtension = (extension: string): boolean => {
     return Object.prototype.hasOwnProperty.call(PROFILE_PICTURE_CONTENT_TYPES, extension);
 };
 
+const isSafeProfilePictureFilename = (filename: string): boolean => {
+    return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\.(jpg|jpeg|png|webp)$/i.test(filename);
+};
+
 const resolveProfilePicturePath = (filename: string): string | null => {
     const safeFilename = path.basename(filename || '');
     if (!safeFilename || safeFilename !== filename) return null;
+    if (!isSafeProfilePictureFilename(safeFilename)) return null;
 
     const extension = path.extname(safeFilename).toLowerCase();
     if (!isAllowedProfilePictureExtension(extension)) return null;
@@ -32,7 +37,11 @@ const resolveProfilePicturePath = (filename: string): string | null => {
 
 const resolveProfilePictureWritePath = (filename: string): string => {
     const uploadDir = path.resolve(process.cwd(), 'uploads', 'profile_pictures');
-    return path.resolve(uploadDir, filename);
+    const filePath = path.resolve(uploadDir, filename);
+    if (!filePath.startsWith(`${uploadDir}${path.sep}`)) {
+        throw new Error('Invalid profile picture path');
+    }
+    return filePath;
 };
 
 
@@ -52,7 +61,7 @@ const buildProfilePictureToken = (employeeId: string, userData: any, userGroups:
             profilePicture: safeName,
         },
         secretKey,
-        { expiresIn: "8h" }
+        { expiresIn: "1h" }
     );
 };
 

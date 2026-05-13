@@ -29,44 +29,38 @@ const normalizeEmployeeCodeNoLeadingZero = (employeeId: string): string => {
 
 const toTrimmedText = (value: unknown): string => String(value || '').trim();
 
-const resolveInfoDataTableFullName = async (pool: sql.ConnectionPool): Promise<string | null> => {
-    const result = await pool.request().query(`
-        SELECT TOP 1
-            QUOTENAME(s.name) + '.' + QUOTENAME(o.name) AS FullName
-        FROM sys.objects o
-        INNER JOIN sys.schemas s ON s.schema_id = o.schema_id
-        WHERE o.type IN ('U', 'V')
-          AND LOWER(o.name) = 'infodata'
-        ORDER BY CASE WHEN o.name = 'InfoData' THEN 0 ELSE 1 END
-    `);
-
-    const row = result.recordset?.[0];
-    const fullName = toTrimmedText(row?.FullName);
-    return fullName || null;
-};
-
 const getOtherUnitsFromInfoData = async (pool: sql.ConnectionPool, empId: string) => {
     const employeeId = String(empId || '').trim();
     if (!employeeId) return [];
 
     const employeeCodeNoZero = normalizeEmployeeCodeNoLeadingZero(employeeId);
-    const infoDataTable = await resolveInfoDataTableFullName(pool);
-    if (!infoDataTable) {
-        console.warn('[getUnitsByRoleService] InfoData table not found for OTHER fallback');
-        return [];
-    }
 
     const infoReq = new sql.Request(pool);
     infoReq.input('EmployeeID', sql.VarChar(32), employeeId);
     infoReq.input('EmployeeIDNoZero', sql.VarChar(32), employeeCodeNoZero);
 
-    const infoResult = await infoReq.query(`
-        SELECT DISTINCT
-            LTRIM(RTRIM(CAST(UNITCODE AS varchar(20)))) AS OrgUnitNo
-        FROM ${infoDataTable}
-        WHERE NULLIF(LTRIM(RTRIM(CAST(UNITCODE AS varchar(20)))), '') IS NOT NULL
-          AND LTRIM(RTRIM(CAST(CODE AS varchar(20)))) IN (@EmployeeID, @EmployeeIDNoZero)
-    `);
+    let infoResult;
+    try {
+        infoResult = await infoReq.query(`
+            SELECT DISTINCT
+                LTRIM(RTRIM(CAST(UNITCODE AS varchar(20)))) AS OrgUnitNo
+            FROM dbo.InfoData
+            WHERE NULLIF(LTRIM(RTRIM(CAST(UNITCODE AS varchar(20)))), '') IS NOT NULL
+              AND LTRIM(RTRIM(CAST(CODE AS varchar(20)))) IN (@EmployeeID, @EmployeeIDNoZero)
+        `);
+    } catch (error: any) {
+        const message = String(error?.message || '').toLowerCase();
+        if (!message.includes('invalid object name')) {
+            throw error;
+        }
+        infoResult = await infoReq.query(`
+            SELECT DISTINCT
+                LTRIM(RTRIM(CAST(UNITCODE AS varchar(20)))) AS OrgUnitNo
+            FROM dbo.infodata
+            WHERE NULLIF(LTRIM(RTRIM(CAST(UNITCODE AS varchar(20)))), '') IS NOT NULL
+              AND LTRIM(RTRIM(CAST(CODE AS varchar(20)))) IN (@EmployeeID, @EmployeeIDNoZero)
+        `);
+    }
 
     const orgUnitNos = Array.from(
         new Set<string>(

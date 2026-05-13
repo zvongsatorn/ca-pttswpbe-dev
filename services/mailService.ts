@@ -15,6 +15,14 @@ const safeEmailAddress = (value: string): string => {
     return email;
 };
 
+const safeHeaderValue = (value: unknown, name: string): string => {
+    const text = String(value || '').trim();
+    if (!text || /[\r\n]/.test(text)) {
+        throw new Error(`Invalid ${name}`);
+    }
+    return text;
+};
+
 async function getAccessToken(): Promise<string> {
     const now = Date.now();
     // Use cached token if valid for at least 5 more minutes
@@ -30,11 +38,11 @@ async function getAccessToken(): Promise<string> {
         throw new Error('Azure AD credentials missing in environment variables');
     }
 
-    const safeTenantId = encodeURIComponent(tenantId);
+    const safeTenantId = encodeURIComponent(safeHeaderValue(tenantId, 'Azure tenant id'));
     const url = `https://login.microsoftonline.com/${safeTenantId}/oauth2/v2.0/token`;
     
     // Basic Auth header variant
-    const auth = Buffer.from(`${clientId}:${clientSecret}`).toString('base64');
+    const auth = Buffer.from(`${safeHeaderValue(clientId, 'Azure client id')}:${safeHeaderValue(clientSecret, 'Azure client secret')}`).toString('base64');
     
     const params = new URLSearchParams();
     params.append('scope', 'https://graph.microsoft.com/.default');
@@ -56,7 +64,7 @@ async function getAccessToken(): Promise<string> {
     }
 
     const data: any = await response.json();
-    accessToken = data.access_token;
+    accessToken = safeHeaderValue(data.access_token, 'Graph access token');
     // expires_in is in seconds
     tokenExpiry = now + (data.expires_in * 1000);
     
@@ -75,7 +83,7 @@ export const sendMail = async (to: string, subject: string, body: string, isHtml
             throw new Error('MAIL_SENDER not configured (not in DB or .env)');
         }
 
-        const token = await getAccessToken();
+        const token = safeHeaderValue(await getAccessToken(), 'Graph access token');
         const url = `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(sender)}/sendMail`;
 
         const baseMessage: any = {

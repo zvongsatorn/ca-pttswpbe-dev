@@ -7,7 +7,8 @@ let isLoaded = false;
 export function loadEnv() {
     if (isLoaded) return;
 
-    const nodeEnv = (process.env.NODE_ENV || 'development').trim().toLowerCase();
+    const rawNodeEnv = (process.env.NODE_ENV || 'development').trim().toLowerCase();
+    const nodeEnv = /^[a-z0-9_-]+$/.test(rawNodeEnv) ? rawNodeEnv : 'development';
     const envCandidates = Array.from(new Set([
         `.env.${nodeEnv}`,
         ...(nodeEnv === 'development' ? ['.env.dev'] : []),

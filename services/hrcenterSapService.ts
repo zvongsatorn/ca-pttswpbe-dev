@@ -6,6 +6,7 @@ import { Client, enterPassiveModeIPv4 } from 'basic-ftp';
 const OUTBOUND_DIR_NAME = 'Outbound';
 const OUTBOUND_FILE_NAME = 'Input_ZHROMI040.txt';
 const OUTBOUND_DIR_ENV_KEYS = ['HRCENTER_SAP_OUTBOUND_DIR', 'SAP_OUTBOUND_DIR'] as const;
+const OUTBOUND_ALLOWED_ROOT_ENV_KEYS = ['HRCENTER_SAP_OUTBOUND_ROOT', 'SAP_OUTBOUND_ROOT'] as const;
 const OUTBOUND_DIR_DEFAULT_SEGMENTS = ['uploads', OUTBOUND_DIR_NAME] as const;
 const GO_LIVE_DATE = new Date(Date.UTC(2020, 1, 1, 0, 0, 0, 0)); // 01/02/2020
 
@@ -75,17 +76,50 @@ const isConfigTrue = (value: string): boolean => {
     return v === 'true' || v === '1' || v === 'y' || v === 'yes';
 };
 
-const resolveOutboundDir = (): string => {
-    for (const key of OUTBOUND_DIR_ENV_KEYS) {
-        const configured = String(process.env[key] ?? '').trim();
-        if (!configured) continue;
-        return path.isAbsolute(configured) ? configured : path.resolve(process.cwd(), configured);
+const isPathInside = (childPath: string, parentPath: string): boolean => {
+    const relative = path.relative(parentPath, childPath);
+    return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
+};
+
+const normalizeOutboundPath = (value: string): string => {
+    const trimmed = toText(value);
+    if (!trimmed || /[\u0000-\u001F\u007F]/.test(trimmed)) {
+        throw new Error('Invalid SAP outbound path');
     }
-    return path.join(process.cwd(), ...OUTBOUND_DIR_DEFAULT_SEGMENTS);
+    return path.resolve(process.cwd(), trimmed);
+};
+
+const getOutboundAllowedRoot = (): string => {
+    for (const key of OUTBOUND_ALLOWED_ROOT_ENV_KEYS) {
+        const configured = toText(process.env[key]);
+        if (configured) return normalizeOutboundPath(configured);
+    }
+    return path.resolve(process.cwd());
+};
+
+const resolveOutboundDir = (): string => {
+    const allowedRoot = getOutboundAllowedRoot();
+    for (const key of OUTBOUND_DIR_ENV_KEYS) {
+        const configured = toText(process.env[key]);
+        if (!configured) continue;
+        const resolved = normalizeOutboundPath(configured);
+        if (!isPathInside(resolved, allowedRoot)) {
+            throw new Error('SAP outbound directory is outside the allowed root');
+        }
+        return resolved;
+    }
+    return path.resolve(process.cwd(), ...OUTBOUND_DIR_DEFAULT_SEGMENTS);
 };
 
 const getOutboundDir = (): string => resolveOutboundDir();
-export const getHRCenterSapOutboundFilePath = (): string => path.join(getOutboundDir(), OUTBOUND_FILE_NAME);
+export const getHRCenterSapOutboundFilePath = (): string => {
+    const outboundDir = getOutboundDir();
+    const outboundFilePath = path.resolve(outboundDir, OUTBOUND_FILE_NAME);
+    if (!isPathInside(outboundFilePath, outboundDir)) {
+        throw new Error('Invalid SAP outbound file path');
+    }
+    return outboundFilePath;
+};
 
 const ensureOutboundDirectory = async (): Promise<void> => {
     const dir = getOutboundDir();

@@ -542,10 +542,6 @@ const insertInfoDataRows = async (rows: InfoDataBulkRow[], replaceExisting: bool
     }
 };
 
-const quoteIdentifier = (identifier: string): string => {
-    return `[${identifier.replace(/]/g, ']]')}]`;
-};
-
 const normalizeFileBaseName = (fileName: string): string => {
     const rawName = fileName.split(/[\\/]/).pop() || fileName;
     const dotIndex = rawName.lastIndexOf('.');
@@ -587,14 +583,19 @@ const resolveHrpTargetTableFromFileName = (
 
 const getDatabaseTableColumns = async (tableName: HrpTargetTable): Promise<HrpTableColumnsMeta> => {
     const pool = await poolPromise;
+    const request = pool.request()
+        .input('tableName', sql.NVarChar(128), tableName);
+    const schemaParams = HRP_TABLE_SCHEMA_CANDIDATES.map((schemaName, index) => {
+        const paramName = `schema${index}`;
+        request.input(paramName, sql.NVarChar(128), schemaName);
+        return `@${paramName}`;
+    }).join(', ');
 
-    const result = await pool.request()
-        .input('tableName', sql.NVarChar(128), tableName)
-        .query(`
+    const result = await request.query(`
             SELECT TABLE_SCHEMA, COLUMN_NAME, ORDINAL_POSITION
             FROM INFORMATION_SCHEMA.COLUMNS
             WHERE TABLE_NAME = @tableName
-              AND TABLE_SCHEMA IN (${HRP_TABLE_SCHEMA_CANDIDATES.map((schema) => `'${schema}'`).join(', ')})
+              AND TABLE_SCHEMA IN (${schemaParams})
             ORDER BY ORDINAL_POSITION
         `);
 
@@ -693,9 +694,17 @@ const insertHrpRows = async (
 ): Promise<void> => {
     const pool = await poolPromise;
     if (replaceExisting) {
-        await pool.request().query(
-            `DELETE FROM ${quoteIdentifier(schema)}.${quoteIdentifier(tableName)}`
-        );
+        if (schema === 'dbo' && tableName === 'HRP1001') {
+            await pool.request().query('DELETE FROM [dbo].[HRP1001]');
+        } else if (schema === 'dbo' && tableName === 'HRP1002') {
+            await pool.request().query('DELETE FROM [dbo].[HRP1002]');
+        } else if (schema === 'db_owner' && tableName === 'HRP1001') {
+            await pool.request().query('DELETE FROM [db_owner].[HRP1001]');
+        } else if (schema === 'db_owner' && tableName === 'HRP1002') {
+            await pool.request().query('DELETE FROM [db_owner].[HRP1002]');
+        } else {
+            throw new Error('Unsupported HRP target table');
+        }
     }
 
     const batches = getRowBatches(rows, BULK_BATCH_SIZE);

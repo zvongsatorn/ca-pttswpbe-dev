@@ -67,6 +67,7 @@ const REPORT09_LEVEL_GROUP_TABLE_CANDIDATES = ['MP_LevelGroup'];
 const REPORT09_LEVEL_GROUP_ACTIVE_COL_CANDIDATES = ['LevelDelayActive', 'LevelDelayActiive', 'LevelDalayActive'];
 const REPORT09_LEVEL_GROUP_ORDER_COL_CANDIDATES = ['LevelDelayOrder', 'LevelDalayOrder', 'LevelGroupOrder'];
 const REPORT09_NON_COUNT_DELAY_YEAR = 9999;
+const REPORT_METADATA_SCHEMA_CANDIDATES = ['dbo', 'db_owner'];
 
 export const getDashboardDataService = async (
     effectiveMonth: string,
@@ -461,19 +462,90 @@ export const getReport03FilterOptionsService = async (
     }
 };
 
-const escapeSqlString = (value: string): string => value.replace(/'/g, "''");
+const SQL_IDENTIFIER_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
-const escapeSqlIdentifier = (value: string): string => `[${value.replace(/]/g, ']]')}]`;
+const escapeSqlIdentifier = (value: string): string => {
+    if (!SQL_IDENTIFIER_PATTERN.test(value)) {
+        throw new Error(`Unsupported SQL identifier: ${value}`);
+    }
+    return `[${value}]`;
+};
+
+const buildAllowedObjectFullName = (
+    schemaName: string,
+    objectName: string,
+    allowedSchemas: string[],
+    allowedObjects: string[]
+): string => {
+    const normalizedSchema = schemaName.trim().toLowerCase();
+    const normalizedObject = objectName.trim().toLowerCase();
+    const matchedSchema = allowedSchemas.find((schema) => schema === schemaName)
+        || allowedSchemas.find((schema) => schema.toLowerCase() === normalizedSchema);
+    const matchedObject = allowedObjects.find((object) => object === objectName)
+        || allowedObjects.find((object) => object.toLowerCase() === normalizedObject);
+
+    if (!matchedSchema || !matchedObject) {
+        throw new Error(`Unsupported report object source: ${schemaName}.${objectName}`);
+    }
+
+    return `${escapeSqlIdentifier(matchedSchema)}.${escapeSqlIdentifier(matchedObject)}`;
+};
 
 const pickColumnName = (columns: Map<string, string>, candidates: string[]): string | null => {
     for (const candidate of candidates) {
         const found = columns.get(candidate.toLowerCase());
-        if (found) return found;
+        if (found === candidate) return candidate;
     }
+
+    for (const candidate of candidates) {
+        const found = columns.get(candidate.toLowerCase());
+        if (found && SQL_IDENTIFIER_PATTERN.test(found)) return found;
+    }
+
     return null;
 };
 
 type MetaRow = Record<string, unknown>;
+type SqlInputParam = {
+    name: string;
+    type: unknown;
+    value: unknown;
+};
+
+const buildSqlInParams = (
+    values: readonly unknown[],
+    prefix: string,
+    type: unknown = sql.NVarChar(128)
+): { placeholders: string; params: SqlInputParam[] } => {
+    const params = values.map((value, index) => ({
+        name: `${prefix}${index}`,
+        type,
+        value
+    }));
+
+    return {
+        placeholders: params.map((param) => `@${param.name}`).join(','),
+        params
+    };
+};
+
+const bindSqlInputParams = (request: any, params: SqlInputParam[]) => {
+    params.forEach((param) => request.input(param.name, param.type as any, param.value));
+    return request;
+};
+
+const buildReportObjectSource = (meta: TableMeta, allowedObjects: string[]): string => {
+    const expected = buildAllowedObjectFullName(
+        meta.schemaName,
+        meta.tableName,
+        REPORT_METADATA_SCHEMA_CANDIDATES,
+        allowedObjects
+    );
+    if (meta.fullName !== expected) {
+        throw new Error(`Unsupported resolved report object source: ${meta.objectName}`);
+    }
+    return expected;
+};
 
 const rankMetaRow = (row: MetaRow, candidate: string, nameField: string): number => {
     const objectName = String(row[nameField] || "").toLowerCase();
@@ -513,18 +585,30 @@ const loadObjectColumns = async (pool: any, objectName: string): Promise<Map<str
     return columns;
 };
 
-const buildTableMeta = async (pool: any, selected: MetaRow, nameField: string): Promise<TableMeta | null> => {
+const buildTableMeta = async (
+    pool: any,
+    selected: MetaRow,
+    nameField: string,
+    allowedObjects: string[]
+): Promise<TableMeta | null> => {
     const schemaName = String(selected.schema_name || "").trim();
     const tableName = String(selected[nameField] || "").trim();
     if (!schemaName || !tableName) return null;
 
     const objectName = `${schemaName}.${tableName}`;
     const columns = await loadObjectColumns(pool, objectName);
+    const fullName = buildAllowedObjectFullName(
+        schemaName,
+        tableName,
+        REPORT_METADATA_SCHEMA_CANDIDATES,
+        allowedObjects
+    );
+
     return {
         schemaName,
         tableName,
         objectName,
-        fullName: `${escapeSqlIdentifier(schemaName)}.${escapeSqlIdentifier(tableName)}`,
+        fullName,
         columns
     };
 };
@@ -535,19 +619,22 @@ const getTableMeta = async (
 ): Promise<TableMeta | null> => {
     if (!tableCandidates.length) return null;
 
-    const inList = tableCandidates.map((name) => '\'' + escapeSqlString(name.toLowerCase()) + '\'').join(',');
-    const tableRes = await pool.request().query([
+    const { placeholders: tablePlaceholders, params: tableParams } = buildSqlInParams(tableCandidates.map((name) => name.toLowerCase()), 'tableName');
+    const { placeholders: schemaPlaceholders, params: schemaParams } = buildSqlInParams(REPORT_METADATA_SCHEMA_CANDIDATES, 'tableSchema');
+    const tableRequest = bindSqlInputParams(pool.request(), [...tableParams, ...schemaParams]);
+    const tableRes = await tableRequest.query([
         'SELECT s.name AS schema_name, t.name AS table_name',
         'FROM sys.tables t',
         'INNER JOIN sys.schemas s ON s.schema_id = t.schema_id',
-        'WHERE LOWER(t.name) IN (' + inList + ')'
+        `WHERE LOWER(t.name) IN (${tablePlaceholders})`,
+        `AND s.name IN (${schemaPlaceholders})`
     ].join('\n'));
 
     const rows = Array.isArray(tableRes.recordset) ? tableRes.recordset as MetaRow[] : [];
     if (!rows.length) return null;
 
     const selected = selectMetaRow(rows, tableCandidates, 'table_name');
-    return selected ? buildTableMeta(pool, selected, 'table_name') : null;
+    return selected ? buildTableMeta(pool, selected, 'table_name', tableCandidates) : null;
 };
 const getObjectMeta = async (
     pool: any,
@@ -555,12 +642,15 @@ const getObjectMeta = async (
 ): Promise<TableMeta | null> => {
     if (!objectCandidates.length) return null;
 
-    const inList = objectCandidates.map((name) => '\'' + escapeSqlString(name.toLowerCase()) + '\'').join(',');
-    const objectRes = await pool.request().query([
+    const { placeholders: objectPlaceholders, params: objectParams } = buildSqlInParams(objectCandidates.map((name) => name.toLowerCase()), 'objectName');
+    const { placeholders: schemaPlaceholders, params: schemaParams } = buildSqlInParams(REPORT_METADATA_SCHEMA_CANDIDATES, 'objectSchema');
+    const objectRequest = bindSqlInputParams(pool.request(), [...objectParams, ...schemaParams]);
+    const objectRes = await objectRequest.query([
         'SELECT s.name AS schema_name, o.name AS object_name',
         'FROM sys.objects o',
         'INNER JOIN sys.schemas s ON s.schema_id = o.schema_id',
-        'WHERE LOWER(o.name) IN (' + inList + ')',
+        `WHERE LOWER(o.name) IN (${objectPlaceholders})`,
+        `AND s.name IN (${schemaPlaceholders})`,
         "AND o.type IN ('U', 'V', 'IF', 'TF')"
     ].join('\n'));
 
@@ -568,7 +658,7 @@ const getObjectMeta = async (
     if (!rows.length) return null;
 
     const selected = selectMetaRow(rows, objectCandidates, 'object_name');
-    return selected ? buildTableMeta(pool, selected, 'object_name') : null;
+    return selected ? buildTableMeta(pool, selected, 'object_name', objectCandidates) : null;
 };
 const normalizeReport08RowsToMap = (rows: Array<Record<string, unknown>>): Report08LevelMap => {
     const result: Report08LevelMap = new Map();
@@ -655,8 +745,10 @@ const getReport08PositionMap = async (
     pool: any,
     effectiveDate: Date
 ): Promise<Report08LevelMap> => {
-    const tableMeta = await getTableMeta(pool, ['InterfacePosition', 'interfaceposition']);
+    const tableCandidates = ['InterfacePosition', 'interfaceposition'];
+    const tableMeta = await getTableMeta(pool, tableCandidates);
     if (!tableMeta) return new Map();
+    const tableSource = buildReportObjectSource(tableMeta, tableCandidates);
 
     const orgCol = pickColumnName(tableMeta.columns, REPORT08_ORG_COL_CANDIDATES);
     const levelCol = pickColumnName(tableMeta.columns, REPORT08_LEVEL_COL_CANDIDATES);
@@ -676,15 +768,15 @@ const getReport08PositionMap = async (
         : '';
 
     const reportLevelList = REPORT08_PEOPLE_LEVELS.map((item) => item.levelGroupNo);
-    const inList = reportLevelList.map((lv) => `'${escapeSqlString(lv)}'`).join(',');
+    const { placeholders: levelPlaceholders, params: levelParams } = buildSqlInParams(reportLevelList, 'report08Level');
 
     const query = `
         SELECT
             CAST(src.${escapeSqlIdentifier(orgCol)} AS nvarchar(32)) AS org_unit_no,
             CAST(src.${escapeSqlIdentifier(levelCol)} AS nvarchar(16)) AS level_group_no,
             COUNT(1) AS metric_value
-        FROM ${tableMeta.fullName} src
-        WHERE CAST(src.${escapeSqlIdentifier(levelCol)} AS nvarchar(16)) IN (${inList})
+        FROM ${tableSource} src
+        WHERE CAST(src.${escapeSqlIdentifier(levelCol)} AS nvarchar(16)) IN (${levelPlaceholders})
         ${dateCondition}
         ${employeeCondition}
         ${signPosCondition}
@@ -693,7 +785,8 @@ const getReport08PositionMap = async (
             CAST(src.${escapeSqlIdentifier(levelCol)} AS nvarchar(16))
     `;
 
-    const res = await pool.request()
+    const request = bindSqlInputParams(pool.request(), levelParams);
+    const res = await request
         .input('EffectiveDate', sql.DateTime, effectiveDate)
         .query(query);
 
@@ -705,8 +798,10 @@ const getReport08CostMap = async (
     fromDate: Date,
     toDate: Date
 ): Promise<Report08LevelMap> => {
-    const tableMeta = await getTableMeta(pool, ['MP_CostEmployee', 'MP_CostEmp', 'CostEmployee']);
+    const tableCandidates = ['MP_CostEmployee', 'MP_CostEmp', 'CostEmployee'];
+    const tableMeta = await getTableMeta(pool, tableCandidates);
     if (!tableMeta) return new Map();
+    const tableSource = buildReportObjectSource(tableMeta, tableCandidates);
 
     const orgCol = pickColumnName(tableMeta.columns, REPORT08_ORG_COL_CANDIDATES);
     const levelCol = pickColumnName(tableMeta.columns, REPORT08_LEVEL_COL_CANDIDATES);
@@ -723,7 +818,7 @@ const getReport08CostMap = async (
         REPORT08_MAJOR_LEVEL,
         REPORT08_MINOR_LEVEL
     ];
-    const inList = reportLevelList.map((lv) => `'${escapeSqlString(lv)}'`).join(',');
+    const { placeholders: levelPlaceholders, params: levelParams } = buildSqlInParams(reportLevelList, 'report08CostLevel');
     const amountExpr = amountCol
         ? `COALESCE(TRY_CONVERT(decimal(18,2), src.${escapeSqlIdentifier(amountCol)}), 0)`
         : '0';
@@ -733,15 +828,16 @@ const getReport08CostMap = async (
             CAST(src.${escapeSqlIdentifier(orgCol)} AS nvarchar(32)) AS org_unit_no,
             CAST(src.${escapeSqlIdentifier(levelCol)} AS nvarchar(16)) AS level_group_no,
             SUM(${amountExpr}) AS metric_value
-        FROM ${tableMeta.fullName} src
-        WHERE CAST(src.${escapeSqlIdentifier(levelCol)} AS nvarchar(16)) IN (${inList})
+        FROM ${tableSource} src
+        WHERE CAST(src.${escapeSqlIdentifier(levelCol)} AS nvarchar(16)) IN (${levelPlaceholders})
         ${dateCondition}
         GROUP BY
             CAST(src.${escapeSqlIdentifier(orgCol)} AS nvarchar(32)),
             CAST(src.${escapeSqlIdentifier(levelCol)} AS nvarchar(16))
     `;
 
-    const res = await pool.request()
+    const request = bindSqlInputParams(pool.request(), levelParams);
+    const res = await request
         .input('FromDate', sql.DateTime, fromDate)
         .input('ToDate', sql.DateTime, toDate)
         .query(query);
@@ -2198,12 +2294,12 @@ const getReport09RetirementFilterConditions = (
     const infoSecondmentCondition = columns.infoSecondmentTextCol
         ? `AND info.${escapeSqlIdentifier(columns.infoSecondmentTextCol)} IN ('Employee', 'EMPLOYEE', 'employee')`
         : '';
-    const allowedLevelGroupList = allowedLevelGroupNos.map((value) => `'${escapeSqlString(value)}'`).join(',');
+    const { placeholders: allowedLevelPlaceholders, params: levelFilterParams } = buildSqlInParams(allowedLevelGroupNos, 'retireLevelGroup');
     const levelFilterCondition = columns.levelCol && allowedLevelGroupNos.length > 0
-        ? `AND pos.${escapeSqlIdentifier(columns.levelCol)} IN (${allowedLevelGroupList})`
+        ? `AND pos.${escapeSqlIdentifier(columns.levelCol)} IN (${allowedLevelPlaceholders})`
         : '';
 
-    return { signPosCondition, infoSecondmentCondition, levelFilterCondition };
+    return { signPosCondition, infoSecondmentCondition, levelFilterCondition, levelFilterParams: levelFilterCondition ? levelFilterParams : [] };
 };
 
 const getReport09RetirementBucketExpr = (columns: Report09RetirementColumns) => {
@@ -2265,6 +2361,8 @@ const getReport09RetirementMap = async (
     const unitMeta = await getObjectMeta(pool, REPORT09_UNIT_FN_CANDIDATES);
     if (!infoMeta || !positionMeta) return new Map();
 
+    const infoSource = buildReportObjectSource(infoMeta, REPORT09_INFO_TABLE_CANDIDATES);
+    const positionSource = buildReportObjectSource(positionMeta, REPORT09_POSITION_TABLE_CANDIDATES);
     const columns = getReport09RetirementColumns(infoMeta, positionMeta, unitMeta);
     if (!columns) return new Map();
 
@@ -2284,7 +2382,7 @@ const getReport09RetirementMap = async (
 
     const { effectiveRetireYearExpr, joinDelayForOverride } = getReport09RetirementDelaySql(sourceEmployeeExpr, columns.retireYearCol);
     const { allowedLevelGroupNos } = await getReport09RetirementLevelFilter(pool, effectiveYear);
-    const { signPosCondition, infoSecondmentCondition, levelFilterCondition } = getReport09RetirementFilterConditions(columns, allowedLevelGroupNos);
+    const { signPosCondition, infoSecondmentCondition, levelFilterCondition, levelFilterParams } = getReport09RetirementFilterConditions(columns, allowedLevelGroupNos);
     const report09BucketExpr = getReport09RetirementBucketExpr(columns);
 
     const query = `
@@ -2293,8 +2391,8 @@ const getReport09RetirementMap = async (
             ${effectiveRetireYearExpr} AS retire_year,
             ${report09BucketExpr} AS bs_type,
             ${countExpr} AS retire_count
-        FROM ${infoMeta.fullName} info
-        INNER JOIN ${positionMeta.fullName} pos
+        FROM ${infoSource} info
+        INNER JOIN ${positionSource} pos
             ON pos.${escapeSqlIdentifier(columns.positionIdCol)} = info.${escapeSqlIdentifier(columns.infoPosCol)}
         ${joinDelayForOverride}
         ${joinStructureForMapping}
@@ -2309,7 +2407,8 @@ const getReport09RetirementMap = async (
             ${report09BucketExpr}
     `;
 
-    const result = await pool.request()
+    const request = bindSqlInputParams(pool.request(), levelFilterParams);
+    const result = await request
         .input('FromYear', sql.Int, fromYear)
         .input('ToYear', sql.Int, toYear)
         .input('EffectiveDate', sql.DateTime, structureDate)
@@ -2408,12 +2507,12 @@ const getReport09AuditPassExprs = (columns: Report09AuditColumns, allowedLevelGr
     const signPosConditionExpr = columns.signPosCol
         ? `CASE WHEN TRY_CONVERT(int, pos.${escapeSqlIdentifier(columns.signPosCol)}) = 100 THEN 1 ELSE 0 END`
         : '1';
-    const allowedLevelGroupList = allowedLevelGroupNos.map((value) => `'${escapeSqlString(value)}'`).join(',');
+    const { placeholders: allowedLevelPlaceholders, params: levelConditionParams } = buildSqlInParams(allowedLevelGroupNos, 'auditLevelGroup');
     const levelConditionExpr = columns.levelCol && allowedLevelGroupNos.length > 0
-        ? `CASE WHEN LTRIM(RTRIM(CAST(pos.${escapeSqlIdentifier(columns.levelCol)} AS nvarchar(16)))) IN (${allowedLevelGroupList}) THEN 1 ELSE 0 END`
+        ? `CASE WHEN LTRIM(RTRIM(CAST(pos.${escapeSqlIdentifier(columns.levelCol)} AS nvarchar(16)))) IN (${allowedLevelPlaceholders}) THEN 1 ELSE 0 END`
         : '1';
 
-    return { employeeConditionExpr, signPosConditionExpr, levelConditionExpr };
+    return { employeeConditionExpr, signPosConditionExpr, levelConditionExpr, levelConditionParams: levelConditionExpr !== '1' ? levelConditionParams : [] };
 };
 
 const getReport09AuditUnitExprs = (columns: Report09AuditColumns, mappedOrgExpr: string) => ({
@@ -2490,6 +2589,8 @@ export const getReport09AuditService = async (
     if (!infoMeta || !positionMeta) {
         throw new Error('Report09 source tables are unavailable');
     }
+    const infoSource = buildReportObjectSource(infoMeta, REPORT09_INFO_TABLE_CANDIDATES);
+    const positionSource = buildReportObjectSource(positionMeta, REPORT09_POSITION_TABLE_CANDIDATES);
     const columns = getReport09AuditColumns(infoMeta, positionMeta, unitMeta);
 
     const sourceEmployeeExpr = getReport09AuditEmployeeExpr(columns);
@@ -2507,7 +2608,7 @@ export const getReport09AuditService = async (
     `;
 
     const { selectedLevelGroupNo, allowedLevelGroupNos } = await getReport09RetirementLevelFilter(pool, safeEffectiveYear);
-    const { employeeConditionExpr, signPosConditionExpr, levelConditionExpr } = getReport09AuditPassExprs(columns, allowedLevelGroupNos);
+    const { employeeConditionExpr, signPosConditionExpr, levelConditionExpr, levelConditionParams } = getReport09AuditPassExprs(columns, allowedLevelGroupNos);
     const unitExprs = getReport09AuditUnitExprs(columns, mappedOrgExpr);
     const isHoExpr = getReport09AuditHoExpr(columns, unitExprs);
     const report09BucketExpr = `
@@ -2552,8 +2653,8 @@ export const getReport09AuditService = async (
                 ${employeeConditionExpr} AS pass_employee,
                 ${signPosConditionExpr} AS pass_signpos,
                 ${levelConditionExpr} AS pass_level
-            FROM ${infoMeta.fullName} info
-            INNER JOIN ${positionMeta.fullName} pos
+            FROM ${infoSource} info
+            INNER JOIN ${positionSource} pos
                 ON LTRIM(RTRIM(CAST(pos.${escapeSqlIdentifier(columns.positionIdCol)} AS nvarchar(64)))) =
                    LTRIM(RTRIM(CAST(info.${escapeSqlIdentifier(columns.infoPosCol)} AS nvarchar(64))))
             LEFT JOIN delay
@@ -2600,7 +2701,8 @@ export const getReport09AuditService = async (
             base.bs_type
     `;
 
-    const result = await pool.request()
+    const request = bindSqlInputParams(pool.request(), levelConditionParams);
+    const result = await request
         .input('FromYear', sql.Int, fromYear)
         .input('ToYear', sql.Int, toYear)
         .input('EffectiveDate', sql.DateTime, structureDate)
@@ -2668,7 +2770,9 @@ const getReport09YearRateMap = async (
 
         if (!queryYearList.length) return yearRateMap;
 
-        const result = await pool.request()
+        const { placeholders: yearPlaceholders, params: yearParams } = buildSqlInParams(queryYearList, 'report09RateYear', sql.Int);
+        const request = bindSqlInputParams(pool.request(), yearParams);
+        const result = await request
             .input('EffectiveYearAD', sql.Int, effectiveYearAD)
             .input('EffectiveYearBE', sql.Int, effectiveYearBE)
             .query(`
@@ -2679,7 +2783,7 @@ const getReport09YearRateMap = async (
                     TRY_CONVERT(int, Base) AS Base
                 FROM MP_BUSupportRate
                 WHERE EffectiveYear IN (@EffectiveYearAD, @EffectiveYearBE)
-                  AND TRY_CONVERT(int, [Year]) IN (${queryYearList.join(',')})
+                  AND TRY_CONVERT(int, [Year]) IN (${yearPlaceholders})
                   AND ISNULL(TRY_CONVERT(int, BUSupportRateStatus), 1) = 1
             `);
 
@@ -2936,8 +3040,9 @@ const appendReport09MissingStructureRows = async (
     const missingOrgUnitIds = Array.from(sourceMap.keys()).filter((orgUnitId) => !existingOrgUnitIds.has(orgUnitId));
     if (!missingOrgUnitIds.length) return structureRows;
 
-    const inList = missingOrgUnitIds.map((orgUnitId) => `N'${escapeSqlString(orgUnitId)}'`).join(',');
-    const result = await pool.request()
+    const { placeholders: orgPlaceholders, params: orgParams } = buildSqlInParams(missingOrgUnitIds, 'missingOrgUnit');
+    const request = bindSqlInputParams(pool.request(), orgParams);
+    const result = await request
         .input('EffectiveDate', sql.DateTime, structureDate)
         .query(`
             SELECT
@@ -2952,7 +3057,7 @@ const appendReport09MissingStructureRows = async (
             LEFT JOIN MP_BG bg
                 ON bg.BGNo = unit.BGNo
                AND @EffectiveDate BETWEEN bg.BeginDate AND bg.EndDate
-            WHERE unit.OrgUnitNo IN (${inList})
+            WHERE unit.OrgUnitNo IN (${orgPlaceholders})
         `);
 
     const rows = Array.isArray(result.recordset) ? result.recordset as Array<Record<string, unknown>> : [];
@@ -3591,18 +3696,19 @@ export const getReport10ExportDataService = async (
         const request = pool.request();
         const effectiveDate = new Date(effectiveDateStr);
 
-        request.input('EffectiveDate', sql.DateTime, effectiveDate);
-
-        const allowedLevelList = REPORT10_ALLOWED_LEVEL_CODES
-            .map((levelCode) => `N'${levelCode}'`)
-            .join(', ');
+        const { placeholders: allowedLevelPlaceholders, params: allowedLevelParams } = buildSqlInParams(
+            REPORT10_ALLOWED_LEVEL_CODES,
+            'report10Level'
+        );
+        bindSqlInputParams(request, allowedLevelParams)
+            .input('EffectiveDate', sql.DateTime, effectiveDate);
 
         const result = await request.query(`
             ;WITH PositionSource AS (
                 SELECT p.*
                 FROM fn_InterfacePosition(@EffectiveDate) p
                 WHERE @EffectiveDate BETWEEN TRY_CONVERT(date, p.BeginDate) AND TRY_CONVERT(date, p.EndDate)
-                  AND LTRIM(RTRIM(CAST(p.LevelGroupNo AS nvarchar(16)))) IN (${allowedLevelList})
+                  AND LTRIM(RTRIM(CAST(p.LevelGroupNo AS nvarchar(16)))) IN (${allowedLevelPlaceholders})
             ),
             InfoDataByPosition AS (
                 SELECT

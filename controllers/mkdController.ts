@@ -59,6 +59,25 @@ const toSafeUploadExtension = (value: unknown, fallback: string): string => {
     return MKD_FILE_EXTENSIONS.has(extension) ? extension : fallback;
 };
 
+const isSafeGeneratedFileName = (value: unknown): boolean => {
+    return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\.(pdf|xlsx|xls|png|jpg|jpeg)$/i.test(String(value || '').trim());
+};
+
+const TEMPLATE_ROOT = path.resolve(process.cwd(), 'template');
+
+const resolveTemplatePath = (filename: string): string => {
+    const safeFilename = path.basename(filename || '');
+    if (!safeFilename || safeFilename !== filename || !/^[A-Za-z0-9._-]+\.xlsx$/i.test(safeFilename)) {
+        throw new Error('Invalid template filename');
+    }
+
+    const templatePath = path.resolve(TEMPLATE_ROOT, safeFilename);
+    if (!templatePath.startsWith(`${TEMPLATE_ROOT}${path.sep}`)) {
+        throw new Error('Invalid template path');
+    }
+    return templatePath;
+};
+
 export const getStartYear = async (c: Context) => {
     try {
         const result = await getStartYearService();
@@ -827,6 +846,9 @@ export const getFile = async (c: Context) => {
         if (!id || !fileId) {
             return c.json({ message: 'Missing parameters' }, 400);
         }
+        if (!isSafeGeneratedFileName(fileId)) {
+            return c.json({ message: 'Invalid filename' }, 400);
+        }
 
         // Fetch RequestNo to find the correct folder
         const details = await getMKDDetailsService(id);
@@ -864,6 +886,10 @@ export const filesProxy = async (c: Context) => {
         }
 
         const safePathParts = filePathParam.split('/').filter(Boolean).map((part) => toSafeUploadSegment(part));
+        const requestedFileName = safePathParts[safePathParts.length - 1] || '';
+        if (!isSafeGeneratedFileName(requestedFileName)) {
+            return c.json({ message: 'Invalid filename' }, 400);
+        }
         const fullPath = resolveMkdUploadPath(...safePathParts);
         
         if (!fs.existsSync(fullPath)) {
@@ -1025,7 +1051,7 @@ export const exportPosition = async (c: Context) => {
 
 export const downloadMasterKeyTemplate = async (c: Context) => {
     try {
-        const templatePath = path.join(process.cwd(), 'template', 'templatekeyman.xlsx');
+        const templatePath = resolveTemplatePath('templatekeyman.xlsx');
         
         if (!fs.existsSync(templatePath)) {
             return c.json({ message: 'Template file not found' }, 404);

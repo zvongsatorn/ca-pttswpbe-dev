@@ -107,7 +107,7 @@ const signLoginToken = (user: { EmployeeID: string; Name: string; Email: string 
             profilePicture: userData.ProfilePicture || '',
         },
         secretKey,
-        { expiresIn: '8h' }
+        { expiresIn: '1h' }
     );
 };
 const getSsoCaaData = async (type: string, accessToken: string, systemToken: string) => {
@@ -437,8 +437,12 @@ class AuthController {
                 ]
             };
 
+            if (!token) {
+                return c.json({ message: 'Unable to retrieve CA&A token' }, 502);
+            }
+
             console.log(`[Registration] Verify Email Payload (Encoded Params):`, JSON.stringify(payload, null, 2));
-            console.log(`[Registration] Using token prefix: ${token.substring(0, 20)}...`);
+            console.log(`[Registration] Using token prefix: ${token.slice(0, 20)}...`);
 
             // Use Python workaround for stability on corporate networks
             // Send payload as ROOT JSON (no 'v' wrapping)

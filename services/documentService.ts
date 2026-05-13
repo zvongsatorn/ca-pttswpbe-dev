@@ -417,11 +417,14 @@ const getTransactionRowsByNos = async (pool: sql.ConnectionPool, transactionNos:
         `;
 
         const result = await request.query(query);
-        return (result.recordset || []).map((row: any) => ({
-            transactionNo: String(row?.TransactionNo || '').trim(),
-            transactionTypeText: formatTransactionTypeText(Number.isFinite(Number(row?.TransactionType)) ? Number(row.TransactionType) : null),
-            transactionDesc: String(row?.TransactionDesc || '').trim() || '-'
-        }));
+        return (result.recordset || []).map((row: any) => {
+            const transactionType = Number(row?.TransactionType);
+            return {
+                transactionNo: String(row?.TransactionNo || '').trim(),
+                transactionTypeText: formatTransactionTypeText(Number.isFinite(transactionType) ? transactionType : null),
+                transactionDesc: String(row?.TransactionDesc || '').trim() || '-'
+            };
+        });
     } catch (error) {
         console.warn('[documentService] Failed to lookup transaction rows:', error);
         return uniqueNos.map((transactionNo) => ({
@@ -712,7 +715,8 @@ const insertSubmitDocumentItems = async (
         const itemId = validateSubmitDocumentItemId(item?.itemId);
         await insertCreatorDocumentItem(transaction, documentNo, itemId, createBy, creatorFullname, creatorEmail, creatorUserGroupNo);
 
-        for (const approver of item.approvers) {
+        const approvers = Array.isArray(item?.approvers) ? item.approvers : [];
+        for (const approver of approvers) {
             await insertApproverDocumentItem(transaction, documentNo, itemId, approver);
         }
 
@@ -1427,10 +1431,17 @@ const loadDocumentListWithOptionalEmployee = async (
     employeeId: string
 ) => {
     const safeProcedureName = assertDocumentListProcedure(procedureName);
+    const executeListProcedure = (request: sql.Request) => {
+        if (safeProcedureName === 'mp_DocumentProgressListGet') {
+            return request.execute('mp_DocumentProgressListGet');
+        }
+        return request.execute('mp_AllDocumentsGet');
+    };
+
     try {
         const req = new sql.Request(pool);
         req.input('EmployeeID', sql.VarChar(20), employeeId);
-        return await req.execute(safeProcedureName);
+        return await executeListProcedure(req);
     } catch (error: any) {
         const message = String(error?.message || '');
         if (!message.includes('has no parameters and arguments were supplied')) {
@@ -1439,7 +1450,7 @@ const loadDocumentListWithOptionalEmployee = async (
 
         // Fallback for DB where this SP has no input parameters
         const reqNoParam = new sql.Request(pool);
-        return reqNoParam.execute(safeProcedureName);
+        return executeListProcedure(reqNoParam);
     }
 };
 

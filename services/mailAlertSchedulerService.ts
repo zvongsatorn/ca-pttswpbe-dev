@@ -175,11 +175,14 @@ const getTransactionLookupRows = async (transactionNos: string[]): Promise<Trans
         `;
 
         const result = await request.query(query);
-        return (result.recordset || []).map((row: any) => ({
-            transactionNo: String(row?.TransactionNo || '').trim(),
-            transactionType: Number.isFinite(Number(row?.TransactionType)) ? Number(row.TransactionType) : null,
-            transactionDesc: String(row?.TransactionDesc || '').trim()
-        }));
+        return (result.recordset || []).map((row: any) => {
+            const transactionType = Number(row?.TransactionType);
+            return {
+                transactionNo: String(row?.TransactionNo || '').trim(),
+                transactionType: Number.isFinite(transactionType) ? transactionType : null,
+                transactionDesc: String(row?.TransactionDesc || '').trim()
+            };
+        });
     } catch (error) {
         console.warn('[MailAlertScheduler] Failed to lookup TransactionDesc from MP_Transactions:', error);
         return [];

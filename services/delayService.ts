@@ -91,7 +91,6 @@ type EmployeeProfileQueryContext = {
     positionSource: string;
     unitSource: string;
     canJoinUnit: boolean;
-    positionOrderBy: string;
     unitJoinClause: string;
     positionEmpMatch: string;
     positionSecondmentCondition: string;
@@ -104,7 +103,6 @@ type EmployeeOrgMetaQueryContext = {
     infoSource: string;
     positionSource: string;
     canJoinUnit: boolean;
-    positionOrderBy: string;
     unitJoinClause: string;
     unitNameSelectExpr: string;
     positionSecondmentCondition: string;
@@ -119,6 +117,7 @@ type EmployeeOptionsQueryContext = EmployeeOrgMetaQueryContext & {
 
 const INFO_TABLE_CANDIDATES = ['InfoData', 'infodata'];
 const POSITION_TABLE_CANDIDATES = ['fn_InterfacePosition', 'InterfacePosition', 'interfaceposition'];
+const DELAY_METADATA_SCHEMA_CANDIDATES = ['dbo', 'db_owner'];
 const INFO_EMPLOYEE_COL_CANDIDATES = ['CODE', 'Code', 'EmployeeID', 'EmployeeId'];
 const INFO_FULL_NAME_COL_CANDIDATES = ['FULLNAMETH', 'FullNameTH'];
 const INFO_NAME_COL_CANDIDATES = ['FULLNAMETH', 'FullNameTH', 'NameAll', 'Name'];
@@ -142,15 +141,87 @@ const UNIT_ABBR_COL_CANDIDATES = ['UnitAbbr', 'OrgUnitAbbr', 'ShortName', 'Abbr'
 const UNIT_BG_COL_CANDIDATES = ['BGNo', 'BgNo', 'BGNO'];
 const NON_COUNT_DELAY_YEAR = 9999;
 
-const escapeSqlIdentifier = (value: string): string => `[${value.replace(/]/g, ']]')}]`;
-const escapeSqlString = (value: string): string => value.replace(/'/g, "''");
+const SQL_IDENTIFIER_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+const escapeSqlIdentifier = (value: string): string => {
+    if (!SQL_IDENTIFIER_PATTERN.test(value)) {
+        throw new Error(`Unsupported SQL identifier: ${value}`);
+    }
+    return `[${value}]`;
+};
+
+const buildAllowedObjectFullName = (
+    schemaName: string,
+    objectName: string,
+    allowedSchemas: string[],
+    allowedObjects: string[]
+): string => {
+    const normalizedSchema = schemaName.trim().toLowerCase();
+    const normalizedObject = objectName.trim().toLowerCase();
+    const matchedSchema = allowedSchemas.find((schema) => schema === schemaName)
+        || allowedSchemas.find((schema) => schema.toLowerCase() === normalizedSchema);
+    const matchedObject = allowedObjects.find((object) => object === objectName)
+        || allowedObjects.find((object) => object.toLowerCase() === normalizedObject);
+
+    if (!matchedSchema || !matchedObject) {
+        throw new Error(`Unsupported delay object source: ${schemaName}.${objectName}`);
+    }
+
+    return `${escapeSqlIdentifier(matchedSchema)}.${escapeSqlIdentifier(matchedObject)}`;
+};
 const toTrimText = (value: unknown): string => String(value || '').trim();
+
+type SqlInputParam = {
+    name: string;
+    type: unknown;
+    value: unknown;
+};
+
+const buildSqlInParams = (
+    values: unknown[],
+    prefix: string,
+    type: unknown = sql.NVarChar(128)
+): { placeholders: string; params: SqlInputParam[] } => {
+    const params = values.map((value, index) => ({
+        name: `${prefix}${index}`,
+        type,
+        value
+    }));
+
+    return {
+        placeholders: params.map((param) => `@${param.name}`).join(','),
+        params
+    };
+};
+
+const bindSqlInputParams = (request: sql.Request, params: SqlInputParam[]) => {
+    params.forEach((param) => request.input(param.name, param.type as any, param.value));
+    return request;
+};
+
+const SQL_FRAGMENT_PATTERN = /^[A-Za-z0-9_\[\]@().=,\s]+$/;
+
+const buildSqlFragmentList = (parts: string[]): string => {
+    if (!parts.length) throw new Error('Empty SQL fragment list');
+    parts.forEach((part) => {
+        if (!SQL_FRAGMENT_PATTERN.test(part)) {
+            throw new Error(`Unsupported SQL fragment: ${part}`);
+        }
+    });
+    return parts.join(', ');
+};
 
 const pickColumnName = (columns: Map<string, string>, candidates: string[]): string | null => {
     for (const candidate of candidates) {
         const found = columns.get(candidate.toLowerCase());
-        if (found) return found;
+        if (found === candidate) return candidate;
     }
+
+    for (const candidate of candidates) {
+        const found = columns.get(candidate.toLowerCase());
+        if (found && SQL_IDENTIFIER_PATTERN.test(found)) return found;
+    }
+
     return null;
 };
 
@@ -192,8 +263,10 @@ class DelayService {
     ): Promise<TableMeta | null> {
         if (!tableCandidates.length) return null;
 
-        const inList = tableCandidates.map((name) => `'${escapeSqlString(name.toLowerCase())}'`).join(',');
-        const tableRes = await pool.request().query(`
+        const { placeholders: objectPlaceholders, params: objectParams } = buildSqlInParams(tableCandidates.map((name) => name.toLowerCase()), 'delayObject');
+        const { placeholders: schemaPlaceholders, params: schemaParams } = buildSqlInParams(DELAY_METADATA_SCHEMA_CANDIDATES, 'delaySchema');
+        const tableRequest = bindSqlInputParams(pool.request(), [...objectParams, ...schemaParams]);
+        const tableRes = await tableRequest.query(`
             SELECT
                 o.object_id,
                 s.name AS schema_name,
@@ -209,7 +282,8 @@ class DelayService {
                   AND p.parameter_id > 0
             ) params
             WHERE o.type IN ('U', 'IF', 'TF')
-              AND LOWER(o.name) IN (${inList})
+              AND LOWER(o.name) IN (${objectPlaceholders})
+              AND s.name IN (${schemaPlaceholders})
         `);
 
         const rows = Array.isArray(tableRes.recordset)
@@ -247,11 +321,18 @@ class DelayService {
             columns.set(colName.toLowerCase(), colName);
         });
 
+        const fullName = buildAllowedObjectFullName(
+            schemaName,
+            tableName,
+            DELAY_METADATA_SCHEMA_CANDIDATES,
+            tableCandidates
+        );
+
         return {
             schemaName,
             tableName,
             objectName,
-            fullName: `${escapeSqlIdentifier(schemaName)}.${escapeSqlIdentifier(tableName)}`,
+            fullName,
             objectType,
             parameterCount: Number.isFinite(parameterCount) ? parameterCount : 0,
             columns
@@ -264,8 +345,14 @@ class DelayService {
         }
 
         const paramCount = Number.isFinite(meta.parameterCount) ? Math.max(0, meta.parameterCount) : 0;
-        const args = Array.from({ length: paramCount }, () => effectiveDateParamName).join(', ');
-        return `${meta.fullName}(${args})`;
+        if (paramCount === 0) {
+            return `${meta.fullName}()`;
+        }
+        if (paramCount === 1) {
+            return `${meta.fullName}(${effectiveDateParamName})`;
+        }
+
+        throw new Error(`Unsupported delay function parameter count: ${meta.objectName}`);
     }
 
     private getFirstNonEmpty(row: GenericRow, keys: string[]): string {
@@ -543,6 +630,7 @@ class DelayService {
         resolvedPositionBsTypeCol: string | null
     ): string {
         const columns = context.columns;
+        const positionOrderBy = this.buildEmployeeProfilePositionOrderBy(columns);
         const delayTypeExpr = this.buildDelayTypeExpr({
             positionAlias: 'p',
             unitAlias: 'u',
@@ -565,7 +653,7 @@ class DelayService {
                     ${columns.positionOrgCol ? `LTRIM(RTRIM(CAST(p.${escapeSqlIdentifier(columns.positionOrgCol)} AS nvarchar(32))))` : "N''"} AS org_unit_id,
                     ROW_NUMBER() OVER (
                         PARTITION BY LTRIM(RTRIM(CAST(p.${escapeSqlIdentifier(columns.positionIdCol!)} AS nvarchar(64))))
-                        ORDER BY ${context.positionOrderBy}
+                        ORDER BY ${positionOrderBy}
                     ) AS rn
                 FROM ${context.positionSource} p
                 WHERE TRY_CONVERT(int, p.${escapeSqlIdentifier(columns.positionSignPosCol!)}) = 100
@@ -706,7 +794,16 @@ class DelayService {
             positionOrderFields.push('TRY_CONVERT(date, p.' + escapeSqlIdentifier(columns.positionBeginDateCol) + ') DESC');
         }
         positionOrderFields.push('LTRIM(RTRIM(CAST(p.' + escapeSqlIdentifier(columns.positionIdCol!) + ' AS nvarchar(64)))) DESC');
-        return positionOrderFields.join(', ');
+        return buildSqlFragmentList(positionOrderFields);
+    }
+
+    private buildEmployeeOrgInfoOrderBy(columns: EmployeeProfileColumns): string {
+        const infoOrderFields: string[] = [];
+        if (columns.infoRetireYearCol) {
+            infoOrderFields.push('TRY_CONVERT(int, i.' + escapeSqlIdentifier(columns.infoRetireYearCol) + ') DESC');
+        }
+        infoOrderFields.push('LTRIM(RTRIM(CAST(i.' + escapeSqlIdentifier(columns.infoEmployeeCol!) + ' AS nvarchar(32)))) DESC');
+        return buildSqlFragmentList(infoOrderFields);
     }
 
     private buildEmployeeProfileUnitJoinClause(
@@ -748,7 +845,6 @@ class DelayService {
             positionSource,
             unitSource,
             canJoinUnit,
-            positionOrderBy: this.buildEmployeeProfilePositionOrderBy(params.columns),
             unitJoinClause: this.buildEmployeeProfileUnitJoinClause(unitSource, canJoinUnit, params.columns),
             positionEmpMatch,
             positionSecondmentCondition,
@@ -762,6 +858,7 @@ class DelayService {
         resolvedPositionBsTypeCol: string | null
     ): string {
         const columns = context.columns;
+        const positionOrderBy = this.buildEmployeeProfilePositionOrderBy(columns);
         const delayTypeExpr = this.buildDelayTypeExpr({
             positionAlias: 'p',
             unitAlias: 'u',
@@ -793,7 +890,7 @@ class DelayService {
             '  )',
             '  AND TRY_CONVERT(int, i.' + escapeSqlIdentifier(columns.infoRetireYearCol!) + ') IS NOT NULL',
             'ORDER BY TRY_CONVERT(int, i.' + escapeSqlIdentifier(columns.infoRetireYearCol!) + ') DESC,',
-            '         ' + context.positionOrderBy
+            '         ' + positionOrderBy
         ].join('\n');
     }
 
@@ -1015,7 +1112,6 @@ class DelayService {
             infoSource,
             positionSource,
             canJoinUnit,
-            positionOrderBy: this.buildEmployeeProfilePositionOrderBy(params.columns),
             unitJoinClause: this.buildEmployeeOrgMetaUnitJoinClause(unitSource, canJoinUnit, params.columns),
             unitNameSelectExpr,
             positionSecondmentCondition,
@@ -1029,6 +1125,8 @@ class DelayService {
         resolvedPositionBsTypeCol: string | null
     ): string {
         const columns = context.columns;
+        const positionOrderBy = this.buildEmployeeProfilePositionOrderBy(columns);
+        const infoOrderBy = this.buildEmployeeOrgInfoOrderBy(columns);
         const delayTypeExpr = this.buildDelayTypeExpr({
             positionAlias: 'p',
             unitAlias: 'u',
@@ -1056,7 +1154,7 @@ class DelayService {
                     ${columns.positionOrgCol ? `LTRIM(RTRIM(CAST(p.${escapeSqlIdentifier(columns.positionOrgCol)} AS nvarchar(32))))` : "N''"} AS org_unit_id,
                     ROW_NUMBER() OVER (
                         PARTITION BY LTRIM(RTRIM(CAST(p.${escapeSqlIdentifier(columns.positionIdCol!)} AS nvarchar(64))))
-                        ORDER BY ${context.positionOrderBy}
+                        ORDER BY ${positionOrderBy}
                     ) AS rn
                 FROM ${context.positionSource} p
                 WHERE TRY_CONVERT(int, p.${escapeSqlIdentifier(columns.positionSignPosCol!)}) = 100
@@ -1069,7 +1167,7 @@ class DelayService {
                     ${columns.infoRetireYearCol ? `TRY_CONVERT(int, i.${escapeSqlIdentifier(columns.infoRetireYearCol)})` : 'NULL'} AS retire_year,
                     ROW_NUMBER() OVER (
                         PARTITION BY LTRIM(RTRIM(CAST(i.${escapeSqlIdentifier(columns.infoPositionCol!)} AS nvarchar(64))))
-                        ORDER BY ${columns.infoRetireYearCol ? `TRY_CONVERT(int, i.${escapeSqlIdentifier(columns.infoRetireYearCol)}) DESC,` : ''} LTRIM(RTRIM(CAST(i.${escapeSqlIdentifier(columns.infoEmployeeCol!)} AS nvarchar(32)))) DESC
+                        ORDER BY ${infoOrderBy}
                     ) AS rn
                 FROM ${context.infoSource} i
             )
@@ -1305,6 +1403,110 @@ class DelayService {
         return options;
     }
 
+    private buildInsertDelaySql(hasRetirementYear: boolean, hasDelayType: boolean): string {
+        if (hasRetirementYear && hasDelayType) {
+            return `
+                INSERT INTO MP_Delay
+                    (EmployeeID, PosName, RetirementYear, DelayYear, DelayStatus, DelayType, CreateBy, CreateDate)
+                VALUES
+                    (@EmployeeID, @PosName, @RetirementYear, @DelayYear, @DelayStatus, @DelayType, @UserID, @Now);
+
+                SELECT CAST(SCOPE_IDENTITY() AS varchar(18)) AS DelayID;
+            `;
+        }
+
+        if (hasRetirementYear) {
+            return `
+                INSERT INTO MP_Delay
+                    (EmployeeID, PosName, RetirementYear, DelayYear, DelayStatus, CreateBy, CreateDate)
+                VALUES
+                    (@EmployeeID, @PosName, @RetirementYear, @DelayYear, @DelayStatus, @UserID, @Now);
+
+                SELECT CAST(SCOPE_IDENTITY() AS varchar(18)) AS DelayID;
+            `;
+        }
+
+        if (hasDelayType) {
+            return `
+                INSERT INTO MP_Delay
+                    (EmployeeID, PosName, DelayYear, DelayStatus, DelayType, CreateBy, CreateDate)
+                VALUES
+                    (@EmployeeID, @PosName, @DelayYear, @DelayStatus, @DelayType, @UserID, @Now);
+
+                SELECT CAST(SCOPE_IDENTITY() AS varchar(18)) AS DelayID;
+            `;
+        }
+
+        return `
+            INSERT INTO MP_Delay
+                (EmployeeID, PosName, DelayYear, DelayStatus, CreateBy, CreateDate)
+            VALUES
+                (@EmployeeID, @PosName, @DelayYear, @DelayStatus, @UserID, @Now);
+
+            SELECT CAST(SCOPE_IDENTITY() AS varchar(18)) AS DelayID;
+        `;
+    }
+
+    private buildUpdateDelaySql(hasRetirementYear: boolean, hasDelayType: boolean): string {
+        if (hasRetirementYear && hasDelayType) {
+            return `
+                UPDATE MP_Delay
+                SET EmployeeID = @EmployeeID,
+                    PosName = @PosName,
+                    RetirementYear = @RetirementYear,
+                    DelayYear = @DelayYear,
+                    DelayStatus = @DelayStatus,
+                    DelayType = @DelayType,
+                    UpdateBy = @UserID,
+                    UpdateDate = @Now
+                WHERE CAST(DelayID AS varchar(18)) = @DelayID
+                  AND ISNULL(DelayStatus, 1) = 1
+            `;
+        }
+
+        if (hasRetirementYear) {
+            return `
+                UPDATE MP_Delay
+                SET EmployeeID = @EmployeeID,
+                    PosName = @PosName,
+                    RetirementYear = @RetirementYear,
+                    DelayYear = @DelayYear,
+                    DelayStatus = @DelayStatus,
+                    UpdateBy = @UserID,
+                    UpdateDate = @Now
+                WHERE CAST(DelayID AS varchar(18)) = @DelayID
+                  AND ISNULL(DelayStatus, 1) = 1
+            `;
+        }
+
+        if (hasDelayType) {
+            return `
+                UPDATE MP_Delay
+                SET EmployeeID = @EmployeeID,
+                    PosName = @PosName,
+                    DelayYear = @DelayYear,
+                    DelayStatus = @DelayStatus,
+                    DelayType = @DelayType,
+                    UpdateBy = @UserID,
+                    UpdateDate = @Now
+                WHERE CAST(DelayID AS varchar(18)) = @DelayID
+                  AND ISNULL(DelayStatus, 1) = 1
+            `;
+        }
+
+        return `
+            UPDATE MP_Delay
+            SET EmployeeID = @EmployeeID,
+                PosName = @PosName,
+                DelayYear = @DelayYear,
+                DelayStatus = @DelayStatus,
+                UpdateBy = @UserID,
+                UpdateDate = @Now
+            WHERE CAST(DelayID AS varchar(18)) = @DelayID
+              AND ISNULL(DelayStatus, 1) = 1
+        `;
+    }
+
     async createDelayRecord(payload: DelayUpsertPayload): Promise<{ success: boolean; message?: string; data?: DelayRecord | null }> {
         const pool = await poolPromise;
         const delayMeta = await this.getDelayTableMeta(pool);
@@ -1336,21 +1538,7 @@ class DelayService {
         }
 
         const now = new Date();
-        const insertColumns = [
-            'EmployeeID', 'PosName',
-            ...(hasRetirementYear ? ['RetirementYear'] : []),
-            'DelayYear', 'DelayStatus',
-            ...(hasDelayType ? ['DelayType'] : []),
-            'CreateBy', 'CreateDate'
-        ];
-        const insertValues = [
-            '@EmployeeID', '@PosName',
-            ...(hasRetirementYear ? ['@RetirementYear'] : []),
-            '@DelayYear', '@DelayStatus',
-            ...(hasDelayType ? ['@DelayType'] : []),
-            '@UserID', '@Now'
-        ];
-        const insertResult = await pool.request()
+        const insertRequest = pool.request()
             .input('EmployeeID', sql.VarChar(8), payload.employeeId)
             .input('PosName', sql.VarChar(100), posName)
             .input('RetirementYear', sql.Int, retireYear)
@@ -1358,19 +1546,8 @@ class DelayService {
             .input('DelayStatus', sql.Int, payload.delayStatus)
             .input('DelayType', sql.Int, delayType)
             .input('UserID', sql.VarChar(10), payload.userId)
-            .input('Now', sql.DateTime, now)
-            .query(`
-                INSERT INTO MP_Delay
-                (
-                    ${insertColumns.join(', ')}
-                )
-                VALUES
-                (
-                    ${insertValues.join(', ')}
-                );
-
-                SELECT CAST(SCOPE_IDENTITY() AS varchar(18)) AS DelayID;
-            `);
+            .input('Now', sql.DateTime, now);
+        const insertResult = await insertRequest.query(this.buildInsertDelaySql(hasRetirementYear, hasDelayType));
 
         const createdDelayId = String(insertResult.recordset?.[0]?.DelayID || '').trim();
         if (!createdDelayId) {
@@ -1414,17 +1591,7 @@ class DelayService {
         }
 
         const now = new Date();
-        const updateAssignments = [
-            'EmployeeID = @EmployeeID',
-            'PosName = @PosName',
-            ...(hasRetirementYear ? ['RetirementYear = @RetirementYear'] : []),
-            'DelayYear = @DelayYear',
-            'DelayStatus = @DelayStatus',
-            ...(hasDelayType ? ['DelayType = @DelayType'] : []),
-            'UpdateBy = @UserID',
-            'UpdateDate = @Now'
-        ];
-        const updateResult = await pool.request()
+        const updateRequest = pool.request()
             .input('DelayID', sql.VarChar(18), delayId)
             .input('EmployeeID', sql.VarChar(8), payload.employeeId)
             .input('PosName', sql.VarChar(100), posName)
@@ -1433,14 +1600,8 @@ class DelayService {
             .input('DelayStatus', sql.Int, payload.delayStatus)
             .input('DelayType', sql.Int, delayType)
             .input('UserID', sql.VarChar(10), payload.userId)
-            .input('Now', sql.DateTime, now)
-            .query(`
-                UPDATE MP_Delay
-                SET
-                    ${updateAssignments.join(',\n                    ')}
-                WHERE CAST(DelayID AS varchar(18)) = @DelayID
-                  AND ISNULL(DelayStatus, 1) = 1
-            `);
+            .input('Now', sql.DateTime, now);
+        const updateResult = await updateRequest.query(this.buildUpdateDelaySql(hasRetirementYear, hasDelayType));
 
         const affected = updateResult.rowsAffected?.[0] || 0;
         if (affected === 0) {

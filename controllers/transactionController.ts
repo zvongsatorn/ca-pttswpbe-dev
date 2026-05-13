@@ -30,6 +30,7 @@ import path from 'path';
 
 const THAI_MONTH_NAMES = ['มกราคม', 'กุมภาพันธ์', 'มีนาคม', 'เมษายน', 'พฤษภาคม', 'มิถุนายน', 'กรกฎาคม', 'สิงหาคม', 'กันยายน', 'ตุลาคม', 'พฤศจิกายน', 'ธันวาคม'];
 const TRANSACTION_FILE_EXTENSIONS = new Set(['.pdf', '.xlsx', '.xls', '.doc', '.docx', '.png', '.jpg', '.jpeg']);
+const TRANSACTION_UPLOAD_ROOT = path.resolve(process.cwd(), 'uploads', 'transactions');
 
 const toSafeHeaderFilename = (value: unknown, fallback: string): string => {
     const baseName = path.basename(String(value || fallback));
@@ -40,6 +41,19 @@ const toSafeHeaderFilename = (value: unknown, fallback: string): string => {
 const toSafeUploadExtension = (value: unknown, fallback: string): string => {
     const extension = path.extname(String(value || '')).toLowerCase();
     return TRANSACTION_FILE_EXTENSIONS.has(extension) ? extension : fallback;
+};
+
+const resolveTransactionUploadPath = (filename: string): string => {
+    const safeFilename = path.basename(filename || '');
+    if (!safeFilename || safeFilename !== filename) {
+        throw new Error('Invalid transaction upload filename');
+    }
+
+    const filePath = path.resolve(TRANSACTION_UPLOAD_ROOT, safeFilename);
+    if (!filePath.startsWith(`${TRANSACTION_UPLOAD_ROOT}${path.sep}`)) {
+        throw new Error('Invalid transaction upload path');
+    }
+    return filePath;
 };
 
 const parseEffectiveDateForStructureDebug = (
@@ -147,9 +161,8 @@ const parseDraftRequest = async (c: Context): Promise<{ body: Record<string, any
 const saveUploadedTransactionFile = async (fileEntry: File | null): Promise<{ fileName: string | null; fileUrl: string | undefined } | null> => {
     if (!fileEntry) return null;
 
-    const uploadsDir = path.join(process.cwd(), "uploads", "transactions");
-    if (!existsSync(uploadsDir)) {
-        await mkdir(uploadsDir, { recursive: true });
+    if (!existsSync(TRANSACTION_UPLOAD_ROOT)) {
+        await mkdir(TRANSACTION_UPLOAD_ROOT, { recursive: true });
     }
 
     const originalName = fileEntry.name;
@@ -157,7 +170,7 @@ const saveUploadedTransactionFile = async (fileEntry: File | null): Promise<{ fi
 
     const { randomUUID } = await import("crypto");
     const safeName = randomUUID() + extension;
-    const savedFilePath = path.join(uploadsDir, safeName);
+    const savedFilePath = resolveTransactionUploadPath(safeName);
     const fileBuffer = Buffer.from(await fileEntry.arrayBuffer());
     await writeFile(savedFilePath, fileBuffer);
 

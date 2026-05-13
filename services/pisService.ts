@@ -1,9 +1,35 @@
 import configService from './configService.js';
 
+const DEFAULT_ALLOWED_PIS_HOST_SUFFIXES = ['pttplc.com', 'pttdigital.com'];
+
+const getAllowedPisHostSuffixes = (): string[] => {
+    const configured = String(process.env.PIS_ALLOWED_HOST_SUFFIXES || '')
+        .split(',')
+        .map((item) => item.trim().toLowerCase())
+        .filter(Boolean);
+    return configured.length ? configured : DEFAULT_ALLOWED_PIS_HOST_SUFFIXES;
+};
+
+const isAllowedPisHostname = (hostname: string): boolean => {
+    const normalizedHost = hostname.toLowerCase();
+    return getAllowedPisHostSuffixes().some((suffix) => (
+        normalizedHost === suffix || normalizedHost.endsWith(`.${suffix}`)
+    ));
+};
+
 const resolveHttpsConfigUrl = (value: string, searchParams?: Record<string, string>): string => {
     const parsed = new URL(String(value || '').trim());
     if (parsed.protocol !== 'https:') {
         throw new Error('PIS endpoint must use HTTPS');
+    }
+    if (parsed.username || parsed.password || parsed.hash) {
+        throw new Error('PIS endpoint contains unsupported URL parts');
+    }
+    if (parsed.port && parsed.port !== '443') {
+        throw new Error('PIS endpoint uses unsupported port');
+    }
+    if (!isAllowedPisHostname(parsed.hostname)) {
+        throw new Error('PIS endpoint host is not allowed');
     }
 
     Object.entries(searchParams || {}).forEach(([key, val]) => {
@@ -11,6 +37,18 @@ const resolveHttpsConfigUrl = (value: string, searchParams?: Record<string, stri
     });
 
     return parsed.toString();
+};
+
+const safeHeaderValue = (value: unknown, name: string): string => {
+    const text = String(value || '').trim();
+    if (!text || /[\r\n]/.test(text)) {
+        throw new Error(`Invalid ${name}`);
+    }
+    return text;
+};
+
+const safePisIdentifier = (value: unknown): string => {
+    return String(value || '').trim().replace(/^0+/, '').replace(/[^A-Za-z0-9_-]/g, '');
 };
 
 class PisService {
@@ -34,7 +72,7 @@ class PisService {
             return "";
         }
 
-        const credentials = Buffer.from(`${username}:${password}`).toString('base64');
+        const credentials = Buffer.from(`${safeHeaderValue(username, 'PIS username')}:${safeHeaderValue(password, 'PIS password')}`).toString('base64');
 
         try {
             const response = await fetch(resolveHttpsConfigUrl(tokenUrl), {
@@ -54,7 +92,7 @@ class PisService {
             }
 
             const data: any = await response.json();
-            this.token = data.access_token;
+            this.token = safeHeaderValue(data.access_token, 'PIS access token');
             this.tokenExpiry = Date.now() + (data.expires_in || 3600) * 1000 - 60000; // Subtract 1 min for safety
             return this.token || "";
         } catch (error) {
@@ -71,12 +109,12 @@ class PisService {
             const baseUrl = await configService.getConfig('REQUEST_ADDRESS2');
             if (!baseUrl) return null;
 
-            const formattedEmpID = employeeId.replace(/^0+/, '');
+            const formattedEmpID = safePisIdentifier(employeeId);
             const url = resolveHttpsConfigUrl(baseUrl, { Search_EmployeeCode: formattedEmpID });
 
             const response = await fetch(url, {
                 headers: {
-                    'Authorization': `Bearer ${token}`,
+                    'Authorization': `Bearer ${safeHeaderValue(token, 'PIS access token')}`,
                     'Accept': 'application/json'
                 }
             });
@@ -104,12 +142,12 @@ class PisService {
             const baseUrl = await configService.getConfig('REQUEST_ADDRESS1');
             if (!baseUrl) return [];
 
-            const formattedEmpID = employeeId.replace(/^0+/, '');
-            const url = resolveHttpsConfigUrl(baseUrl, { in_empid: formattedEmpID, in_poscode: posCode });
+            const formattedEmpID = safePisIdentifier(employeeId);
+            const url = resolveHttpsConfigUrl(baseUrl, { in_empid: formattedEmpID, in_poscode: safePisIdentifier(posCode) });
 
             const response = await fetch(url, {
                 headers: {
-                    'Authorization': `Bearer ${token}`,
+                    'Authorization': `Bearer ${safeHeaderValue(token, 'PIS access token')}`,
                     'Accept': 'application/json'
                 }
             });

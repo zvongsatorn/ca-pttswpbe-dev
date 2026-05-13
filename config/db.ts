@@ -13,6 +13,7 @@ const dbRequestTimeout = toPositiveInt(process.env.DB_REQUEST_TIMEOUT_MS, 30000)
 const trustServerCertificate = process.env.DB_TRUST_SERVER_CERTIFICATE === 'true';
 const dbServer = String(process.env.DB_SERVER || '').trim();
 const dbDatabase = String(process.env.DB_DATABASE || '').trim();
+const dbPort = toPositiveInt(process.env.DB_PORT, 1433);
 
 if (!/^[A-Za-z0-9._-]+$/.test(dbServer)) {
     throw new Error('Invalid DB_SERVER format');
@@ -22,12 +23,16 @@ if (!/^[A-Za-z0-9._-]+$/.test(dbDatabase)) {
     throw new Error('Invalid DB_DATABASE format');
 }
 
+if (dbPort > 65535) {
+    throw new Error('Invalid DB_PORT format');
+}
+
 const config: sql.config = {
     user: process.env.DB_USER,
     password: process.env.DB_PASSWORD,
     server: dbServer,
     database: dbDatabase,
-    port: parseInt(process.env.DB_PORT || '1433', 10),
+    port: dbPort,
     pool: {
         max: 20,
         min: 0,
