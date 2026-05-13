@@ -15,7 +15,11 @@ import {
 } from '../services/fileSafetyUtils.js';
 
 const PROFILE_PICTURE_MAX_BYTES = 5 * 1024 * 1024;
-const JWT_ACCESS_TOKEN_EXPIRES_IN = '30m';
+const getJwtAccessTokenExpiresIn = (): number => {
+    const configured = String(process.env.JWT_ACCESS_TOKEN_EXPIRES_IN || '').trim();
+    const configuredSeconds = Number.parseInt(configured, 10);
+    return Number.isFinite(configuredSeconds) && configuredSeconds > 0 ? configuredSeconds : 30 * 60;
+};
 const PROFILE_PICTURE_CONTENT_TYPES: Record<string, string> = {
     '.jpg': 'image/jpeg',
     '.jpeg': 'image/jpeg',
@@ -65,7 +69,7 @@ const buildProfilePictureToken = (employeeId: string, userData: any, userGroups:
             profilePicture: safeName,
         },
         secretKey,
-        { expiresIn: JWT_ACCESS_TOKEN_EXPIRES_IN }
+        { expiresIn: getJwtAccessTokenExpiresIn() }
     );
 };
 

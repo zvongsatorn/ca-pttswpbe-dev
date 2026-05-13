@@ -5,6 +5,7 @@ import {
     resolveSafeChildPath,
     safeCopyFileSync,
     safeExistsSync,
+    safeFilePathToString,
     safeMkdirSync,
     safeReadFileSync,
     safeWriteFileSync,
@@ -900,7 +901,7 @@ export const filesProxy = async (c: Context) => {
         }
 
         const fileBuffer = safeReadFileSync(fullPath);
-        const fileName = toSafeHeaderFilename(path.basename(fullPath), 'mkd-file');
+        const fileName = toSafeHeaderFilename(path.basename(safeFilePathToString(fullPath)), 'mkd-file');
         const extension = path.extname(fileName).toLowerCase();
 
         // Map extension to content type
@@ -1065,7 +1066,7 @@ export const downloadMasterKeyTemplate = async (c: Context) => {
         if (populate === 'true') {
             // Load template into ExcelJS
             const workbook = new ExcelJS.Workbook();
-            await workbook.xlsx.readFile(templatePath);
+            await workbook.xlsx.readFile(safeFilePathToString(templatePath));
             const worksheet = workbook.worksheets[0];
             
             // Fetch master keys data

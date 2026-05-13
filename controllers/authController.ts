@@ -8,7 +8,11 @@ import userGroupService from '../services/userGroupService.js';
 import * as userService from '../services/userService.js';
 import { insertLogActionService } from '../services/logService.js';
 
-const JWT_ACCESS_TOKEN_EXPIRES_IN = '30m';
+const getJwtAccessTokenExpiresIn = (): number => {
+    const configured = String(process.env.JWT_ACCESS_TOKEN_EXPIRES_IN || '').trim();
+    const configuredSeconds = Number.parseInt(configured, 10);
+    return Number.isFinite(configuredSeconds) && configuredSeconds > 0 ? configuredSeconds : 30 * 60;
+};
 
 const createTemporaryPassword = () => {
     const suffix = randomBytes(12).toString('base64url');
@@ -109,7 +113,7 @@ const signLoginToken = (user: { EmployeeID: string; Name: string; Email: string 
             profilePicture: userData.ProfilePicture || '',
         },
         secretKey,
-        { expiresIn: JWT_ACCESS_TOKEN_EXPIRES_IN }
+        { expiresIn: getJwtAccessTokenExpiresIn() }
     );
 };
 const getSsoCaaData = async (type: string, accessToken: string, systemToken: string) => {

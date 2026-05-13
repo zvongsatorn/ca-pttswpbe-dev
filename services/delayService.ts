@@ -1,5 +1,6 @@
 import { sql, poolPromise } from '../config/db.js';
 import {
+    assertAllowlistedSql,
     bindSqlInputParams,
     buildAllowedObjectFullName,
     buildSqlFragmentList,
@@ -209,14 +210,13 @@ class DelayService {
     }
 
     private toAllowlistedSql(command: string): AllowlistedSql {
-        if (!command.trim()) {
-            throw new Error('Empty SQL command');
-        }
+        assertAllowlistedSql(command);
         return command as AllowlistedSql;
     }
 
     // Dynamic SQL here is limited to allowlisted object/column identifiers; values stay bound as parameters.
     private queryAllowlistedSql(request: sql.Request, command: AllowlistedSql): Promise<sql.IResult<GenericRow>> {
+        assertAllowlistedSql(command);
         return request.query<GenericRow>(command);
     }
 

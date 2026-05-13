@@ -14,6 +14,7 @@ type SqlRequestLike = {
 
 const SQL_IDENTIFIER_PATTERN = /^[A-Za-z_]\w*$/;
 const SQL_FRAGMENT_PATTERN = /^[\w\[\]@().=,\s]+$/;
+const UNSAFE_SQL_TOKEN_PATTERN = /(--|\/\*|\*\/|\b(?:exec|execute|sp_executesql|xp_cmdshell|openrowset|opendatasource|bulk\s+insert|drop|alter|truncate)\b)/i;
 
 export const escapeSqlIdentifier = (value: string): string => {
     if (!SQL_IDENTIFIER_PATTERN.test(value)) {
@@ -66,16 +67,25 @@ export const bindSqlInputParams = <T extends SqlRequestLike>(request: T, params:
 };
 
 export const toAllowlistedSql = (command: string): AllowlistedSql => {
-    if (!String(command || '').trim()) {
+    assertAllowlistedSql(command);
+    return command as AllowlistedSql;
+};
+
+export const assertAllowlistedSql = (command: string): void => {
+    const text = String(command || '');
+    if (!text.trim()) {
         throw new Error('Empty SQL command');
     }
-    return command as AllowlistedSql;
+    if (text.includes('\0') || UNSAFE_SQL_TOKEN_PATTERN.test(text)) {
+        throw new Error('Unsupported SQL command');
+    }
 };
 
 export const queryAllowlistedSql = <T = Record<string, unknown>>(
     request: sql.Request,
     command: AllowlistedSql
 ): Promise<sql.IResult<T>> => {
+    assertAllowlistedSql(command);
     return request.query<T>(command);
 };
 

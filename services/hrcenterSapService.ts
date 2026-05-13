@@ -4,6 +4,7 @@ import { Client, enterPassiveModeIPv4 } from 'basic-ftp';
 import {
     resolveSafeChildPath,
     safeMkdirAsync,
+    safeFilePathToString,
     safeReadFileAsync,
     safeStatAsync,
     safeWriteTextFileAsync,
@@ -738,7 +739,7 @@ const tryUploadSapOutboundFile = async (ftpEnabled: boolean, state: SapSendState
     if (state.resultCode === "0" || !ftpEnabled) return;
 
     try {
-        await uploadFileToFtp(getHRCenterSapOutboundFilePath());
+        await uploadFileToFtp(safeFilePathToString(getHRCenterSapOutboundFilePath()));
         state.ftpSent = true;
     } catch (error) {
         console.error("[HRCenter SAP] Failed to upload outbound file via FTP", {
@@ -853,14 +854,14 @@ export const getHRCenterSapOutboundFileMetaService = async (): Promise<{ fileNam
         const stat = await safeStatAsync(filePath);
         return {
             fileName: OUTBOUND_FILE_NAME,
-            filePath,
+            filePath: safeFilePathToString(filePath),
             exists: stat.isFile(),
             modifiedAt: formatThaiDateSlash(stat.mtime)
         };
     } catch {
         return {
             fileName: OUTBOUND_FILE_NAME,
-            filePath,
+            filePath: safeFilePathToString(filePath),
             exists: false
         };
     }

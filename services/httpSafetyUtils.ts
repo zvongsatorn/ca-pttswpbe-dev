@@ -1,4 +1,8 @@
-export type SafeHttpUrl = string & { readonly __safeHttpUrl: unique symbol };
+export type SafeHttpUrl = {
+    readonly url: URL;
+    readonly hostname: string;
+    readonly __safeHttpUrl: unique symbol;
+};
 export type SafeHeaderValue = string & { readonly __safeHeaderValue: unique symbol };
 
 const DEFAULT_ALLOWED_HTTPS_PORTS = new Set(['', '443']);
@@ -38,9 +42,20 @@ export const toSafeHttpsUrl = (
         parsed.searchParams.set(key, val);
     });
 
-    return parsed.toString() as SafeHttpUrl;
+    return {
+        url: parsed,
+        hostname: parsed.hostname.toLowerCase()
+    } as SafeHttpUrl;
 };
 
 export const fetchSafeHttpUrl = (url: SafeHttpUrl, init?: RequestInit): Promise<Response> => {
-    return fetch(url, init);
+    const parsed = url.url;
+    if (
+        parsed.protocol !== 'https:' ||
+        !DEFAULT_ALLOWED_HTTPS_PORTS.has(parsed.port) ||
+        parsed.hostname.toLowerCase() !== url.hostname
+    ) {
+        throw new Error('Unsafe URL');
+    }
+    return fetch(new Request(parsed.toString(), init));
 };
