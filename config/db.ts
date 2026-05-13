@@ -3,24 +3,26 @@ import { loadEnv } from './loadEnv.js';
 
 loadEnv();
 
+const DEFAULT_DB_TIMEOUT_MS = 30000;
+
 const toPositiveInt = (value: string | undefined, fallback: number): number => {
-    const parsed = Number.parseInt(value || '', 10);
+    const parsed = Number.parseInt(value ?? '', 10);
     return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 };
 
-const dbConnectionTimeout = toPositiveInt(process.env.DB_CONNECTION_TIMEOUT_MS, 30000);
-const dbRequestTimeout = toPositiveInt(process.env.DB_REQUEST_TIMEOUT_MS, 30000);
+const dbConnectionTimeout = toPositiveInt(process.env.DB_CONNECTION_TIMEOUT_MS, DEFAULT_DB_TIMEOUT_MS);
+const dbRequestTimeout = toPositiveInt(process.env.DB_REQUEST_TIMEOUT_MS, DEFAULT_DB_TIMEOUT_MS);
 const trustServerCertificate = process.env.DB_TRUST_SERVER_CERTIFICATE === 'true';
 type SafeDbHost = string & { readonly __safeDbHost: unique symbol };
 type SafeDbName = string & { readonly __safeDbName: unique symbol };
 
-const getAllowedDbHostSuffixes = (): string[] => String(process.env.DB_ALLOWED_HOST_SUFFIXES || '')
+const getAllowedDbHostSuffixes = (): string[] => String(process.env.DB_ALLOWED_HOST_SUFFIXES ?? '')
     .split(',')
     .map((item) => item.trim().toLowerCase())
     .filter(Boolean);
 
 const toSafeDbHost = (value: string | undefined): SafeDbHost => {
-    const host = String(value || '').trim();
+    const host = String(value ?? '').trim();
     if (!/^[A-Za-z0-9._-]+$/.test(host)) {
         throw new Error('Invalid DB_SERVER format');
     }
@@ -35,7 +37,7 @@ const toSafeDbHost = (value: string | undefined): SafeDbHost => {
 };
 
 const toSafeDbName = (value: string | undefined): SafeDbName => {
-    const database = String(value || '').trim();
+    const database = String(value ?? '').trim();
     if (!/^[A-Za-z0-9._-]+$/.test(database)) {
         throw new Error('Invalid DB_DATABASE format');
     }
@@ -59,7 +61,7 @@ const config: sql.config = {
     pool: {
         max: 20,
         min: 0,
-        idleTimeoutMillis: 30000 // Prevent silent TCP connection drops
+        idleTimeoutMillis: DEFAULT_DB_TIMEOUT_MS // Prevent silent TCP connection drops
     },
     connectionTimeout: dbConnectionTimeout,
     requestTimeout: dbRequestTimeout,

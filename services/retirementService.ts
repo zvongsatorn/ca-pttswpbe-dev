@@ -402,7 +402,7 @@ class RetirementService {
         const result = await queryAllowlistedSql(request, toAllowlistedSql(this.buildRemarkSql()));
 
         if (!Array.isArray(result.recordset) || result.recordset.length === 0) return null;
-        return this.mapRemarkRow(result.recordset[0] as Record<string, unknown>);
+        return this.mapRemarkRow(result.recordset[0]);
     }
 
     private async getRetirementRemark(

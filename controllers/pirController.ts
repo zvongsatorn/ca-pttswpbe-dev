@@ -1,5 +1,4 @@
 import { Context } from 'hono';
-import * as fs from 'fs';
 import * as path from 'path';
 import { randomUUID } from 'crypto';
 import {

@@ -1,6 +1,5 @@
 import { Context } from 'hono';
 import * as userService from '../services/userService.js';
-import * as fs from 'fs';
 import * as path from 'path';
 import { randomUUID } from 'crypto';
 import jwt from 'jsonwebtoken';

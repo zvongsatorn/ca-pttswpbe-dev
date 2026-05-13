@@ -18,8 +18,8 @@ export const safeMkdirSync = (dirPath: SafeFilePath): void => {
     fs.mkdirSync(dirPath, { recursive: true });
 };
 
-export const safeMkdirAsync = (dirPath: SafeFilePath): Promise<void> => {
-    return fs.promises.mkdir(dirPath, { recursive: true }).then(() => undefined);
+export const safeMkdirAsync = async (dirPath: SafeFilePath): Promise<void> => {
+    await fs.promises.mkdir(dirPath, { recursive: true });
 };
 
 export const safeReadFileSync = (filePath: SafeFilePath): Uint8Array<ArrayBuffer> => {

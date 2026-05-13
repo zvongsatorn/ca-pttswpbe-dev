@@ -2,9 +2,10 @@ export type SafeHttpUrl = string & { readonly __safeHttpUrl: unique symbol };
 export type SafeHeaderValue = string & { readonly __safeHeaderValue: unique symbol };
 
 const DEFAULT_ALLOWED_HTTPS_PORTS = new Set(['', '443']);
+const SAFE_QUERY_PARAM_NAME_PATTERN = /^[A-Za-z0-9_.-]+$/;
 
 export const toSafeHeaderValue = (value: unknown, name: string): SafeHeaderValue => {
-    const text = String(value || '').trim();
+    const text = String(value ?? '').trim();
     if (!text || /[\r\n]/.test(text)) {
         throw new Error(`Invalid ${name}`);
     }
@@ -16,7 +17,7 @@ export const toSafeHttpsUrl = (
     isAllowedHostname: (hostname: string) => boolean,
     searchParams?: Record<string, string>
 ): SafeHttpUrl => {
-    const parsed = new URL(String(value || '').trim());
+    const parsed = new URL(String(value ?? '').trim());
     if (parsed.protocol !== 'https:') {
         throw new Error('Endpoint must use HTTPS');
     }
@@ -30,8 +31,8 @@ export const toSafeHttpsUrl = (
         throw new Error('Endpoint host is not allowed');
     }
 
-    Object.entries(searchParams || {}).forEach(([key, val]) => {
-        if (!/^[A-Za-z0-9_.-]+$/.test(key)) {
+    Object.entries(searchParams ?? {}).forEach(([key, val]) => {
+        if (!SAFE_QUERY_PARAM_NAME_PATTERN.test(key)) {
             throw new Error('Unsupported query parameter name');
         }
         parsed.searchParams.set(key, val);

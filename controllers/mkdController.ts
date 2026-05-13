@@ -376,7 +376,6 @@ export const deleteKey = async (c: Context) => {
     }
 };
 
-import * as fs from 'fs';
 import * as path from 'path';
 
 export const uploadFile = async (c: Context) => {

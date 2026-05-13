@@ -152,21 +152,25 @@ const getSsoCaaData = async (type: string, accessToken: string, systemToken: str
 };
 
 const decodeSsoCaaData = (caaData: any) => {
-    if (!caaData?.Data) return caaData;
+    if (!caaData?.Data) {
+        return caaData;
+    }
 
-        try {
-            const decodedString = Buffer.from(caaData.Data, 'base64').toString('utf-8');
-            const decodedData = JSON.parse(decodedString);
-            console.log('[SSO] Decoded CA&A data successfully.');
-            return decodedData;
-        } catch (e) {
-            console.warn("[SSO] Failed to decode CA&A Data field, using raw response");
-            return caaData;
-        }
+    try {
+        const decodedString = Buffer.from(caaData.Data, 'base64').toString('utf-8');
+        const decodedData = JSON.parse(decodedString);
+        console.log('[SSO] Decoded CA&A data successfully.');
+        return decodedData;
+    } catch {
+        console.warn("[SSO] Failed to decode CA&A Data field, using raw response");
+        return caaData;
+    }
 };
 
 const findSsoUserByEmail = async (email: string) => {
-    if (!email) return { employeeId: '', userData: null as any };
+    if (!email) {
+        return { employeeId: '', userData: null as any };
+    }
 
     const userData: any = await userService.getUserByEmail(email);
     const employeeId = String(userData?.EmployeeID || '');
