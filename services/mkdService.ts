@@ -1046,11 +1046,8 @@ const resendMkdApproval = async (
 
     const requesterReq = new sql.Request(transaction);
     requesterReq.input('ApproveID', sql.Decimal(18, 0), approveId);
-    const requesterRes = await requesterReq.query(`
-        SELECT TOP 1 FNAME, LNAME
-        FROM MP_ApproveHist
-        WHERE ApproveID = @ApproveID AND Seqno = 0
-    `);
+    requesterReq.input('Seqno', sql.Int, 0);
+    const requesterRes = await requesterReq.execute('MP_ApproveHistBySeqGet');
     const requester = requesterRes.recordset[0];
     return `${requester?.FNAME || ''} ${requester?.LNAME || ''}`.trim() || employeeId;
 };
@@ -1134,7 +1131,7 @@ const notifyFirstMkdApprover = async (
         const nextApproverReq = new sql.Request(transaction);
         nextApproverReq.input('ApproveID', sql.Decimal(18, 0), approveId);
         nextApproverReq.input('Seqno', sql.Int, 1);
-        const nextRes = await nextApproverReq.query('SELECT FNAME, LNAME, EmailAddr, REP_CODE FROM MP_ApproveHist WHERE ApproveID = @ApproveID AND Seqno = @Seqno');
+        const nextRes = await nextApproverReq.execute('MP_ApproveHistBySeqGet');
         const next = nextRes.recordset?.[0];
 
         if (!next?.EmailAddr) {
@@ -1427,7 +1424,8 @@ const updateMkdStatusRemark = async (
 const getMkdRequester = async (transaction: sql.Transaction, approveId: number) => {
     const reqUserReq = new sql.Request(transaction);
     reqUserReq.input('ApproveID', sql.Decimal(18, 0), approveId);
-    const reqRes = await reqUserReq.query('SELECT FNAME, LNAME, EmailAddr, REP_CODE FROM MP_ApproveHist WHERE ApproveID = @ApproveID AND Seqno = 0');
+    reqUserReq.input('Seqno', sql.Int, 0);
+    const reqRes = await reqUserReq.execute('MP_ApproveHistBySeqGet');
     return reqRes.recordset?.[0] || null;
 };
 

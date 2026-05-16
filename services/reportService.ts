@@ -1,14 +1,5 @@
 import { sql, poolPromise } from '../config/db.js';
 import { calculateReport7ShapeGapMetrics } from '../config/report7FormulaConfig.js';
-import {
-    bindSqlInputParams,
-    buildAllowedObjectFullName,
-    buildSqlInParams,
-    escapeSqlIdentifier,
-    pickColumnName,
-    queryAllowlistedSql,
-    toAllowlistedSql
-} from './sqlSafetyUtils.js';
 
 type Report08LevelMap = Map<string, Map<string, number>>;
 type Report09OrgYearMap = Map<string, Map<number, { support: number; bu: number }>>;
@@ -23,14 +14,6 @@ type Report09AuditRow = {
     bs_type: 'Support' | 'BU';
     position_rows: number;
     employee_count: number;
-};
-
-type TableMeta = {
-    schemaName: string;
-    tableName: string;
-    fullName: string;
-    objectName: string;
-    columns: Map<string, string>;
 };
 
 const REPORT08_PEOPLE_LEVELS = [
@@ -54,29 +37,6 @@ const REPORT08_BEGIN_COL_CANDIDATES = ['BeginDate', 'StartDate', 'FromDate', 'Ef
 const REPORT08_END_COL_CANDIDATES = ['EndDate', 'ToDate', 'EffectiveEndDate'];
 const REPORT08_EFFECTIVE_COL_CANDIDATES = ['EffectiveDate', 'CheckDate', 'DataDate', 'MonthDate', 'TranDate'];
 const REPORT08_AMOUNT_COL_CANDIDATES = ['CostEmployee', 'CostAmount', 'Amount', 'BudgetAmount', 'ExpenseAmount', 'TotalAmount', 'TotalCost', 'Cost', 'Value'];
-
-const REPORT09_INFO_TABLE_CANDIDATES = ['infodata', 'InfoData'];
-const REPORT09_POSITION_TABLE_CANDIDATES = ['InterfacePosition', 'interfaceposition'];
-const REPORT09_INFO_EMPLOYEE_COL_CANDIDATES = ['CODE', 'Code', 'EmployeeID', 'EmployeeId'];
-const REPORT09_INFO_SECONDMENT_TEXT_COL_CANDIDATES = ['Secondment_text', 'Secondment_Text', 'SecondmentText', 'secondment_text'];
-const REPORT09_RETIRE_YEAR_COL_CANDIDATES = ['RETIREYEAR', 'RetireYear'];
-const REPORT09_INFO_POSITION_COL_CANDIDATES = ['POSCODE', 'PositionID', 'PositionCode', 'PosCode'];
-const REPORT09_POSITION_ID_COL_CANDIDATES = ['PositionID', 'POSCODE', 'PositionCode', 'PosCode'];
-const REPORT09_ORG_COL_CANDIDATES = ['OrgUnitID', 'OrgUnitId', 'OrgUnitNo', 'OrgUnitNO', 'OrgUnit', 'UnitNo', 'UnitCode', 'OrgNo'];
-const REPORT09_ORG_TYPE_COL_CANDIDATES = ['OrgType', 'ORGTYPE', 'orgtype'];
-const REPORT09_LEVEL_COL_CANDIDATES = ['LevelGroupNo', 'LevelGroupNO', 'LevelNo', 'GroupNo', 'PositionLevel'];
-const REPORT09_BS_TYPE_COL_CANDIDATES = ['BSType', 'BsType', 'BS_Type', 'TypeBS'];
-const REPORT09_SIGN_POS_COL_CANDIDATES = ['SignPos', 'SignPOS', 'SignPosition', 'SignPosFlag'];
-const REPORT09_EMPLOYEE_COL_CANDIDATES = ['EmployeeID', 'EmployeeId', 'EmpID', 'EmpId', 'EmployeeNo'];
-const REPORT09_UNIT_FN_CANDIDATES = ['fn_InterfaceUnit'];
-const REPORT09_UNIT_BG_COL_CANDIDATES = ['BGNo', 'BgNo', 'BGNO'];
-const REPORT09_UNIT_NAME_COL_CANDIDATES = ['UnitName', 'OrgUnitName', 'Name'];
-const REPORT09_UNIT_ABBR_COL_CANDIDATES = ['UnitAbbr', 'OrgUnitAbbr', 'ShortName', 'Abbr'];
-const REPORT09_LEVEL_GROUP_TABLE_CANDIDATES = ['MP_LevelGroup'];
-const REPORT09_LEVEL_GROUP_ACTIVE_COL_CANDIDATES = ['LevelDelayActive', 'LevelDelayActiive', 'LevelDalayActive'];
-const REPORT09_LEVEL_GROUP_ORDER_COL_CANDIDATES = ['LevelDelayOrder', 'LevelDalayOrder', 'LevelGroupOrder'];
-const REPORT09_NON_COUNT_DELAY_YEAR = 9999;
-const REPORT_METADATA_SCHEMA_CANDIDATES = ['dbo', 'db_owner'];
 
 export const getDashboardDataService = async (
     effectiveMonth: string,
@@ -471,136 +431,6 @@ export const getReport03FilterOptionsService = async (
     }
 };
 
-type MetaRow = Record<string, unknown>;
-
-const buildReportObjectSource = (meta: TableMeta, allowedObjects: string[]): string => {
-    const expected = buildAllowedObjectFullName(
-        meta.schemaName,
-        meta.tableName,
-        REPORT_METADATA_SCHEMA_CANDIDATES,
-        allowedObjects,
-        'report object'
-    );
-    if (meta.fullName !== expected) {
-        throw new Error(`Unsupported resolved report object source: ${meta.objectName}`);
-    }
-    return expected;
-};
-
-const rankMetaRow = (row: MetaRow, candidate: string, nameField: string): number => {
-    const objectName = String(row[nameField] || "").toLowerCase();
-    const schemaName = String(row.schema_name || "").toLowerCase();
-    const objectExact = objectName === candidate.toLowerCase() ? 0 : 1;
-    const schemaRank = schemaName === "dbo" ? 0 : 1;
-    return objectExact * 10 + schemaRank;
-};
-
-const selectMetaRow = (rows: MetaRow[], candidates: string[], nameField: string): MetaRow | null => {
-    for (const candidate of candidates) {
-        const matched = rows
-            .filter((row) => String(row[nameField] || "").toLowerCase() === candidate.toLowerCase())
-            .sort((a, b) => rankMetaRow(a, candidate, nameField) - rankMetaRow(b, candidate, nameField));
-        if (matched.length > 0) return matched[0];
-    }
-
-    return rows[0] || null;
-};
-
-const loadObjectColumns = async (pool: any, objectName: string): Promise<Map<string, string>> => {
-    const columnsRes = await pool.request()
-        .input("objectName", sql.NVarChar(300), objectName)
-        .query(`
-            SELECT c.name
-            FROM sys.columns c
-            WHERE c.object_id = OBJECT_ID(@objectName)
-        `);
-
-    const columnRows = Array.isArray(columnsRes.recordset) ? columnsRes.recordset as MetaRow[] : [];
-    const columns = new Map<string, string>();
-    columnRows.forEach((row) => {
-        const colName = String(row.name || "").trim();
-        if (!colName) return;
-        columns.set(colName.toLowerCase(), colName);
-    });
-    return columns;
-};
-
-const buildTableMeta = async (
-    pool: any,
-    selected: MetaRow,
-    nameField: string,
-    allowedObjects: string[]
-): Promise<TableMeta | null> => {
-    const schemaName = String(selected.schema_name || "").trim();
-    const tableName = String(selected[nameField] || "").trim();
-    if (!schemaName || !tableName) return null;
-
-    const objectName = `${schemaName}.${tableName}`;
-    const columns = await loadObjectColumns(pool, objectName);
-    const fullName = buildAllowedObjectFullName(
-        schemaName,
-        tableName,
-        REPORT_METADATA_SCHEMA_CANDIDATES,
-        allowedObjects,
-        'report object'
-    );
-
-    return {
-        schemaName,
-        tableName,
-        objectName,
-        fullName,
-        columns
-    };
-};
-
-const getTableMeta = async (
-    pool: any,
-    tableCandidates: string[]
-): Promise<TableMeta | null> => {
-    if (!tableCandidates.length) return null;
-
-    const { placeholders: tablePlaceholders, params: tableParams } = buildSqlInParams(tableCandidates.map((name) => name.toLowerCase()), 'tableName');
-    const { placeholders: schemaPlaceholders, params: schemaParams } = buildSqlInParams(REPORT_METADATA_SCHEMA_CANDIDATES, 'tableSchema');
-    const tableRequest = bindSqlInputParams(pool.request(), [...tableParams, ...schemaParams]);
-    const tableRes = await tableRequest.query([
-        'SELECT s.name AS schema_name, t.name AS table_name',
-        'FROM sys.tables t',
-        'INNER JOIN sys.schemas s ON s.schema_id = t.schema_id',
-        `WHERE LOWER(t.name) IN (${tablePlaceholders})`,
-        `AND s.name IN (${schemaPlaceholders})`
-    ].join('\n'));
-
-    const rows = Array.isArray(tableRes.recordset) ? tableRes.recordset as MetaRow[] : [];
-    if (!rows.length) return null;
-
-    const selected = selectMetaRow(rows, tableCandidates, 'table_name');
-    return selected ? buildTableMeta(pool, selected, 'table_name', tableCandidates) : null;
-};
-const getObjectMeta = async (
-    pool: any,
-    objectCandidates: string[]
-): Promise<TableMeta | null> => {
-    if (!objectCandidates.length) return null;
-
-    const { placeholders: objectPlaceholders, params: objectParams } = buildSqlInParams(objectCandidates.map((name) => name.toLowerCase()), 'objectName');
-    const { placeholders: schemaPlaceholders, params: schemaParams } = buildSqlInParams(REPORT_METADATA_SCHEMA_CANDIDATES, 'objectSchema');
-    const objectRequest = bindSqlInputParams(pool.request(), [...objectParams, ...schemaParams]);
-    const objectRes = await objectRequest.query([
-        'SELECT s.name AS schema_name, o.name AS object_name',
-        'FROM sys.objects o',
-        'INNER JOIN sys.schemas s ON s.schema_id = o.schema_id',
-        `WHERE LOWER(o.name) IN (${objectPlaceholders})`,
-        `AND s.name IN (${schemaPlaceholders})`,
-        "AND o.type IN ('U', 'V', 'IF', 'TF')"
-    ].join('\n'));
-
-    const rows = Array.isArray(objectRes.recordset) ? objectRes.recordset as MetaRow[] : [];
-    if (!rows.length) return null;
-
-    const selected = selectMetaRow(rows, objectCandidates, 'object_name');
-    return selected ? buildTableMeta(pool, selected, 'object_name', objectCandidates) : null;
-};
 const normalizeReport08RowsToMap = (rows: Array<Record<string, unknown>>): Report08LevelMap => {
     const result: Report08LevelMap = new Map();
 
@@ -619,118 +449,13 @@ const normalizeReport08RowsToMap = (rows: Array<Record<string, unknown>>): Repor
     return result;
 };
 
-const buildReport08PointDateCondition = (
-    prefix: string,
-    beginDateCol: string | null,
-    endDateCol: string | null,
-    effectiveDateCol: string | null
-) => {
-    if (beginDateCol && endDateCol) {
-        return `AND @EffectiveDate BETWEEN COALESCE(${prefix}${escapeSqlIdentifier(beginDateCol)}, @EffectiveDate) AND COALESCE(${prefix}${escapeSqlIdentifier(endDateCol)}, @EffectiveDate)`;
-    }
-
-    if (effectiveDateCol) {
-        return `AND ${prefix}${escapeSqlIdentifier(effectiveDateCol)} = @EffectiveDate`;
-    }
-
-    if (beginDateCol) {
-        return `AND COALESCE(${prefix}${escapeSqlIdentifier(beginDateCol)}, @EffectiveDate) <= @EffectiveDate`;
-    }
-
-    if (endDateCol) {
-        return `AND COALESCE(${prefix}${escapeSqlIdentifier(endDateCol)}, @EffectiveDate) >= @EffectiveDate`;
-    }
-
-    return "";
-};
-
-const buildReport08RangeDateCondition = (
-    prefix: string,
-    beginDateCol: string | null,
-    endDateCol: string | null,
-    effectiveDateCol: string | null
-) => {
-    if (beginDateCol && endDateCol) {
-        return `AND @ToDate >= COALESCE(${prefix}${escapeSqlIdentifier(beginDateCol)}, @FromDate) AND @FromDate <= COALESCE(${prefix}${escapeSqlIdentifier(endDateCol)}, @ToDate)`;
-    }
-
-    if (effectiveDateCol) {
-        return `AND ${prefix}${escapeSqlIdentifier(effectiveDateCol)} BETWEEN @FromDate AND @ToDate`;
-    }
-
-    if (beginDateCol) {
-        return `AND COALESCE(${prefix}${escapeSqlIdentifier(beginDateCol)}, @FromDate) <= @ToDate`;
-    }
-
-    if (endDateCol) {
-        return `AND COALESCE(${prefix}${escapeSqlIdentifier(endDateCol)}, @ToDate) >= @FromDate`;
-    }
-
-    return "";
-};
-
-const buildReport08DateCondition = (
-    alias: string,
-    beginDateCol: string | null,
-    endDateCol: string | null,
-    effectiveDateCol: string | null,
-    mode: "range" | "point" = "range"
-) => {
-    const prefix = alias ? `${alias}.` : "";
-
-    return mode === "point"
-        ? buildReport08PointDateCondition(prefix, beginDateCol, endDateCol, effectiveDateCol)
-        : buildReport08RangeDateCondition(prefix, beginDateCol, endDateCol, effectiveDateCol);
-};
 const getReport08PositionMap = async (
     pool: any,
     effectiveDate: Date
 ): Promise<Report08LevelMap> => {
-    const tableCandidates = ['InterfacePosition', 'interfaceposition'];
-    const tableMeta = await getTableMeta(pool, tableCandidates);
-    if (!tableMeta) return new Map();
-    const tableSource = buildReportObjectSource(tableMeta, tableCandidates);
-
-    const orgCol = pickColumnName(tableMeta.columns, REPORT08_ORG_COL_CANDIDATES);
-    const levelCol = pickColumnName(tableMeta.columns, REPORT08_LEVEL_COL_CANDIDATES);
-    if (!orgCol || !levelCol) return new Map();
-
-    const employeeCol = pickColumnName(tableMeta.columns, REPORT08_EMPLOYEE_COL_CANDIDATES);
-    const signPosCol = pickColumnName(tableMeta.columns, REPORT08_SIGN_POS_COL_CANDIDATES);
-    const beginDateCol = pickColumnName(tableMeta.columns, REPORT08_BEGIN_COL_CANDIDATES);
-    const endDateCol = pickColumnName(tableMeta.columns, REPORT08_END_COL_CANDIDATES);
-    const effectiveDateCol = pickColumnName(tableMeta.columns, REPORT08_EFFECTIVE_COL_CANDIDATES);
-    const dateCondition = buildReport08DateCondition('src', beginDateCol, endDateCol, effectiveDateCol, 'point');
-    const employeeCondition = employeeCol
-        ? `AND src.${escapeSqlIdentifier(employeeCol)} IS NOT NULL AND LTRIM(RTRIM(CAST(src.${escapeSqlIdentifier(employeeCol)} AS nvarchar(50)))) <> ''`
-        : '';
-    const signPosCondition = signPosCol
-        ? `AND TRY_CONVERT(int, src.${escapeSqlIdentifier(signPosCol)}) = 100`
-        : '';
-
-    const reportLevelList = REPORT08_PEOPLE_LEVELS.map((item) => item.levelGroupNo);
-    const { placeholders: levelPlaceholders, params: levelParams } = buildSqlInParams(reportLevelList, 'report08Level');
-
-    const query = `
-        SELECT
-            CAST(src.${escapeSqlIdentifier(orgCol)} AS nvarchar(32)) AS org_unit_no,
-            CAST(src.${escapeSqlIdentifier(levelCol)} AS nvarchar(16)) AS level_group_no,
-            COUNT(1) AS metric_value
-        FROM ${tableSource} src
-        WHERE CAST(src.${escapeSqlIdentifier(levelCol)} AS nvarchar(16)) IN (${levelPlaceholders})
-        ${dateCondition}
-        ${employeeCondition}
-        ${signPosCondition}
-        GROUP BY
-            CAST(src.${escapeSqlIdentifier(orgCol)} AS nvarchar(32)),
-            CAST(src.${escapeSqlIdentifier(levelCol)} AS nvarchar(16))
-    `;
-
-    const request = bindSqlInputParams(pool.request(), levelParams);
-    const res = await queryAllowlistedSql(
-        request.input('EffectiveDate', sql.DateTime, effectiveDate),
-        toAllowlistedSql(query)
-    );
+    const res = await pool.request()
+        .input('EffectiveDate', sql.DateTime, effectiveDate)
+        .execute('MP_Report08PositionMap');
 
     return normalizeReport08RowsToMap(Array.isArray(res.recordset) ? res.recordset as Array<Record<string, unknown>> : []);
 };
@@ -740,51 +465,10 @@ const getReport08CostMap = async (
     fromDate: Date,
     toDate: Date
 ): Promise<Report08LevelMap> => {
-    const tableCandidates = ['MP_CostEmployee', 'MP_CostEmp', 'CostEmployee'];
-    const tableMeta = await getTableMeta(pool, tableCandidates);
-    if (!tableMeta) return new Map();
-    const tableSource = buildReportObjectSource(tableMeta, tableCandidates);
-
-    const orgCol = pickColumnName(tableMeta.columns, REPORT08_ORG_COL_CANDIDATES);
-    const levelCol = pickColumnName(tableMeta.columns, REPORT08_LEVEL_COL_CANDIDATES);
-    if (!orgCol || !levelCol) return new Map();
-
-    const amountCol = pickColumnName(tableMeta.columns, REPORT08_AMOUNT_COL_CANDIDATES);
-    const beginDateCol = pickColumnName(tableMeta.columns, REPORT08_BEGIN_COL_CANDIDATES);
-    const endDateCol = pickColumnName(tableMeta.columns, REPORT08_END_COL_CANDIDATES);
-    const effectiveDateCol = pickColumnName(tableMeta.columns, REPORT08_EFFECTIVE_COL_CANDIDATES);
-    const dateCondition = buildReport08DateCondition('src', beginDateCol, endDateCol, effectiveDateCol);
-
-    const reportLevelList = [
-        ...REPORT08_PEOPLE_LEVELS.map((item) => item.levelGroupNo),
-        REPORT08_MAJOR_LEVEL,
-        REPORT08_MINOR_LEVEL
-    ];
-    const { placeholders: levelPlaceholders, params: levelParams } = buildSqlInParams(reportLevelList, 'report08CostLevel');
-    const amountExpr = amountCol
-        ? `COALESCE(TRY_CONVERT(decimal(18,2), src.${escapeSqlIdentifier(amountCol)}), 0)`
-        : '0';
-
-    const query = `
-        SELECT
-            CAST(src.${escapeSqlIdentifier(orgCol)} AS nvarchar(32)) AS org_unit_no,
-            CAST(src.${escapeSqlIdentifier(levelCol)} AS nvarchar(16)) AS level_group_no,
-            SUM(${amountExpr}) AS metric_value
-        FROM ${tableSource} src
-        WHERE CAST(src.${escapeSqlIdentifier(levelCol)} AS nvarchar(16)) IN (${levelPlaceholders})
-        ${dateCondition}
-        GROUP BY
-            CAST(src.${escapeSqlIdentifier(orgCol)} AS nvarchar(32)),
-            CAST(src.${escapeSqlIdentifier(levelCol)} AS nvarchar(16))
-    `;
-
-    const request = bindSqlInputParams(pool.request(), levelParams);
-    const res = await queryAllowlistedSql(
-        request
-            .input('FromDate', sql.DateTime, fromDate)
-            .input('ToDate', sql.DateTime, toDate),
-        toAllowlistedSql(query)
-    );
+    const res = await pool.request()
+        .input('FromDate', sql.DateTime, fromDate)
+        .input('ToDate', sql.DateTime, toDate)
+        .execute('MP_Report08CostMap');
 
     return normalizeReport08RowsToMap(Array.isArray(res.recordset) ? res.recordset as Array<Record<string, unknown>> : []);
 };
@@ -1583,24 +1267,7 @@ const mapReport07BaseRow = (rawRow: unknown, index: number) => {
 const getReport07QuotaMap = async (pool: any, effectiveDate: Date): Promise<Map<string, Report7QuotaTotals>> => {
     const quotaRequest = pool.request();
     quotaRequest.input('EffectiveDate', sql.DateTime, effectiveDate);
-    const quotaRes = await quotaRequest.query(`
-        SELECT
-            OrgUnitNo,
-            SUM(ISNULL(L9907, 0)) AS q_1,
-            SUM(ISNULL(L9906, 0)) AS q_2,
-            SUM(ISNULL(L9905, 0)) AS q_3,
-            SUM(ISNULL(L9904, 0)) AS q_4,
-            SUM(ISNULL(L9903, 0)) AS q_5,
-            SUM(ISNULL(L9902, 0)) AS q_6,
-            SUM(ISNULL(L9901, 0)) AS q_7,
-            SUM(ISNULL(L9907, 0) + ISNULL(L9906, 0) + ISNULL(L9905, 0) + ISNULL(L9904, 0)
-                + ISNULL(L9903, 0) + ISNULL(L9902, 0) + ISNULL(L9901, 0)) AS q_total,
-            SUM(ISNULL(L9908, 0)) AS q_8,
-            SUM(ISNULL(L9910, 0)) AS q_10
-        FROM MP_QuotaN
-        WHERE EffectiveDate = DATEADD(month, DATEDIFF(month, 0, @EffectiveDate), 0)
-        GROUP BY OrgUnitNo
-    `);
+    const quotaRes = await quotaRequest.execute('MP_Report07QuotaMap');
     const quotaMap = new Map<string, Report7QuotaTotals>();
     const quotaRows = Array.isArray(quotaRes.recordset) ? quotaRes.recordset : [];
     quotaRows.forEach((raw: unknown) => {
@@ -1627,11 +1294,7 @@ const getReport07QuotaMap = async (pool: any, effectiveDate: Date): Promise<Map<
 const getReport07BgNameMap = async (pool: any, effectiveDate: Date) => {
     const bgNameRequest = pool.request();
     bgNameRequest.input('EffectiveDate', sql.DateTime, effectiveDate);
-    const bgNameRes = await bgNameRequest.query(`
-        SELECT BGNo, BGName
-        FROM MP_BG
-        WHERE @EffectiveDate BETWEEN BeginDate AND EndDate
-    `);
+    const bgNameRes = await bgNameRequest.execute('MP_BGNamesByEffectiveDate');
     const bgNameMap = new Map<string, string>();
     const bgRows = Array.isArray(bgNameRes.recordset) ? bgNameRes.recordset : [];
     bgRows.forEach((raw: unknown) => {
@@ -1647,27 +1310,7 @@ const getReport07BgNameMap = async (pool: any, effectiveDate: Date) => {
 const getReport07LandscapeContext = async (pool: any, effectiveDate: Date) => {
     const request = pool.request();
     request.input('EffectiveDate', sql.DateTime, effectiveDate);
-    const landscapeRes = await request.query(`
-        WITH ranked AS (
-            SELECT
-                OrgUnitNo,
-                CAST(vp AS decimal(18,4)) AS vp,
-                CAST(dm AS decimal(18,4)) AS dm,
-                CAST(sr AS decimal(18,4)) AS sr,
-                CAST(jr AS decimal(18,4)) AS jr,
-                BeginDate,
-                EndDate,
-                ROW_NUMBER() OVER (
-                    PARTITION BY OrgUnitNo
-                    ORDER BY BeginDate DESC, EndDate DESC
-                ) AS rn
-            FROM MP_Landscape
-            WHERE @EffectiveDate BETWEEN BeginDate AND EndDate
-        )
-        SELECT OrgUnitNo, vp, dm, sr, jr
-        FROM ranked
-        WHERE rn = 1
-    `);
+    const landscapeRes = await request.execute('MP_Report07LandscapeContext');
 
     const landscapeMap = new Map<string, Report7LandscapeTotals>();
     let defaultLandscape: Report7LandscapeTotals | null = null;
@@ -1835,11 +1478,7 @@ const getReport08BgNameByCode = async (
 
     const bgReq = pool.request();
     bgReq.input('EffectiveDate', sql.DateTime, structureDate);
-    const bgRes = await bgReq.query(`
-        SELECT BGNo, BGName
-        FROM MP_BG
-        WHERE @EffectiveDate BETWEEN BeginDate AND EndDate
-    `);
+    const bgRes = await bgReq.execute('MP_BGNamesByEffectiveDate');
     const bgRows = Array.isArray(bgRes.recordset) ? bgRes.recordset : [];
     bgRows.forEach((raw) => {
         const row = (raw && typeof raw === 'object') ? (raw as Record<string, unknown>) : {};
@@ -2016,83 +1655,23 @@ const getReport09OrgUnitNo = (row: Record<string, unknown>): string => {
     return '';
 };
 
-const resolveReport09LevelGroupColumns = async (
-    pool: any
-): Promise<{ activeColumn: string | null; orderColumn: string | null }> => {
-    const levelMeta = await getTableMeta(pool, REPORT09_LEVEL_GROUP_TABLE_CANDIDATES);
-    if (!levelMeta) return { activeColumn: null, orderColumn: null };
-
-    return {
-        activeColumn: pickColumnName(levelMeta.columns, REPORT09_LEVEL_GROUP_ACTIVE_COL_CANDIDATES),
-        orderColumn: pickColumnName(levelMeta.columns, REPORT09_LEVEL_GROUP_ORDER_COL_CANDIDATES)
-    };
-};
-
 const getReport09RetirementLevelFilter = async (
     pool: any,
     effectiveYear: number
 ): Promise<{ selectedLevelGroupNo: string; allowedLevelGroupNos: string[] }> => {
     try {
-        const effectiveYearAD = effectiveYear > 2500 ? effectiveYear - 543 : effectiveYear;
-        const effectiveYearBE = effectiveYearAD + 543;
-        const { activeColumn, orderColumn } = await resolveReport09LevelGroupColumns(pool);
-        const activeFilter = activeColumn
-            ? `AND ISNULL(TRY_CONVERT(int, ${escapeSqlIdentifier(activeColumn)}), 0) = 1`
-            : '';
-        const activeFilterForAlias = activeColumn
-            ? `AND ISNULL(TRY_CONVERT(int, lg.${escapeSqlIdentifier(activeColumn)}), 0) = 1`
-            : '';
-        const orderExpr = orderColumn
-            ? `TRY_CONVERT(int, ${escapeSqlIdentifier(orderColumn)})`
-            : 'NULL';
-        const orderExprForAlias = orderColumn
-            ? `TRY_CONVERT(int, lg.${escapeSqlIdentifier(orderColumn)})`
-            : 'NULL';
+        const result = await pool.request()
+            .input('EffectiveYear', sql.Int, effectiveYear)
+            .execute('MP_Report09RetirementLevelFilter');
 
-        const selectedResult = await queryAllowlistedSql(pool.request()
-            .input('EffectiveYearAD', sql.Int, effectiveYearAD)
-            .input('EffectiveYearBE', sql.Int, effectiveYearBE), toAllowlistedSql(`
-                SELECT TOP (1)
-                    LTRIM(RTRIM(CAST(LevelGroupNo AS nvarchar(16)))) AS LevelGroupNo
-                FROM MP_BUSupportRateRemark
-                WHERE EffectiveYear IN (@EffectiveYearAD, @EffectiveYearBE)
-                  AND NULLIF(LTRIM(RTRIM(CAST(LevelGroupNo AS nvarchar(16)))), '') IS NOT NULL
-                ORDER BY
-                    CASE WHEN EffectiveYear = @EffectiveYearBE THEN 0 ELSE 1 END,
-                    TRY_CONVERT(bigint, BUSupportRateRemarkID) DESC
-            `));
-
-        const selectedLevelGroupNo = toTrimText(selectedResult.recordset?.[0]?.LevelGroupNo);
+        const levelRows = Array.isArray(result.recordset)
+            ? result.recordset as Array<Record<string, unknown>>
+            : [];
+        const selectedLevelGroupNo = toTrimText(levelRows[0]?.SelectedLevelGroupNo);
         if (!selectedLevelGroupNo) {
             return { selectedLevelGroupNo: '', allowedLevelGroupNos: [] };
         }
 
-        const levelsResult = await queryAllowlistedSql(
-            pool.request().input('SelectedLevelGroupNo', sql.VarChar(16), selectedLevelGroupNo),
-            toAllowlistedSql(`
-                ;WITH Selected AS (
-                    SELECT TOP (1)
-                        ${orderExpr} AS SelectedOrder
-                    FROM MP_LevelGroup
-                    WHERE LTRIM(RTRIM(CAST(LevelGroupNo AS nvarchar(16)))) = @SelectedLevelGroupNo
-                      ${activeFilter}
-                )
-                SELECT
-                    LTRIM(RTRIM(CAST(lg.LevelGroupNo AS nvarchar(16)))) AS LevelGroupNo
-                FROM MP_LevelGroup lg
-                CROSS JOIN Selected s
-                WHERE s.SelectedOrder IS NOT NULL
-                  ${activeFilterForAlias}
-                  AND ${orderExprForAlias} <= s.SelectedOrder
-                ORDER BY
-                    ${orderExprForAlias} DESC,
-                    LTRIM(RTRIM(CAST(lg.LevelGroupNo AS nvarchar(16))))
-            `)
-        );
-
-        const levelRows = Array.isArray(levelsResult.recordset)
-            ? levelsResult.recordset as Array<Record<string, unknown>>
-            : [];
         const allowedLevelGroupNos: string[] = Array.from(
             new Set(
                 levelRows
@@ -2120,154 +1699,6 @@ const getReport09RetirementYearRange = (effectiveYear: number) => {
         fromYear: displayYears[0],
         toYear: displayYears[displayYears.length - 1]
     };
-};
-
-type Report09RetirementColumns = {
-    retireYearCol: string;
-    infoEmployeeCol: string | null;
-    infoSecondmentTextCol: string | null;
-    infoPosCol: string;
-    positionIdCol: string;
-    orgCol: string;
-    orgTypeCol: string;
-    levelCol: string | null;
-    bsTypeCol: string;
-    unitBgCol: string | null;
-    unitNameCol: string | null;
-    unitAbbrCol: string | null;
-    signPosCol: string | null;
-    employeeCol: string | null;
-};
-
-const getReport09RetirementColumns = (infoMeta: any, positionMeta: any, unitMeta: any): Report09RetirementColumns | null => {
-    const retireYearCol = pickColumnName(infoMeta.columns, REPORT09_RETIRE_YEAR_COL_CANDIDATES);
-    const infoPosCol = pickColumnName(infoMeta.columns, REPORT09_INFO_POSITION_COL_CANDIDATES);
-    const positionIdCol = pickColumnName(positionMeta.columns, REPORT09_POSITION_ID_COL_CANDIDATES);
-    const orgCol = pickColumnName(positionMeta.columns, REPORT09_ORG_COL_CANDIDATES);
-    const orgTypeCol = pickColumnName(positionMeta.columns, REPORT09_ORG_TYPE_COL_CANDIDATES);
-    const bsTypeCol = pickColumnName(positionMeta.columns, REPORT09_BS_TYPE_COL_CANDIDATES);
-
-    if (!retireYearCol || !infoPosCol || !positionIdCol || !orgCol || !orgTypeCol || !bsTypeCol) {
-        return null;
-    }
-
-    return {
-        retireYearCol,
-        infoEmployeeCol: pickColumnName(infoMeta.columns, REPORT09_INFO_EMPLOYEE_COL_CANDIDATES),
-        infoSecondmentTextCol: pickColumnName(infoMeta.columns, REPORT09_INFO_SECONDMENT_TEXT_COL_CANDIDATES),
-        infoPosCol,
-        positionIdCol,
-        orgCol,
-        orgTypeCol,
-        levelCol: pickColumnName(positionMeta.columns, REPORT09_LEVEL_COL_CANDIDATES),
-        bsTypeCol,
-        unitBgCol: pickColumnName(unitMeta?.columns || new Map<string, string>(), REPORT09_UNIT_BG_COL_CANDIDATES),
-        unitNameCol: pickColumnName(unitMeta?.columns || new Map<string, string>(), REPORT09_UNIT_NAME_COL_CANDIDATES),
-        unitAbbrCol: pickColumnName(unitMeta?.columns || new Map<string, string>(), REPORT09_UNIT_ABBR_COL_CANDIDATES),
-        signPosCol: pickColumnName(positionMeta.columns, REPORT09_SIGN_POS_COL_CANDIDATES),
-        employeeCol: pickColumnName(positionMeta.columns, REPORT09_EMPLOYEE_COL_CANDIDATES)
-    };
-};
-
-const getReport09RetirementEmployeeExpr = (columns: Report09RetirementColumns) => {
-    if (columns.infoEmployeeCol) return `info.${escapeSqlIdentifier(columns.infoEmployeeCol)}`;
-    if (columns.employeeCol) return `pos.${escapeSqlIdentifier(columns.employeeCol)}`;
-    return '';
-};
-
-const getReport09RetirementCountExpr = (sourceEmployeeExpr: string) =>
-    sourceEmployeeExpr ? `COUNT(DISTINCT ${sourceEmployeeExpr})` : 'COUNT(1)';
-
-const getReport09RetirementOrgExpr = (
-    orgCol: string,
-    structureIsSecondment: number | null
-) => structureIsSecondment === 0
-    ? `
-        CASE
-            WHEN ISNULL(unit.IsSecondment, 0) = 1
-                 AND rt.Reportto IS NOT NULL
-                 AND rt.Reportto <> ''
-                THEN rt.Reportto
-            ELSE pos.${escapeSqlIdentifier(orgCol)}
-        END
-    `
-    : `pos.${escapeSqlIdentifier(orgCol)}`;
-
-const getReport09RetirementDelaySql = (sourceEmployeeExpr: string, retireYearCol: string) => ({
-    effectiveRetireYearExpr: sourceEmployeeExpr
-        ? `
-            CASE
-                WHEN delay.delay_year = ${REPORT09_NON_COUNT_DELAY_YEAR}
-                    THEN info.${escapeSqlIdentifier(retireYearCol)}
-                WHEN delay.delay_year IS NOT NULL
-                    THEN delay.delay_year
-                ELSE info.${escapeSqlIdentifier(retireYearCol)}
-            END
-        `
-        : `info.${escapeSqlIdentifier(retireYearCol)}`,
-    joinDelayForOverride: sourceEmployeeExpr
-        ? `
-        LEFT JOIN (
-            SELECT employee_id, delay_year
-            FROM (
-                SELECT
-                    EmployeeID AS employee_id,
-                    DelayYear AS delay_year,
-                    ROW_NUMBER() OVER (
-                        PARTITION BY EmployeeID
-                        ORDER BY COALESCE(UpdateDate, CreateDate) DESC,
-                                 TRY_CONVERT(bigint, DelayID) DESC
-                    ) AS rn
-                FROM MP_Delay
-                WHERE ISNULL(DelayStatus, 1) = 1
-                  AND EmployeeID <> ''
-                  AND DelayYear IS NOT NULL
-            ) d
-            WHERE d.rn = 1
-        ) delay
-            ON delay.employee_id = ${sourceEmployeeExpr}
-        `
-        : ''
-});
-
-const getReport09RetirementFilterConditions = (
-    columns: Report09RetirementColumns,
-    allowedLevelGroupNos: string[]
-) => {
-    const signPosCondition = columns.signPosCol ? `AND pos.${escapeSqlIdentifier(columns.signPosCol)} = '100'` : '';
-    const infoSecondmentCondition = columns.infoSecondmentTextCol
-        ? `AND info.${escapeSqlIdentifier(columns.infoSecondmentTextCol)} IN ('Employee', 'EMPLOYEE', 'employee')`
-        : '';
-    const { placeholders: allowedLevelPlaceholders, params: levelFilterParams } = buildSqlInParams(allowedLevelGroupNos, 'retireLevelGroup');
-    const levelFilterCondition = columns.levelCol && allowedLevelGroupNos.length > 0
-        ? `AND pos.${escapeSqlIdentifier(columns.levelCol)} IN (${allowedLevelPlaceholders})`
-        : '';
-
-    return { signPosCondition, infoSecondmentCondition, levelFilterCondition, levelFilterParams: levelFilterCondition ? levelFilterParams : [] };
-};
-
-const getReport09RetirementBucketExpr = (columns: Report09RetirementColumns) => {
-    const unitBgExpr = columns.unitBgCol ? `unit.${escapeSqlIdentifier(columns.unitBgCol)}` : `''`;
-    const mappedUnitBgExpr = columns.unitBgCol ? `mappedUnit.${escapeSqlIdentifier(columns.unitBgCol)}` : `''`;
-    const unitNameExpr = columns.unitNameCol ? `UPPER(unit.${escapeSqlIdentifier(columns.unitNameCol)})` : `''`;
-    const unitAbbrExpr = columns.unitAbbrCol ? `UPPER(unit.${escapeSqlIdentifier(columns.unitAbbrCol)})` : `''`;
-    const hoConditions = [
-        columns.unitBgCol ? `${unitBgExpr} = '905'` : '',
-        columns.unitNameCol ? `${unitNameExpr} IN (N'HO', N'HEAD OFFICE', N'สำนักงานใหญ่')` : '',
-        columns.unitAbbrCol ? `${unitAbbrExpr} = N'HO'` : ''
-    ].filter(Boolean);
-    const isHoExpr = hoConditions.length > 0 ? `(${hoConditions.join(' OR ')})` : '1 = 0';
-
-    return `
-        CASE
-            WHEN ${isHoExpr} THEN 2
-            WHEN ${mappedUnitBgExpr} = '905'
-                 AND pos.${escapeSqlIdentifier(columns.bsTypeCol)} IS NULL THEN 2
-            WHEN pos.${escapeSqlIdentifier(columns.orgTypeCol)} = 2
-                 AND pos.${escapeSqlIdentifier(columns.bsTypeCol)} = 2 THEN 2
-            ELSE 1
-        END
-    `;
 };
 
 const addReport09RetirementRow = (map: Report09OrgYearMap, row: Record<string, unknown>) => {
@@ -2300,62 +1731,13 @@ const getReport09RetirementMap = async (
 ): Promise<Report09OrgYearMap> => {
     const { fromYear, toYear } = getReport09RetirementYearRange(effectiveYear);
 
-    const infoMeta = await getTableMeta(pool, REPORT09_INFO_TABLE_CANDIDATES);
-    const positionMeta = await getTableMeta(pool, REPORT09_POSITION_TABLE_CANDIDATES);
-    const unitMeta = await getObjectMeta(pool, REPORT09_UNIT_FN_CANDIDATES);
-    if (!infoMeta || !positionMeta) return new Map();
-
-    const infoSource = buildReportObjectSource(infoMeta, REPORT09_INFO_TABLE_CANDIDATES);
-    const positionSource = buildReportObjectSource(positionMeta, REPORT09_POSITION_TABLE_CANDIDATES);
-    const columns = getReport09RetirementColumns(infoMeta, positionMeta, unitMeta);
-    if (!columns) return new Map();
-
-    const sourceEmployeeExpr = getReport09RetirementEmployeeExpr(columns);
-    const countExpr = getReport09RetirementCountExpr(sourceEmployeeExpr);
-    const orgKeyExpr = getReport09RetirementOrgExpr(columns.orgCol, structureIsSecondment);
-    const mappedOrgForUnitJoinExpr = getReport09RetirementOrgExpr(columns.orgCol, structureIsSecondment);
-
-    const joinStructureForMapping = `
-        LEFT JOIN fn_InterfaceUnit(@EffectiveDate) unit
-            ON unit.OrgUnitNo = pos.${escapeSqlIdentifier(columns.orgCol)}
-        LEFT JOIN fn_InterfaceReportto(@EffectiveDate) rt
-            ON rt.OrgUnitNo = pos.${escapeSqlIdentifier(columns.orgCol)}
-        LEFT JOIN fn_InterfaceUnit(@EffectiveDate) mappedUnit
-            ON mappedUnit.OrgUnitNo = ${mappedOrgForUnitJoinExpr}
-        `;
-
-    const { effectiveRetireYearExpr, joinDelayForOverride } = getReport09RetirementDelaySql(sourceEmployeeExpr, columns.retireYearCol);
-    const { allowedLevelGroupNos } = await getReport09RetirementLevelFilter(pool, effectiveYear);
-    const { signPosCondition, infoSecondmentCondition, levelFilterCondition, levelFilterParams } = getReport09RetirementFilterConditions(columns, allowedLevelGroupNos);
-    const report09BucketExpr = getReport09RetirementBucketExpr(columns);
-
-    const query = `
-        SELECT
-            ${orgKeyExpr} AS org_unit_id,
-            ${effectiveRetireYearExpr} AS retire_year,
-            ${report09BucketExpr} AS bs_type,
-            ${countExpr} AS retire_count
-        FROM ${infoSource} info
-        INNER JOIN ${positionSource} pos
-            ON pos.${escapeSqlIdentifier(columns.positionIdCol)} = info.${escapeSqlIdentifier(columns.infoPosCol)}
-        ${joinDelayForOverride}
-        ${joinStructureForMapping}
-        WHERE ${effectiveRetireYearExpr} BETWEEN @FromYear AND @ToYear
-          AND ${orgKeyExpr} <> ''
-          ${infoSecondmentCondition}
-          ${levelFilterCondition}
-          ${signPosCondition}
-        GROUP BY
-            ${orgKeyExpr},
-            ${effectiveRetireYearExpr},
-            ${report09BucketExpr}
-    `;
-
-    const request = bindSqlInputParams(pool.request(), levelFilterParams);
-    const result = await queryAllowlistedSql(request
+    const result = await pool.request()
+        .input('EffectiveYear', sql.Int, effectiveYear)
         .input('FromYear', sql.Int, fromYear)
         .input('ToYear', sql.Int, toYear)
-        .input('EffectiveDate', sql.DateTime, structureDate), toAllowlistedSql(query));
+        .input('EffectiveDate', sql.DateTime, structureDate)
+        .input('StructureIsSecondment', sql.Int, structureIsSecondment ?? 0)
+        .execute('MP_Report09RetirementMap');
 
     return buildReport09RetirementMap(result.recordset);
 };
@@ -2372,121 +1754,6 @@ const getReport09AuditYearContext = (effectiveYear: number) => {
         fromYear: displayYears[0],
         toYear: displayYears[displayYears.length - 1]
     };
-};
-
-type Report09AuditColumns = {
-    retireYearCol: string;
-    infoEmployeeCol: string | null;
-    infoSecondmentTextCol: string | null;
-    infoPosCol: string;
-    positionIdCol: string;
-    orgCol: string;
-    orgTypeCol: string;
-    levelCol: string | null;
-    bsTypeCol: string;
-    unitBgCol: string | null;
-    unitNameCol: string | null;
-    unitAbbrCol: string | null;
-    signPosCol: string | null;
-    employeeCol: string | null;
-};
-
-const getReport09AuditColumns = (infoMeta: any, positionMeta: any, unitMeta: any): Report09AuditColumns => {
-    const retireYearCol = pickColumnName(infoMeta.columns, REPORT09_RETIRE_YEAR_COL_CANDIDATES);
-    const infoPosCol = pickColumnName(infoMeta.columns, REPORT09_INFO_POSITION_COL_CANDIDATES);
-    const positionIdCol = pickColumnName(positionMeta.columns, REPORT09_POSITION_ID_COL_CANDIDATES);
-    const orgCol = pickColumnName(positionMeta.columns, REPORT09_ORG_COL_CANDIDATES);
-    const orgTypeCol = pickColumnName(positionMeta.columns, REPORT09_ORG_TYPE_COL_CANDIDATES);
-    const bsTypeCol = pickColumnName(positionMeta.columns, REPORT09_BS_TYPE_COL_CANDIDATES);
-
-    if (!retireYearCol || !infoPosCol || !positionIdCol || !orgCol || !orgTypeCol || !bsTypeCol) {
-        throw new Error('Report09 required columns are unavailable');
-    }
-
-    return {
-        retireYearCol,
-        infoEmployeeCol: pickColumnName(infoMeta.columns, REPORT09_INFO_EMPLOYEE_COL_CANDIDATES),
-        infoSecondmentTextCol: pickColumnName(infoMeta.columns, REPORT09_INFO_SECONDMENT_TEXT_COL_CANDIDATES),
-        infoPosCol,
-        positionIdCol,
-        orgCol,
-        orgTypeCol,
-        levelCol: pickColumnName(positionMeta.columns, REPORT09_LEVEL_COL_CANDIDATES),
-        bsTypeCol,
-        unitBgCol: pickColumnName(unitMeta?.columns || new Map<string, string>(), REPORT09_UNIT_BG_COL_CANDIDATES),
-        unitNameCol: pickColumnName(unitMeta?.columns || new Map<string, string>(), REPORT09_UNIT_NAME_COL_CANDIDATES),
-        unitAbbrCol: pickColumnName(unitMeta?.columns || new Map<string, string>(), REPORT09_UNIT_ABBR_COL_CANDIDATES),
-        signPosCol: pickColumnName(positionMeta.columns, REPORT09_SIGN_POS_COL_CANDIDATES),
-        employeeCol: pickColumnName(positionMeta.columns, REPORT09_EMPLOYEE_COL_CANDIDATES)
-    };
-};
-
-const getReport09AuditEmployeeExpr = (columns: Report09AuditColumns) => {
-    if (columns.infoEmployeeCol) {
-        return `LTRIM(RTRIM(CAST(info.${escapeSqlIdentifier(columns.infoEmployeeCol)} AS nvarchar(64))))`;
-    }
-    if (columns.employeeCol) {
-        return `LTRIM(RTRIM(CAST(pos.${escapeSqlIdentifier(columns.employeeCol)} AS nvarchar(64))))`;
-    }
-    return `LTRIM(RTRIM(CAST(pos.${escapeSqlIdentifier(columns.positionIdCol)} AS nvarchar(64))))`;
-};
-
-const getReport09AuditMappedOrgExpr = (originalOrgExpr: string, structureIsSecondment: number) => structureIsSecondment === 0
-    ? `
-        CASE
-            WHEN ISNULL(srcUnit.IsSecondment, 0) = 1
-                 AND rt.Reportto IS NOT NULL
-                 AND LTRIM(RTRIM(CAST(rt.Reportto AS nvarchar(32)))) <> ''
-                THEN LTRIM(RTRIM(CAST(rt.Reportto AS nvarchar(32))))
-            ELSE ${originalOrgExpr}
-        END
-    `
-    : originalOrgExpr;
-
-const getReport09AuditPassExprs = (columns: Report09AuditColumns, allowedLevelGroupNos: string[]) => {
-    const employeeConditionExpr = columns.infoSecondmentTextCol
-        ? `CASE WHEN UPPER(LTRIM(RTRIM(CAST(info.${escapeSqlIdentifier(columns.infoSecondmentTextCol)} AS nvarchar(64))))) = 'EMPLOYEE' THEN 1 ELSE 0 END`
-        : '1';
-    const signPosConditionExpr = columns.signPosCol
-        ? `CASE WHEN TRY_CONVERT(int, pos.${escapeSqlIdentifier(columns.signPosCol)}) = 100 THEN 1 ELSE 0 END`
-        : '1';
-    const { placeholders: allowedLevelPlaceholders, params: levelConditionParams } = buildSqlInParams(allowedLevelGroupNos, 'auditLevelGroup');
-    const levelConditionExpr = columns.levelCol && allowedLevelGroupNos.length > 0
-        ? `CASE WHEN LTRIM(RTRIM(CAST(pos.${escapeSqlIdentifier(columns.levelCol)} AS nvarchar(16)))) IN (${allowedLevelPlaceholders}) THEN 1 ELSE 0 END`
-        : '1';
-
-    return { employeeConditionExpr, signPosConditionExpr, levelConditionExpr, levelConditionParams: levelConditionExpr !== '1' ? levelConditionParams : [] };
-};
-
-const getReport09AuditUnitExprs = (columns: Report09AuditColumns, mappedOrgExpr: string) => ({
-    unitBgExpr: columns.unitBgCol
-        ? `LTRIM(RTRIM(CAST(srcUnit.${escapeSqlIdentifier(columns.unitBgCol)} AS nvarchar(32))))`
-        : `''`,
-    mappedUnitBgExpr: columns.unitBgCol
-        ? `LTRIM(RTRIM(CAST(mappedUnit.${escapeSqlIdentifier(columns.unitBgCol)} AS nvarchar(32))))`
-        : `''`,
-    unitNameExpr: columns.unitNameCol
-        ? `UPPER(LTRIM(RTRIM(CAST(srcUnit.${escapeSqlIdentifier(columns.unitNameCol)} AS nvarchar(255)))))`
-        : `''`,
-    unitAbbrExpr: columns.unitAbbrCol
-        ? `UPPER(LTRIM(RTRIM(CAST(srcUnit.${escapeSqlIdentifier(columns.unitAbbrCol)} AS nvarchar(255)))))`
-        : `''`,
-    mappedUnitNameExpr: columns.unitNameCol
-        ? `LTRIM(RTRIM(CAST(mappedUnit.${escapeSqlIdentifier(columns.unitNameCol)} AS nvarchar(255))))`
-        : mappedOrgExpr,
-    mappedUnitAbbrExpr: columns.unitAbbrCol
-        ? `LTRIM(RTRIM(CAST(mappedUnit.${escapeSqlIdentifier(columns.unitAbbrCol)} AS nvarchar(255))))`
-        : mappedOrgExpr
-});
-
-const getReport09AuditHoExpr = (columns: Report09AuditColumns, unitExprs: ReturnType<typeof getReport09AuditUnitExprs>) => {
-    const hoConditions = [
-        columns.unitBgCol ? `${unitExprs.unitBgExpr} = '905'` : '',
-        columns.unitNameCol ? `${unitExprs.unitNameExpr} IN (N'HO', N'HEAD OFFICE', N'สำนักงานใหญ่')` : '',
-        columns.unitAbbrCol ? `${unitExprs.unitAbbrExpr} = N'HO'` : ''
-    ].filter(Boolean);
-
-    return hoConditions.length > 0 ? `(${hoConditions.join(' OR ')})` : '1 = 0';
 };
 
 const mapReport09AuditRows = (recordset: unknown): Report09AuditRow[] => (Array.isArray(recordset) ? recordset : [])
@@ -2526,132 +1793,14 @@ export const getReport09AuditService = async (
     const structureIsSecondment = 0;
     const pool = await poolPromise;
 
-    const infoMeta = await getTableMeta(pool, REPORT09_INFO_TABLE_CANDIDATES);
-    const positionMeta = await getTableMeta(pool, REPORT09_POSITION_TABLE_CANDIDATES);
-    const unitMeta = await getObjectMeta(pool, REPORT09_UNIT_FN_CANDIDATES);
-    if (!infoMeta || !positionMeta) {
-        throw new Error('Report09 source tables are unavailable');
-    }
-    const infoSource = buildReportObjectSource(infoMeta, REPORT09_INFO_TABLE_CANDIDATES);
-    const positionSource = buildReportObjectSource(positionMeta, REPORT09_POSITION_TABLE_CANDIDATES);
-    const columns = getReport09AuditColumns(infoMeta, positionMeta, unitMeta);
-
-    const sourceEmployeeExpr = getReport09AuditEmployeeExpr(columns);
-    const employeeKeyExpr = `NULLIF(${sourceEmployeeExpr}, '')`;
-    const originalOrgExpr = `LTRIM(RTRIM(CAST(pos.${escapeSqlIdentifier(columns.orgCol)} AS nvarchar(32))))`;
-    const mappedOrgExpr = getReport09AuditMappedOrgExpr(originalOrgExpr, structureIsSecondment);
-    const effectiveRetireYearExpr = `
-        CASE
-            WHEN delay.delay_year = ${REPORT09_NON_COUNT_DELAY_YEAR}
-                THEN TRY_CONVERT(int, info.${escapeSqlIdentifier(columns.retireYearCol)})
-            WHEN delay.delay_year IS NOT NULL
-                THEN delay.delay_year
-            ELSE TRY_CONVERT(int, info.${escapeSqlIdentifier(columns.retireYearCol)})
-        END
-    `;
-
     const { selectedLevelGroupNo, allowedLevelGroupNos } = await getReport09RetirementLevelFilter(pool, safeEffectiveYear);
-    const { employeeConditionExpr, signPosConditionExpr, levelConditionExpr, levelConditionParams } = getReport09AuditPassExprs(columns, allowedLevelGroupNos);
-    const unitExprs = getReport09AuditUnitExprs(columns, mappedOrgExpr);
-    const isHoExpr = getReport09AuditHoExpr(columns, unitExprs);
-    const report09BucketExpr = `
-        CASE
-            WHEN ${isHoExpr} THEN N'Support'
-            WHEN ${unitExprs.mappedUnitBgExpr} = '905'
-                 AND NULLIF(LTRIM(RTRIM(CAST(pos.${escapeSqlIdentifier(columns.bsTypeCol)} AS nvarchar(32)))), '') IS NULL THEN N'Support'
-            WHEN TRY_CONVERT(int, pos.${escapeSqlIdentifier(columns.orgTypeCol)}) = 2
-                 AND TRY_CONVERT(int, pos.${escapeSqlIdentifier(columns.bsTypeCol)}) = 2 THEN N'Support'
-            ELSE N'BU'
-        END
-    `;
-
-    const query = `
-        ;WITH delay AS (
-            SELECT employee_id, delay_year
-            FROM (
-                SELECT
-                    LTRIM(RTRIM(CAST(EmployeeID AS nvarchar(32)))) AS employee_id,
-                    TRY_CONVERT(int, DelayYear) AS delay_year,
-                    ROW_NUMBER() OVER (
-                        PARTITION BY LTRIM(RTRIM(CAST(EmployeeID AS nvarchar(32))))
-                        ORDER BY COALESCE(UpdateDate, CreateDate) DESC,
-                                 TRY_CONVERT(bigint, DelayID) DESC
-                    ) AS rn
-                FROM MP_Delay
-                WHERE ISNULL(DelayStatus, 1) = 1
-                  AND LTRIM(RTRIM(CAST(EmployeeID AS nvarchar(32)))) <> ''
-                  AND TRY_CONVERT(int, DelayYear) IS NOT NULL
-            ) d
-            WHERE d.rn = 1
-        ),
-        base AS (
-            SELECT
-                ${employeeKeyExpr} AS employee_key,
-                LTRIM(RTRIM(CAST(pos.${escapeSqlIdentifier(columns.positionIdCol)} AS nvarchar(64)))) AS position_key,
-                ${mappedOrgExpr} AS org_unit_id,
-                ${unitExprs.mappedUnitAbbrExpr} AS unit_abbr,
-                ${unitExprs.mappedUnitNameExpr} AS unit_name,
-                ${effectiveRetireYearExpr} AS retire_year,
-                ${report09BucketExpr} AS bs_type,
-                ${employeeConditionExpr} AS pass_employee,
-                ${signPosConditionExpr} AS pass_signpos,
-                ${levelConditionExpr} AS pass_level
-            FROM ${infoSource} info
-            INNER JOIN ${positionSource} pos
-                ON LTRIM(RTRIM(CAST(pos.${escapeSqlIdentifier(columns.positionIdCol)} AS nvarchar(64)))) =
-                   LTRIM(RTRIM(CAST(info.${escapeSqlIdentifier(columns.infoPosCol)} AS nvarchar(64))))
-            LEFT JOIN delay
-                ON delay.employee_id = ${sourceEmployeeExpr}
-            LEFT JOIN fn_InterfaceUnit(@EffectiveDate) srcUnit
-                ON LTRIM(RTRIM(CAST(srcUnit.OrgUnitNo AS nvarchar(32)))) = ${originalOrgExpr}
-            LEFT JOIN fn_InterfaceReportto(@EffectiveDate) rt
-                ON LTRIM(RTRIM(CAST(rt.OrgUnitNo AS nvarchar(32)))) = ${originalOrgExpr}
-            LEFT JOIN fn_InterfaceUnit(@EffectiveDate) mappedUnit
-                ON LTRIM(RTRIM(CAST(mappedUnit.OrgUnitNo AS nvarchar(32)))) = ${mappedOrgExpr}
-            WHERE ${effectiveRetireYearExpr} BETWEEN @FromYear AND @ToYear
-        )
-        SELECT
-            stage.stage_code,
-            stage.stage_name,
-            NULLIF(LTRIM(RTRIM(CAST(base.org_unit_id AS nvarchar(32)))), '') AS org_unit_id,
-            COALESCE(NULLIF(LTRIM(RTRIM(CAST(base.unit_abbr AS nvarchar(255)))), ''), NULLIF(LTRIM(RTRIM(CAST(base.org_unit_id AS nvarchar(32)))), '')) AS unit_abbr,
-            COALESCE(NULLIF(LTRIM(RTRIM(CAST(base.unit_name AS nvarchar(255)))), ''), NULLIF(LTRIM(RTRIM(CAST(base.org_unit_id AS nvarchar(32)))), '')) AS unit_name,
-            base.retire_year,
-            base.bs_type,
-            COUNT_BIG(1) AS position_rows,
-            COUNT(DISTINCT COALESCE(base.employee_key, CONCAT(N'POSITION:', base.position_key))) AS employee_count
-        FROM base
-        CROSS APPLY (VALUES
-            (N'01', N'ช่วงปีเกษียณ', 1),
-            (N'02', N'เฉพาะ Employee', base.pass_employee),
-            (N'03', N'เฉพาะ SignPos=100', base.pass_employee * base.pass_signpos),
-            (N'04', N'เฉพาะ Level ที่ใช้คำนวณ', base.pass_employee * base.pass_signpos * base.pass_level),
-            (N'05', N'มีหน่วยงานหลัง map secondment', base.pass_employee * base.pass_signpos * base.pass_level * CASE WHEN NULLIF(LTRIM(RTRIM(CAST(base.org_unit_id AS nvarchar(32)))), '') IS NOT NULL THEN 1 ELSE 0 END)
-        ) stage(stage_code, stage_name, pass_filter)
-        WHERE stage.pass_filter = 1
-        GROUP BY
-            stage.stage_code,
-            stage.stage_name,
-            NULLIF(LTRIM(RTRIM(CAST(base.org_unit_id AS nvarchar(32)))), ''),
-            COALESCE(NULLIF(LTRIM(RTRIM(CAST(base.unit_abbr AS nvarchar(255)))), ''), NULLIF(LTRIM(RTRIM(CAST(base.org_unit_id AS nvarchar(32)))), '')),
-            COALESCE(NULLIF(LTRIM(RTRIM(CAST(base.unit_name AS nvarchar(255)))), ''), NULLIF(LTRIM(RTRIM(CAST(base.org_unit_id AS nvarchar(32)))), '')),
-            base.retire_year,
-            base.bs_type
-        ORDER BY
-            stage.stage_code,
-            org_unit_id,
-            base.retire_year,
-            base.bs_type
-    `;
-
-    const request = bindSqlInputParams(pool.request(), levelConditionParams);
-    const result = await queryAllowlistedSql(
-        request
-            .input('FromYear', sql.Int, fromYear)
-            .input('ToYear', sql.Int, toYear)
-            .input('EffectiveDate', sql.DateTime, structureDate),
-        toAllowlistedSql(query)
-    );
+    const result = await pool.request()
+        .input('EffectiveYear', sql.Int, safeEffectiveYear)
+        .input('FromYear', sql.Int, fromYear)
+        .input('ToYear', sql.Int, toYear)
+        .input('EffectiveDate', sql.DateTime, structureDate)
+        .input('StructureIsSecondment', sql.Int, structureIsSecondment)
+        .execute('MP_Report09Audit');
 
     const rows = mapReport09AuditRows(result.recordset);
 
@@ -2700,37 +1849,14 @@ const getReport09YearRateMap = async (
 ): Promise<Report09YearRateMap> => {
     const yearRateMap = createDefaultReport09YearRateMap(displayYears);
     try {
-        const effectiveYearAD = effectiveYear > 2500 ? effectiveYear - 543 : effectiveYear;
-        const effectiveYearBE = effectiveYearAD + 543;
         const displayYearSet = new Set(displayYears);
-        const queryYearList = Array.from(
-            new Set(
-                displayYears.flatMap((year) => {
-                    const yearAD = year > 2500 ? year - 543 : year;
-                    const yearBE = yearAD + 543;
-                    return [yearAD, yearBE];
-                })
-            )
-        );
+        if (!displayYears.length) return yearRateMap;
 
-        if (!queryYearList.length) return yearRateMap;
-
-        const { placeholders: yearPlaceholders, params: yearParams } = buildSqlInParams(queryYearList, 'report09RateYear', sql.Int);
-        const request = bindSqlInputParams(pool.request(), yearParams);
-        const result = await request
-            .input('EffectiveYearAD', sql.Int, effectiveYearAD)
-            .input('EffectiveYearBE', sql.Int, effectiveYearBE)
-            .query(`
-                SELECT
-                    TRY_CONVERT(int, [Year]) AS [Year],
-                    TRY_CONVERT(int, TypeRate) AS TypeRate,
-                    TRY_CONVERT(int, Rate) AS Rate,
-                    TRY_CONVERT(int, Base) AS Base
-                FROM MP_BUSupportRate
-                WHERE EffectiveYear IN (@EffectiveYearAD, @EffectiveYearBE)
-                  AND TRY_CONVERT(int, [Year]) IN (${yearPlaceholders})
-                  AND ISNULL(TRY_CONVERT(int, BUSupportRateStatus), 1) = 1
-            `);
+        const result = await pool.request()
+            .input('EffectiveYear', sql.Int, effectiveYear)
+            .input('FromYear', sql.Int, displayYears[0])
+            .input('ToYear', sql.Int, displayYears[displayYears.length - 1])
+            .execute('MP_Report09YearRates');
 
         const rows = Array.isArray(result.recordset) ? result.recordset as Array<Record<string, unknown>> : [];
         rows.forEach((row) => {
@@ -2985,25 +2111,10 @@ const appendReport09MissingStructureRows = async (
     const missingOrgUnitIds = Array.from(sourceMap.keys()).filter((orgUnitId) => !existingOrgUnitIds.has(orgUnitId));
     if (!missingOrgUnitIds.length) return structureRows;
 
-    const { placeholders: orgPlaceholders, params: orgParams } = buildSqlInParams(missingOrgUnitIds, 'missingOrgUnit');
-    const request = bindSqlInputParams(pool.request(), orgParams);
-    const result = await request
+    const result = await pool.request()
         .input('EffectiveDate', sql.DateTime, structureDate)
-        .query(`
-            SELECT
-                unit.OrgUnitNo,
-                unit.UnitAbbr,
-                unit.UnitName,
-                unit.ParentOrgUnitNo,
-                unit.GroupBG,
-                bg.BGName,
-                unit.IsBelongTo
-            FROM fn_InterfaceUnit(@EffectiveDate) unit
-            LEFT JOIN MP_BG bg
-                ON bg.BGNo = unit.BGNo
-               AND @EffectiveDate BETWEEN bg.BeginDate AND bg.EndDate
-            WHERE unit.OrgUnitNo IN (${orgPlaceholders})
-        `);
+        .input('OrgUnitIdsCsv', sql.NVarChar(sql.MAX), missingOrgUnitIds.join(','))
+        .execute('MP_Report09MissingStructureUnits');
 
     const rows = Array.isArray(result.recordset) ? result.recordset as Array<Record<string, unknown>> : [];
     const rowByOrgUnitId = new Map(
@@ -3180,12 +2291,7 @@ const rollupReport09SourceMapToStructure = async (
 
     const unitResult = await pool.request()
         .input('EffectiveDate', sql.DateTime, structureDate)
-        .query(`
-            SELECT
-                unit.OrgUnitNo,
-                unit.ParentOrgUnitNo
-            FROM fn_InterfaceUnit(@EffectiveDate) unit
-        `);
+        .execute('MP_Report09UnitParentMap');
 
     const parentByOrgUnitId = new Map<string, string>();
     const unitRows = Array.isArray(unitResult.recordset) ? unitResult.recordset as Array<Record<string, unknown>> : [];
@@ -3500,8 +2606,6 @@ export const getReport09DataService = async (
     }
 };
 
-const REPORT10_ALLOWED_LEVEL_CODES = ['1007', '1006', '1005', '1004'] as const;
-
 const mapReport10LevelGroup = (levelCode: string, levelName: string): '010' | '020_030' | '040' | '050' | 'OTHER' => {
     const normalizedLevelCode = toTrimText(levelCode).replace(/\D/g, '');
     if (normalizedLevelCode === '1007' || normalizedLevelCode === '010') return '010';
@@ -3638,94 +2742,11 @@ export const getReport10ExportDataService = async (
 ) => {
     try {
         const pool = await poolPromise;
-        const request = pool.request();
         const effectiveDate = new Date(effectiveDateStr);
 
-        const { placeholders: allowedLevelPlaceholders, params: allowedLevelParams } = buildSqlInParams(
-            REPORT10_ALLOWED_LEVEL_CODES,
-            'report10Level'
-        );
-        bindSqlInputParams(request, allowedLevelParams)
-            .input('EffectiveDate', sql.DateTime, effectiveDate);
-
-        const result = await request.query(`
-            ;WITH PositionSource AS (
-                SELECT p.*
-                FROM fn_InterfacePosition(@EffectiveDate) p
-                WHERE @EffectiveDate BETWEEN TRY_CONVERT(date, p.BeginDate) AND TRY_CONVERT(date, p.EndDate)
-                  AND LTRIM(RTRIM(CAST(p.LevelGroupNo AS nvarchar(16)))) IN (${allowedLevelPlaceholders})
-            ),
-            InfoDataByPosition AS (
-                SELECT
-                    i.*,
-                    ROW_NUMBER() OVER (
-                        PARTITION BY i.POSCODE
-                        ORDER BY
-                            CAST(i.CODE AS nvarchar(32)) DESC,
-                            CAST(i.FULLNAMETH AS nvarchar(300)) DESC
-                    ) AS rn
-                FROM InfoData i
-            ),
-            InfoDataByPositionEmployee AS (
-                SELECT
-                    i.*,
-                    ROW_NUMBER() OVER (
-                        PARTITION BY i.POSCODE, i.CODE
-                        ORDER BY
-                            CAST(i.FULLNAMETH AS nvarchar(300)) DESC
-                    ) AS rn
-                FROM InfoData i
-            ),
-            JCodeDedup AS (
-                SELECT
-                    levelgroup,
-                    MAX(JCODE) AS JCODE
-                FROM mp_JCode
-                GROUP BY levelgroup
-            ),
-            LevelMap AS (
-                SELECT N'1007' AS LevelCode, N'ปธบ./กผญ.' AS LevelName, 1 AS SortOrder UNION ALL
-                SELECT N'1006', N'ประธานเจ้าหน้าที่/รองกรรมการผู้จัดการใหญ่', 2 UNION ALL
-                SELECT N'1005', N'ผู้ช่วยกรรมการผู้จัดการใหญ่', 3 UNION ALL
-                SELECT N'1004', N'ผู้จัดการฝ่าย', 4
-            )
-            SELECT
-                COALESCE(iEmployee.POSCODE, iPosition.POSCODE, p.PositionID) AS POSCODE,
-                p.OrgUnitID AS OrgUnitNo,
-                InterfaceUnit.UnitName,
-                p.OrgFlag,
-                p.OrgType,
-                p.PoolRSFlag,
-                p.JobBand,
-                p.LevelGroupNo,
-                p.SignPos,
-                p.StrgFlag,
-                p.BSType,
-                p.SpecFlag,
-                p.LineStaffFlag,
-                p.EmployeeID,
-                COALESCE(iEmployee.CODE, iPosition.CODE) AS InfoEmployeeID,
-                COALESCE(iEmployee.FULLNAMETH, iPosition.FULLNAMETH) AS FULLNAMETH,
-                COALESCE(iEmployee.POSNAME, iPosition.POSNAME) AS POSNAME,
-                JCodeDedup.JCODE,
-                LevelMap.LevelCode,
-                LevelMap.LevelName,
-                LevelMap.SortOrder,
-                InterfaceUnit.ParentOrgUnitNo,
-                UnitParent.UnitName AS ParentUnitName
-            FROM PositionSource p
-            LEFT JOIN InfoDataByPositionEmployee iEmployee
-                ON iEmployee.POSCODE = p.PositionID
-                AND iEmployee.CODE = p.EmployeeID
-                AND iEmployee.rn = 1
-            LEFT JOIN InfoDataByPosition iPosition
-                ON iPosition.POSCODE = p.PositionID
-                AND iPosition.rn = 1
-            LEFT JOIN JCodeDedup ON JCodeDedup.levelgroup = p.LevelGroupNo
-            LEFT JOIN LevelMap ON LevelMap.LevelCode = LTRIM(RTRIM(CAST(p.LevelGroupNo AS nvarchar(16))))
-            LEFT JOIN fn_InterfaceUnit(@EffectiveDate) InterfaceUnit ON InterfaceUnit.OrgUnitNo = p.OrgUnitID
-            LEFT JOIN fn_InterfaceUnit(@EffectiveDate) UnitParent ON UnitParent.OrgUnitNo = InterfaceUnit.ParentOrgUnitNo
-        `);
+        const result = await pool.request()
+            .input('EffectiveDate', sql.DateTime, effectiveDate)
+            .execute('MP_Report10ExportData');
         const rows = Array.isArray(result.recordset) ? result.recordset : [];
 
         return rows.map(mapReport10ExportRow)

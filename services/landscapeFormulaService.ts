@@ -57,9 +57,7 @@ const mapFormulaRow = (row: Record<string, unknown>): LandscapeFormulaRecord => 
 
 const ensureFormulaTableExists = async () => {
     const pool = await poolPromise;
-    const result = await pool.request().query(`
-        SELECT CASE WHEN OBJECT_ID('dbo.MP_LandscapeFormula', 'U') IS NULL THEN 0 ELSE 1 END AS IsReady
-    `);
+    const result = await pool.request().execute('MP_LandscapeFormulaIsReady');
     const isReady = Number(result.recordset?.[0]?.IsReady ?? 0) === 1;
     if (!isReady) {
         throw new LandscapeFormulaTableMissingError();
@@ -88,22 +86,7 @@ const bindFormulaPayload = (request: sql.Request, payload: LandscapeFormulaPaylo
 export const getLandscapeFormulaListService = async (): Promise<LandscapeFormulaRecord[]> => {
     await ensureFormulaTableExists();
     const pool = await poolPromise;
-    const result = await pool.request().query(`
-        SELECT
-            LandscapeFormulaID,
-            FormulaKey,
-            FormulaName,
-            CONVERT(varchar(10), [BeginDate], 23) AS BeginDate,
-            CONVERT(varchar(10), [EndDate], 23) AS EndDate,
-            FormulaJson,
-            IsActive,
-            CreateBy,
-            CONVERT(varchar(19), [CreateDate], 120) AS CreateDate,
-            UpdateBy,
-            CONVERT(varchar(19), [UpdateDate], 120) AS UpdateDate
-        FROM dbo.MP_LandscapeFormula
-        ORDER BY FormulaKey ASC, BeginDate DESC, EndDate DESC, LandscapeFormulaID DESC
-    `);
+    const result = await pool.request().execute('MP_LandscapeFormulaList');
 
     return (result.recordset || []).map((item) => mapFormulaRow(item as Record<string, unknown>));
 };
@@ -121,21 +104,14 @@ export const hasLandscapeFormulaPeriodOverlapService = async (
     request.input('BeginDate', sql.Date, payload.beginDate);
     request.input('EndDate', sql.Date, payload.endDate);
 
-    let excludeSql = '';
     if (typeof excludeFormulaId === 'number' && Number.isFinite(excludeFormulaId)) {
         request.input('ExcludeFormulaId', sql.BigInt, Math.trunc(excludeFormulaId));
-        excludeSql = 'AND LandscapeFormulaID <> @ExcludeFormulaId';
+        const result = await request.execute('MP_LandscapeFormulaPeriodOverlap');
+        return (result.recordset?.length || 0) > 0;
     }
 
-    const result = await request.query(`
-        SELECT TOP (1) 1 AS HasOverlap
-        FROM dbo.MP_LandscapeFormula
-        WHERE FormulaKey = @FormulaKey
-          AND IsActive = 1
-          AND [BeginDate] <= @EndDate
-          AND [EndDate] >= @BeginDate
-          ${excludeSql}
-    `);
+    request.input('ExcludeFormulaId', sql.BigInt, null);
+    const result = await request.execute('MP_LandscapeFormulaPeriodOverlap');
     return (result.recordset?.length || 0) > 0;
 };
 
@@ -149,28 +125,7 @@ export const insertLandscapeFormulaService = async (
     bindFormulaPayload(request, payload);
     request.input('CreateBy', sql.VarChar(32), createBy);
 
-    await request.query(`
-        INSERT INTO dbo.MP_LandscapeFormula (
-            FormulaKey,
-            FormulaName,
-            [BeginDate],
-            [EndDate],
-            FormulaJson,
-            IsActive,
-            CreateBy,
-            CreateDate
-        )
-        VALUES (
-            @FormulaKey,
-            @FormulaName,
-            @BeginDate,
-            @EndDate,
-            @FormulaJson,
-            @IsActive,
-            @CreateBy,
-            GETDATE()
-        )
-    `);
+    await request.execute('MP_LandscapeFormulaInsert');
 
     return { success: true };
 };
@@ -187,21 +142,11 @@ export const updateLandscapeFormulaService = async (
     bindFormulaPayload(request, payload);
     request.input('UpdateBy', sql.VarChar(32), updateBy);
 
-    const result = await request.query(`
-        UPDATE dbo.MP_LandscapeFormula
-        SET
-            FormulaKey = @FormulaKey,
-            FormulaName = @FormulaName,
-            [BeginDate] = @BeginDate,
-            [EndDate] = @EndDate,
-            FormulaJson = @FormulaJson,
-            IsActive = @IsActive,
-            UpdateBy = @UpdateBy,
-            UpdateDate = GETDATE()
-        WHERE LandscapeFormulaID = @LandscapeFormulaID
-    `);
+    const result = await request
+        .output('RowsAffected', sql.Int)
+        .execute('MP_LandscapeFormulaUpdate');
 
-    return (result.rowsAffected?.[0] || 0) > 0;
+    return Number(result.output.RowsAffected || 0) > 0;
 };
 
 export const deleteLandscapeFormulaService = async (formulaId: number): Promise<boolean> => {
@@ -210,12 +155,11 @@ export const deleteLandscapeFormulaService = async (formulaId: number): Promise<
     const request = pool.request();
     request.input('LandscapeFormulaID', sql.BigInt, Math.trunc(formulaId));
 
-    const result = await request.query(`
-        DELETE FROM dbo.MP_LandscapeFormula
-        WHERE LandscapeFormulaID = @LandscapeFormulaID
-    `);
+    const result = await request
+        .output('RowsAffected', sql.Int)
+        .execute('MP_LandscapeFormulaDelete');
 
-    return (result.rowsAffected?.[0] || 0) > 0;
+    return Number(result.output.RowsAffected || 0) > 0;
 };
 
 export const parseLandscapeFormulaJson = (formulaJson: string): Report7FormulaConfig | null => {
@@ -247,15 +191,7 @@ export const getReport7FormulaConfigByEffectiveDateService = async (
     request.input('FormulaKey', sql.VarChar(100), REPORT7_FORMULA_KEY);
     request.input('EffectiveDate', sql.Date, parsedDate);
 
-    const result = await request.query(`
-        SELECT TOP (1)
-            FormulaJson
-        FROM dbo.MP_LandscapeFormula
-        WHERE FormulaKey = @FormulaKey
-          AND IsActive = 1
-          AND @EffectiveDate BETWEEN [BeginDate] AND [EndDate]
-        ORDER BY [BeginDate] DESC, LandscapeFormulaID DESC
-    `);
+    const result = await request.execute('MP_Report7FormulaByEffectiveDate');
 
     const formulaJson = String(result.recordset?.[0]?.FormulaJson || '').trim();
     if (!formulaJson) return null;

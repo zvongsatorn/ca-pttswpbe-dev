@@ -19,6 +19,9 @@ bun-debug.log*
 
 # SQL database files
 *.sql
+!database/
+!database/stored-procedures/
+!database/stored-procedures/*.sql
 
 # TypeScript
 *.tsbuildinfo

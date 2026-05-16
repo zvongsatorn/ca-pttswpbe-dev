@@ -28,11 +28,6 @@ const fit = (value: string | null | undefined, maxLength: number): string => {
     return (value || '').toString().trim().slice(0, maxLength);
 };
 
-const isMissingMailToIdError = (error: unknown): boolean => {
-    const message = String((error as any)?.message || '').toLowerCase();
-    return message.includes('mailtoid') && (message.includes('null') || message.includes('explicit value'));
-};
-
 const getMailFromDefaults = async (): Promise<{ mailFrom: string }> => {
     const senderFromConfig = (await configService.getConfig('MAIL_SENDER')).trim();
     const senderFromEnv = (process.env.MAIL_SENDER || '').trim();
@@ -57,62 +52,12 @@ const insertMailTo = async (tx: sql.Transaction, payload: CreateMailLogPayload):
     baseRequest.input('IsSend', sql.Int, payload.isSend);
     baseRequest.input('Remark', sql.VarChar(100), fit(payload.remark, 100));
 
-    try {
-        const result = await baseRequest.query(`
-            INSERT INTO MP_MailTo (
-                SendFromBy, SendFromDate, SendToBy, EmailTo, MailFrom, MailSubject, MailBody, EffectiveDate, IsCC, IsSend, Remark
-            )
-            OUTPUT INSERTED.MailToID
-            VALUES (
-                @SendFromBy, @SendFromDate, @SendToBy, @EmailTo, @MailFrom, @MailSubject, @MailBody, @EffectiveDate, @IsCC, @IsSend, @Remark
-            )
-        `);
-
-        const mailToId = result.recordset?.[0]?.MailToID;
-        if (mailToId === undefined || mailToId === null) {
-            throw new Error('Cannot read MailToID from MP_MailTo insert result');
-        }
-        return Number(mailToId);
-    } catch (error) {
-        if (!isMissingMailToIdError(error)) {
-            throw error;
-        }
-
-        // Fallback for schema where MailToID is not identity/default.
-        const manualRequest = new sql.Request(tx);
-        manualRequest.input('SendFromBy', sql.VarChar(8), fit(payload.sendFromBy, 8));
-        manualRequest.input('SendFromDate', sql.DateTime, payload.sendFromDate);
-        manualRequest.input('SendToBy', sql.VarChar(8), fit(payload.sendToBy, 8));
-        manualRequest.input('EmailTo', sql.VarChar(100), fit(payload.emailTo, 100));
-        manualRequest.input('MailFrom', sql.VarChar(100), finalMailFrom);
-        manualRequest.input('MailSubject', sql.VarChar(100), fit(payload.mailSubject, 100));
-        manualRequest.input('MailBody', sql.VarChar(8000), fit(payload.mailBody, 8000));
-        manualRequest.input('EffectiveDate', sql.DateTime, payload.effectiveDate ?? payload.sendFromDate);
-        manualRequest.input('IsCC', sql.Int, payload.isCC);
-        manualRequest.input('IsSend', sql.Int, payload.isSend);
-        manualRequest.input('Remark', sql.VarChar(100), fit(payload.remark, 100));
-
-        const fallbackResult = await manualRequest.query(`
-            DECLARE @NextMailToID decimal(18, 0);
-            SELECT @NextMailToID = ISNULL(MAX(MailToID), 0) + 1
-            FROM MP_MailTo WITH (UPDLOCK, HOLDLOCK);
-
-            INSERT INTO MP_MailTo (
-                MailToID, SendFromBy, SendFromDate, SendToBy, EmailTo, MailFrom, MailSubject, MailBody, EffectiveDate, IsCC, IsSend, Remark
-            )
-            VALUES (
-                @NextMailToID, @SendFromBy, @SendFromDate, @SendToBy, @EmailTo, @MailFrom, @MailSubject, @MailBody, @EffectiveDate, @IsCC, @IsSend, @Remark
-            );
-
-            SELECT @NextMailToID AS MailToID;
-        `);
-
-        const fallbackMailToId = fallbackResult.recordset?.[0]?.MailToID;
-        if (fallbackMailToId === undefined || fallbackMailToId === null) {
-            throw new Error('Cannot read MailToID from MP_MailTo fallback insert result');
-        }
-        return Number(fallbackMailToId);
+    const result = await baseRequest.execute('MP_MailToCreate');
+    const mailToId = result.recordset?.[0]?.MailToID;
+    if (mailToId === undefined || mailToId === null) {
+        throw new Error('Cannot read MailToID from MP_MailTo insert result');
     }
+    return Number(mailToId);
 };
 
 const insertMailCc = async (tx: sql.Transaction, mailToId: number, ccRecipients: MailCcRecipient[]) => {
@@ -122,10 +67,7 @@ const insertMailCc = async (tx: sql.Transaction, mailToId: number, ccRecipients:
         ccRequest.input('CCTo', sql.VarChar(8), fit(cc.employeeId, 8));
         ccRequest.input('EmailCC', sql.VarChar(100), fit(cc.email, 100));
 
-        await ccRequest.query(`
-            INSERT INTO MP_MailCC (MailToID, CCTo, EmailCC)
-            VALUES (@MailToID, @CCTo, @EmailCC)
-        `);
+        await ccRequest.execute('MP_MailCCCreate');
     }
 };
 
@@ -142,10 +84,7 @@ const insertMailToList = async (
     listRequest.input('CreateBy', sql.VarChar(20), fit(createBy, 20));
     listRequest.input('CreateDate', sql.DateTime, createDate);
 
-    await listRequest.query(`
-        INSERT INTO MP_MailToList (MailToID, RefNo, CreateBy, CreateDate)
-        VALUES (@MailToID, @RefNo, @CreateBy, @CreateDate)
-    `);
+    await listRequest.execute('MP_MailToListCreate');
 };
 
 export const createMailLog = async (payload: CreateMailLogPayload): Promise<number> => {

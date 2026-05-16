@@ -56,44 +56,9 @@ const bindPeriodPayload = (request: sql.Request, payload: LandscapePayload) => {
     request.input('EndDate', sql.Date, payload.endDate);
 };
 
-const targetWhereClause = `
-    (
-        (NULLIF(LTRIM(RTRIM(OrgUnitNo)), '') IS NULL AND @OriginalOrgUnitNo IS NULL)
-        OR (NULLIF(LTRIM(RTRIM(OrgUnitNo)), '') = @OriginalOrgUnitNo)
-    )
-    AND [BeginDate] = @OriginalBeginDate
-    AND [EndDate] = @OriginalEndDate
-    AND CAST(vp AS decimal(18,2)) = @OriginalVp
-    AND CAST(dm AS decimal(18,2)) = @OriginalDm
-    AND CAST(sr AS decimal(18,2)) = @OriginalSr
-    AND CAST(jr AS decimal(18,2)) = @OriginalJr
-`;
-
-const sameOrgClause = `
-    (
-        (NULLIF(LTRIM(RTRIM(OrgUnitNo)), '') IS NULL AND @OrgUnitNo IS NULL)
-        OR (NULLIF(LTRIM(RTRIM(OrgUnitNo)), '') = @OrgUnitNo)
-    )
-`;
-
 export const getLandscapeService = async (): Promise<LandscapeRecord[]> => {
     const pool = await poolPromise;
-    const result = await pool.request().query(`
-        SELECT
-            NULLIF(LTRIM(RTRIM(OrgUnitNo)), '') AS OrgUnitNo,
-            CONVERT(varchar(10), [BeginDate], 23) AS BeginDate,
-            CONVERT(varchar(10), [EndDate], 23) AS EndDate,
-            CAST(vp AS decimal(18,2)) AS vp,
-            CAST(dm AS decimal(18,2)) AS dm,
-            CAST(sr AS decimal(18,2)) AS sr,
-            CAST(jr AS decimal(18,2)) AS jr
-        FROM MP_Landscape
-        ORDER BY
-            CASE WHEN NULLIF(LTRIM(RTRIM(OrgUnitNo)), '') IS NULL THEN 0 ELSE 1 END,
-            NULLIF(LTRIM(RTRIM(OrgUnitNo)), ''),
-            [BeginDate] DESC,
-            [EndDate] DESC
-    `);
+    const result = await pool.request().execute('MP_LandscapeList');
 
     return (result.recordset || []).map((row) => mapLandscapeRow(row as Record<string, unknown>));
 };
@@ -103,26 +68,7 @@ export const insertLandscapeService = async (payload: LandscapePayload) => {
     const request = pool.request();
     bindLandscapePayload(request, payload);
 
-    await request.query(`
-        INSERT INTO MP_Landscape (
-            OrgUnitNo,
-            [BeginDate],
-            [EndDate],
-            vp,
-            dm,
-            sr,
-            jr
-        )
-        VALUES (
-            @OrgUnitNo,
-            @BeginDate,
-            @EndDate,
-            @vp,
-            @dm,
-            @sr,
-            @jr
-        )
-    `);
+    await request.execute('MP_LandscapeInsert');
 
     return { success: true };
 };
@@ -135,25 +81,15 @@ export const hasLandscapePeriodOverlapService = async (
     const request = pool.request();
     bindPeriodPayload(request, payload);
 
-    let excludeClause = '';
     if (original) {
         bindOriginalLandscapePayload(request, original);
-        excludeClause = `
-            AND NOT (
-                ${targetWhereClause}
-            )
-        `;
+        request.input('HasOriginal', sql.Bit, 1);
+        const result = await request.execute('MP_LandscapePeriodOverlap');
+        return (result.recordset?.length || 0) > 0;
     }
 
-    const result = await request.query(`
-        SELECT TOP (1) 1 AS HasOverlap
-        FROM MP_Landscape
-        WHERE
-            ${sameOrgClause}
-            AND [BeginDate] <= @EndDate
-            AND [EndDate] >= @BeginDate
-            ${excludeClause}
-    `);
+    request.input('HasOriginal', sql.Bit, 0);
+    const result = await request.execute('MP_LandscapePeriodOverlap');
 
     return (result.recordset?.length || 0) > 0;
 };
@@ -164,25 +100,11 @@ export const updateLandscapeService = async (original: LandscapePayload, next: L
     bindOriginalLandscapePayload(request, original);
     bindLandscapePayload(request, next);
 
-    const result = await request.query(`
-        ;WITH target AS (
-            SELECT TOP (1) *
-            FROM MP_Landscape
-            WHERE ${targetWhereClause}
-            ORDER BY [BeginDate] DESC, [EndDate] DESC
-        )
-        UPDATE target
-        SET
-            OrgUnitNo = @OrgUnitNo,
-            [BeginDate] = @BeginDate,
-            [EndDate] = @EndDate,
-            vp = @vp,
-            dm = @dm,
-            sr = @sr,
-            jr = @jr
-    `);
+    const result = await request
+        .output('RowsAffected', sql.Int)
+        .execute('MP_LandscapeUpdateOriginal');
 
-    return (result.rowsAffected?.[0] || 0) > 0;
+    return Number(result.output.RowsAffected || 0) > 0;
 };
 
 export const deleteLandscapeService = async (original: LandscapePayload) => {
@@ -190,15 +112,9 @@ export const deleteLandscapeService = async (original: LandscapePayload) => {
     const request = pool.request();
     bindOriginalLandscapePayload(request, original);
 
-    const result = await request.query(`
-        ;WITH target AS (
-            SELECT TOP (1) *
-            FROM MP_Landscape
-            WHERE ${targetWhereClause}
-            ORDER BY [BeginDate] DESC, [EndDate] DESC
-        )
-        DELETE FROM target
-    `);
+    const result = await request
+        .output('RowsAffected', sql.Int)
+        .execute('MP_LandscapeDeleteOriginal');
 
-    return (result.rowsAffected?.[0] || 0) > 0;
+    return Number(result.output.RowsAffected || 0) > 0;
 };

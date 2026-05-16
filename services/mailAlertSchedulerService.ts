@@ -2,7 +2,6 @@ import { sql, poolPromise } from '../config/db.js';
 import configService from './configService.js';
 import { sendMail } from './mailService.js';
 import { createMailLog } from './mailLogService.js';
-import { queryAllowlistedSql, toAllowlistedSql } from './sqlSafetyUtils.js';
 
 export type AlertType = 'START' | 'END';
 type SendMode = '0' | '1' | '2';
@@ -162,20 +161,7 @@ const getTransactionLookupRows = async (transactionNos: string[]): Promise<Trans
         const request = new sql.Request(pool);
         request.input('TransactionNosCsv', sql.VarChar(sql.MAX), uniqueNos.join(','));
 
-        const query = `
-            SELECT
-                TransactionNo,
-                TransactionType,
-                TransactionDesc
-            FROM MP_Transactions WITH (NOLOCK)
-            WHERE TransactionNo IN (
-                SELECT LTRIM(RTRIM(value))
-                FROM STRING_SPLIT(@TransactionNosCsv, ',')
-                WHERE LTRIM(RTRIM(value)) <> ''
-            )
-        `;
-
-        const result = await queryAllowlistedSql(request, toAllowlistedSql(query));
+        const result = await request.execute('MP_MailAlertTransactionLookup');
         return (result.recordset || []).map((row: any) => {
             const transactionType = Number(row?.TransactionType);
             return {
@@ -199,23 +185,7 @@ const getTransactionItemsByDocumentNo = async (documentNo: string): Promise<Debu
         const request = new sql.Request(pool);
         request.input('DocumentNo', sql.VarChar(20), normalizedDocumentNo);
 
-        const query = `
-            ;WITH DocItems AS (
-                SELECT DISTINCT ItemID
-                FROM MP_DocumentItems WITH (NOLOCK)
-                WHERE DocumentNo = @DocumentNo
-            )
-            SELECT
-                d.ItemID AS TransactionNo,
-                t.TransactionType,
-                t.TransactionDesc
-            FROM DocItems d
-            LEFT JOIN MP_Transactions t WITH (NOLOCK)
-                ON t.TransactionNo = d.ItemID
-            ORDER BY d.ItemID, t.TransactionType
-        `;
-
-        const result = await queryAllowlistedSql(request, toAllowlistedSql(query));
+        const result = await request.execute('MP_MailAlertDocumentTransactionItems');
         return (result.recordset || [])
             .map((row: any) => ({
                 transactionNo: String(row?.TransactionNo || '').trim(),

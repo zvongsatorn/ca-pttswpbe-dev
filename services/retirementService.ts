@@ -1,5 +1,4 @@
 import { sql, poolPromise } from '../config/db.js';
-import { queryAllowlistedSql, toAllowlistedSql } from './sqlSafetyUtils.js';
 
 interface RetirementRateInput {
     year: number;
@@ -12,16 +11,6 @@ interface RetirementLevelOption {
     LevelGroupNo: string;
     LevelGroupName: string;
     LevelDelayOrder: number | null;
-}
-
-interface LevelOptionQueryConfig {
-    sqlText: string;
-    bindAsOfDate?: boolean;
-}
-
-interface MpLevelGroupColumnResolution {
-    activeColumn: string | null;
-    orderColumn: string | null;
 }
 
 interface RateUpsertParams {
@@ -39,22 +28,6 @@ class RetirementService {
     private isTooManyArgumentsError(error: unknown): boolean {
         const message = String((error as { message?: unknown })?.message || error || '').toLowerCase();
         return message.includes('mp_busupportrateupsert') && message.includes('too many arguments');
-    }
-
-    private async supportsTypeRateInUpsertSP(transaction: sql.Transaction): Promise<boolean> {
-        try {
-            const result = await new sql.Request(transaction).query(`
-                SELECT TOP (1) 1 AS HasTypeRate
-                FROM sys.parameters p
-                INNER JOIN sys.procedures s ON s.object_id = p.object_id
-                WHERE s.name = 'mp_BUSupportRateUpsert'
-                  AND p.name = '@TypeRate'
-            `);
-            return Array.isArray(result.recordset) && result.recordset.length > 0;
-        } catch {
-            // If metadata inspection fails, keep old behavior and fallback by catching runtime error.
-            return true;
-        }
     }
 
     private async upsertRateByStoredProcedure(params: RateUpsertParams) {
@@ -80,53 +53,7 @@ class RetirementService {
             .input('Base', sql.Int, base)
             .input('User', sql.VarChar(20), user)
             .input('Now', sql.DateTime, now)
-            .query(`
-                IF EXISTS (
-                    SELECT 1
-                    FROM MP_BUSupportRate
-                    WHERE EffectiveYear = @EffectiveYear
-                      AND [Year] = @Year
-                      AND TypeRate = @TypeRate
-                )
-                BEGIN
-                    UPDATE MP_BUSupportRate
-                    SET Rate = @Rate,
-                        Base = @Base,
-                        BUSupportRateStatus = COALESCE(BUSupportRateStatus, 1),
-                        UpdateBy = @User,
-                        UpdateDate = @Now
-                    WHERE EffectiveYear = @EffectiveYear
-                      AND [Year] = @Year
-                      AND TypeRate = @TypeRate;
-                END
-                ELSE
-                BEGIN
-                    INSERT INTO MP_BUSupportRate (
-                        EffectiveYear,
-                        [Year],
-                        TypeRate,
-                        Rate,
-                        Base,
-                        BUSupportRateStatus,
-                        CreateBy,
-                        CreateDate,
-                        UpdateBy,
-                        UpdateDate
-                    )
-                    VALUES (
-                        @EffectiveYear,
-                        @Year,
-                        @TypeRate,
-                        @Rate,
-                        @Base,
-                        1,
-                        @User,
-                        @Now,
-                        @User,
-                        @Now
-                    );
-                END
-            `);
+            .execute('MP_RetirementRateUpsert');
     }
 
     private normalizeLevelGroupNo(value: unknown): string {
@@ -145,47 +72,6 @@ class RetirementService {
         return year > 2500 ? Math.trunc(year) - 543 : Math.trunc(year);
     }
 
-    private escapeSqlIdentifier(value: string): string {
-        return `[${String(value || '').replace(/]/g, ']]')}]`;
-    }
-
-    private async resolveMpLevelGroupColumns(pool: sql.ConnectionPool): Promise<MpLevelGroupColumnResolution> {
-        try {
-            const result = await pool.request()
-                .query(`
-                    SELECT c.name AS ColumnName
-                    FROM sys.columns c
-                    INNER JOIN sys.objects o ON o.object_id = c.object_id
-                    WHERE o.type = 'U'
-                      AND o.name = 'MP_LevelGroup'
-                `);
-
-            const rows = Array.isArray(result.recordset) ? result.recordset as Array<Record<string, unknown>> : [];
-            const columnMap = new Map<string, string>();
-            rows.forEach((row) => {
-                const name = String(row.ColumnName || '').trim();
-                if (!name) return;
-                columnMap.set(name.toLowerCase(), name);
-            });
-
-            const activeColumn =
-                columnMap.get('leveldelayactiive') ||
-                columnMap.get('leveldelayactive') ||
-                columnMap.get('leveldalayactive') ||
-                null;
-
-            const orderColumn =
-                columnMap.get('leveldelayorder') ||
-                columnMap.get('leveldalayorder') ||
-                columnMap.get('levelgrouporder') ||
-                null;
-
-            return { activeColumn, orderColumn };
-        } catch {
-            return { activeColumn: null, orderColumn: null };
-        }
-    }
-
     private mapRetirementLevelOptions(rows: Array<Record<string, unknown>>): RetirementLevelOption[] {
         return rows
             .map((row) => ({
@@ -198,80 +84,10 @@ class RetirementService {
             .filter((row) => row.LevelGroupNo && row.LevelGroupName);
     }
 
-    private async getRetirementLevelOptions(pool: sql.ConnectionPool, effectiveYear: number): Promise<RetirementLevelOption[]> {
-        const asOfDate = `${this.toADYear(effectiveYear)}-01-01`;
-        const resolvedColumns = await this.resolveMpLevelGroupColumns(pool);
-        const activeFilter = resolvedColumns.activeColumn
-            ? `
-                      AND ISNULL(TRY_CONVERT(int, ${this.escapeSqlIdentifier(resolvedColumns.activeColumn)}), 0) = 1`
-            : '';
-        const delayOrderExpression = resolvedColumns.orderColumn
-            ? `TRY_CONVERT(int, ${this.escapeSqlIdentifier(resolvedColumns.orderColumn)})`
-            : 'NULL';
-        const queryPlans: LevelOptionQueryConfig[] = [
-            {
-                sqlText: `
-                    SELECT
-                        LTRIM(RTRIM(CAST(LevelGroupNo AS nvarchar(16)))) AS LevelGroupNo,
-                        LTRIM(RTRIM(CAST(LevelGroupName AS nvarchar(255)))) AS LevelGroupName,
-                        ${delayOrderExpression} AS LevelDelayOrder
-                    FROM MP_LevelGroup
-                    WHERE 1 = 1${activeFilter}
-                    ORDER BY
-                        COALESCE(${delayOrderExpression}, -9999) DESC,
-                        LTRIM(RTRIM(CAST(LevelGroupNo AS nvarchar(16))))
-                `
-            },
-            {
-                sqlText: `
-                    SELECT
-                        LTRIM(RTRIM(CAST(LevelGroupNo AS nvarchar(16)))) AS LevelGroupNo,
-                        LTRIM(RTRIM(CAST(LevelGroupName AS nvarchar(255)))) AS LevelGroupName,
-                        ${delayOrderExpression} AS LevelDelayOrder
-                    FROM MP_LevelGroup
-                    WHERE
-                        @AsOfDate BETWEEN
-                        COALESCE(TRY_CONVERT(date, BeginDate), @AsOfDate) AND
-                        COALESCE(TRY_CONVERT(date, EndDate), @AsOfDate)${activeFilter}
-                    ORDER BY
-                        COALESCE(${delayOrderExpression}, -9999) DESC,
-                        LTRIM(RTRIM(CAST(LevelGroupNo AS nvarchar(16))))
-                `,
-                bindAsOfDate: true
-            },
-            {
-                sqlText: `
-                    SELECT
-                        LTRIM(RTRIM(CAST(LevelGroupNo AS nvarchar(16)))) AS LevelGroupNo,
-                        LTRIM(RTRIM(CAST(LevelGroupName AS nvarchar(255)))) AS LevelGroupName,
-                        CAST(NULL AS int) AS LevelDelayOrder
-                    FROM MP_LevelGroup
-                    WHERE 1 = 1${activeFilter}
-                    ORDER BY
-                        LTRIM(RTRIM(CAST(LevelGroupNo AS nvarchar(16))))
-                `
-            }
-        ];
-
-        for (const plan of queryPlans) {
-            try {
-                const request = pool.request();
-                if (plan.bindAsOfDate) {
-                    request.input('AsOfDate', sql.Date, asOfDate);
-                }
-
-                const result = await queryAllowlistedSql(request, toAllowlistedSql(plan.sqlText));
-                const rows = Array.isArray(result.recordset) ? result.recordset as Array<Record<string, unknown>> : [];
-                const options = this.mapRetirementLevelOptions(rows);
-                if (options.length > 0) {
-                    return options;
-                }
-            } catch {
-                // Fallback to next query plan.
-            }
-        }
-
-        return [];
+    private async getRetirementLevelOptions(pool: sql.ConnectionPool): Promise<RetirementLevelOption[]> {
+        const result = await pool.request().execute('MP_RetirementLevelOptions');
+        const rows = Array.isArray(result.recordset) ? result.recordset as Array<Record<string, unknown>> : [];
+        return this.mapRetirementLevelOptions(rows);
     }
 
     private async getRateRowsByStoredProcedure(pool: sql.ConnectionPool, effectiveYearBE: number): Promise<Array<Record<string, unknown>>> {
@@ -287,37 +103,7 @@ class RetirementService {
         return !hasTypeRate || !hasBase;
     }
 
-    private buildRateRowsSql(targetEffectiveYear?: number): string {
-        const effectiveYearExpr = targetEffectiveYear === undefined ? 'EffectiveYear' : '@TargetEffectiveYear AS EffectiveYear';
-        const yearExpr = targetEffectiveYear === undefined
-            ? '[Year]'
-            : [
-                'CASE',
-                '    WHEN TRY_CONVERT(int, [Year]) < 2500 THEN TRY_CONVERT(int, [Year]) + 543',
-                '    ELSE TRY_CONVERT(int, [Year])',
-                'END AS [Year]'
-            ].join('\n');
-
-        return [
-            'SELECT',
-            '    BUSupportRateID,',
-            '    ' + effectiveYearExpr + ',',
-            '    ' + yearExpr + ',',
-            '    TypeRate,',
-            '    Rate,',
-            '    Base,',
-            '    BUSupportRateStatus,',
-            '    CreateBy,',
-            '    CreateDate,',
-            '    UpdateBy,',
-            '    UpdateDate',
-            'FROM MP_BUSupportRate',
-            'WHERE EffectiveYear = @EffectiveYear',
-            'ORDER BY [Year], TypeRate'
-        ].join('\n');
-    }
-
-    private async getRateRowsFromTable(
+    private async getRateRowsFromHelperProcedure(
         pool: sql.ConnectionPool,
         sourceEffectiveYear: number,
         targetEffectiveYear?: number
@@ -327,7 +113,7 @@ class RetirementService {
             request.input('TargetEffectiveYear', sql.Int, targetEffectiveYear);
         }
 
-        const result = await queryAllowlistedSql(request, toAllowlistedSql(this.buildRateRowsSql(targetEffectiveYear)));
+        const result = await request.execute('MP_RetirementRateRows');
         return Array.isArray(result.recordset) ? result.recordset : [];
     }
 
@@ -339,14 +125,14 @@ class RetirementService {
         let rates = await this.getRateRowsByStoredProcedure(pool, effectiveYearBE);
 
         // Some DB environments/SP versions may not return TypeRate.
-        // Fallback to direct table query so BU/Support can still be split correctly.
+        // Fallback to the helper procedure so BU/Support can still be split correctly.
         if (this.rateRowsNeedDirectFallback(rates)) {
-            rates = await this.getRateRowsFromTable(pool, effectiveYearBE);
+            rates = await this.getRateRowsFromHelperProcedure(pool, effectiveYearBE);
         }
 
         if (!rates.length && legacyEffectiveYearAD !== effectiveYearBE) {
             try {
-                rates = await this.getRateRowsFromTable(pool, legacyEffectiveYearAD, effectiveYearBE);
+                rates = await this.getRateRowsFromHelperProcedure(pool, legacyEffectiveYearAD, effectiveYearBE);
             } catch {
                 rates = [];
             }
@@ -386,20 +172,9 @@ class RetirementService {
         return this.mapRemarkRow(remarkResult.recordset?.[0] as Record<string, unknown> | undefined);
     }
 
-    private buildRemarkSql(): string {
-        return [
-            'SELECT TOP (1)',
-            '    LTRIM(RTRIM(CAST(Remark AS nvarchar(500)))) AS Remark,',
-            '    LTRIM(RTRIM(CAST(LevelGroupNo AS nvarchar(16)))) AS LevelGroupNo',
-            'FROM MP_BUSupportRateRemark',
-            'WHERE EffectiveYear = @EffectiveYear',
-            'ORDER BY TRY_CONVERT(bigint, BUSupportRateRemarkID) DESC'
-        ].join('\n');
-    }
-
     private async getRemarkFromTable(pool: sql.ConnectionPool, effectiveYear: number) {
         const request = pool.request().input('EffectiveYear', sql.Int, effectiveYear);
-        const result = await queryAllowlistedSql(request, toAllowlistedSql(this.buildRemarkSql()));
+        const result = await request.execute('MP_RetirementRemarkRaw');
 
         if (!Array.isArray(result.recordset) || result.recordset.length === 0) return null;
         return this.mapRemarkRow(result.recordset[0]);
@@ -445,7 +220,7 @@ class RetirementService {
             const rateRows = await this.getRetirementRateRows(pool, effectiveYearBE, legacyEffectiveYearAD);
             const rates = this.normalizeRetirementRateRows(rateRows, effectiveYearBE);
             const { remark, levelGroupNo } = await this.getRetirementRemark(pool, effectiveYearBE, legacyEffectiveYearAD);
-            const levelGroups = await this.getRetirementLevelOptions(pool, effectiveYearBE);
+            const levelGroups = await this.getRetirementLevelOptions(pool);
 
             return { rates, remark, levelGroupNo, levelGroups };
         } catch (err) {
@@ -510,7 +285,7 @@ class RetirementService {
             const effectiveYearBE = this.toBEYear(effectiveYear);
             const now = new Date();
             const normalizedLevelGroupNo = this.normalizeLevelGroupNo(levelGroupNo);
-            let useStoredProcedureWithTypeRate = await this.supportsTypeRateInUpsertSP(transaction);
+            let useStoredProcedureWithTypeRate = true;
 
             // 1. Upsert rates in MP_BUSupportRate
             for (const item of rates) {
@@ -529,11 +304,7 @@ class RetirementService {
             await new sql.Request(transaction)
                 .input('EffectiveYear', sql.Int, effectiveYearBE)
                 .input('LevelGroupNo', sql.VarChar(4), normalizedLevelGroupNo || null)
-                .query(`
-                    UPDATE MP_BUSupportRateRemark
-                    SET LevelGroupNo = @LevelGroupNo
-                    WHERE EffectiveYear = @EffectiveYear
-                `);
+                .execute('MP_RetirementRemarkLevelUpdate');
 
             await transaction.commit();
             return { success: true };

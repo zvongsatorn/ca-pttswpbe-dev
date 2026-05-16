@@ -2,7 +2,6 @@ import { sql, poolPromise } from '../config/db.js';
 import { sendMail, resolveMailRecipient } from './mailService.js';
 import { createMailLog } from './mailLogService.js';
 import { resetSentSapStatusForTransactions } from './sapSendStatusService.js';
-import { queryAllowlistedSql, toAllowlistedSql } from './sqlSafetyUtils.js';
 
 const sendMailWithLog = async (params: {
     recipient: string | null;
@@ -196,16 +195,7 @@ const resolveDocumentEffectiveDateFromItems = async (
     const req = new sql.Request(tx);
     req.input('TransactionNosCsv', sql.VarChar(sql.MAX), uniqueItemIds.join(','));
 
-    const res = await req.query(`
-        SELECT TransactionNo, EffectiveDate
-        FROM MP_Transactions WITH (NOLOCK)
-        WHERE TransactionNo IN (
-            SELECT LTRIM(RTRIM(value))
-            FROM STRING_SPLIT(@TransactionNosCsv, ',')
-            WHERE LTRIM(RTRIM(value)) <> ''
-        )
-          AND EffectiveDate IS NOT NULL
-    `);
+    const res = await req.execute('MP_TransactionsEffectiveDatesByNos');
 
     const rows = Array.isArray(res.recordset) ? res.recordset : [];
     if (!rows.length) {
@@ -316,13 +306,7 @@ const getDocumentTransactionAgencyId = async (
     try {
         const txReq = new sql.Request(pool);
         txReq.input('TransactionNo', sql.VarChar(10), itemId);
-        const txRes = await txReq.query(`
-            SELECT TOP 1
-                UnitReceive,
-                UnitTransfer
-            FROM MP_Transactions WITH (NOLOCK)
-            WHERE TransactionNo = @TransactionNo
-        `);
+        const txRes = await txReq.execute('MP_TransactionUnitGet');
         const txRow = txRes.recordset?.[0];
         return firstNonEmptyText(txRow?.UnitReceive, txRow?.UnitTransfer);
     } catch (error) {
@@ -404,20 +388,7 @@ const getTransactionRowsByNos = async (pool: sql.ConnectionPool, transactionNos:
         const request = new sql.Request(pool);
         request.input('TransactionNosCsv', sql.VarChar(sql.MAX), uniqueNos.join(','));
 
-        const query = `
-            SELECT
-                TransactionNo,
-                TransactionType,
-                TransactionDesc
-            FROM MP_Transactions WITH (NOLOCK)
-            WHERE TransactionNo IN (
-                SELECT LTRIM(RTRIM(value))
-                FROM STRING_SPLIT(@TransactionNosCsv, ',')
-                WHERE LTRIM(RTRIM(value)) <> ''
-            )
-        `;
-
-        const result = await queryAllowlistedSql(request, toAllowlistedSql(query));
+        const result = await request.execute('MP_TransactionLookupByNos');
         return (result.recordset || []).map((row: any) => {
             const transactionType = Number(row?.TransactionType);
             return {
@@ -691,11 +662,7 @@ const setSubmittedTransactionStatus = async (
 const verifySubmittedTransactionStatus = async (transaction: sql.Transaction, itemId: string) => {
     const verifyReq = new sql.Request(transaction);
     verifyReq.input('TransactionNo', sql.VarChar(10), itemId);
-    const verifyRes = await verifyReq.query(`
-        SELECT TOP 1 Status
-        FROM MP_Transactions WITH (NOLOCK)
-        WHERE TransactionNo = @TransactionNo
-    `);
+    const verifyRes = await verifyReq.execute('MP_TransactionStatusGet');
     const updatedStatus = Number(verifyRes.recordset?.[0]?.Status);
     if (updatedStatus !== 2) {
         throw new Error('Failed to update transaction status to 2 for itemId "' + itemId + '"');
@@ -1176,16 +1143,7 @@ const getDocumentRequester = async (pool: sql.ConnectionPool, documentNo: string
     const requesterReq = new sql.Request(pool);
     requesterReq.input('DocumentNo', sql.VarChar(13), documentNo);
     requesterReq.input('ItemID', sql.VarChar(10), itemId);
-    const requesterRes = await requesterReq.query(`
-        SELECT TOP 1
-            EmployeeID,
-            Fullname,
-            Email
-        FROM MP_DocumentItems WITH (NOLOCK)
-        WHERE DocumentNo = @DocumentNo
-          AND ItemID = @ItemID
-          AND Seqno = 0
-    `);
+    const requesterRes = await requesterReq.execute('MP_DocumentRequesterGet');
     return requesterRes.recordset?.[0] || null;
 };
 
@@ -1289,13 +1247,7 @@ export const getDocumentDetailService = async (documentNo: string, employeeId: s
         const myActiveReq = new sql.Request(pool);
         myActiveReq.input('DocumentNo', sql.VarChar(13), documentNo);
         myActiveReq.input('EmployeeID', sql.VarChar(20), employeeId);
-        const myActiveRes = await myActiveReq.query(`
-            SELECT ItemID, Seqno, EmployeeID, AuditStatus, UnitSide
-            FROM MP_DocumentItems WITH (NOLOCK)
-            WHERE DocumentNo = @DocumentNo
-              AND EmployeeID = @EmployeeID
-              AND AuditStatus = 1
-        `);
+        const myActiveRes = await myActiveReq.execute('MP_DocumentMyActiveApprovalsGet');
 
         return {
             document,
@@ -1328,7 +1280,7 @@ export const rejectAllDocumentService = async (documentNo: string, remark: strin
             // 2. Fetch all Items in Document
             const itemsReq = new sql.Request(transaction);
             itemsReq.input('DocumentNo', sql.VarChar(13), documentNo);
-            const itemsRes = await itemsReq.query('SELECT DISTINCT ItemID FROM MP_DocumentItems WHERE DocumentNo = @DocumentNo');
+            const itemsRes = await itemsReq.execute('MP_DocumentItemIdsGet');
             
             if (itemsRes.recordset && itemsRes.recordset.length > 0) {
                 // 3. For each item:
@@ -1343,20 +1295,7 @@ export const rejectAllDocumentService = async (documentNo: string, remark: strin
                     pendingSeqReq.input('DocumentNo', sql.VarChar(13), documentNo);
                     pendingSeqReq.input('ItemID', sql.VarChar(10), itemId);
                     pendingSeqReq.input('UpdateBy', sql.VarChar(20), updateBy);
-                    const pendingSeqRes = await pendingSeqReq.query(`
-                        SELECT TOP 1 Seqno
-                        FROM MP_DocumentItems WITH (NOLOCK)
-                        WHERE DocumentNo = @DocumentNo
-                          AND ItemID = @ItemID
-                          AND AuditStatus IN (0, 1)
-                        ORDER BY
-                          CASE
-                            WHEN AuditStatus = 1 AND EmployeeID = @UpdateBy THEN 0
-                            WHEN AuditStatus = 1 THEN 1
-                            ELSE 2
-                          END,
-                          Seqno ASC
-                    `);
+                    const pendingSeqRes = await pendingSeqReq.execute('MP_DocumentPendingSeqGet');
 
                     const pendingSeqno = Number(pendingSeqRes.recordset?.[0]?.Seqno);
                     if (Number.isFinite(pendingSeqno) && pendingSeqno >= 0) {
@@ -1462,25 +1401,10 @@ const getDocumentItemsForProgress = async (pool: sql.ConnectionPool, documentNo:
     return itemsReq.execute('mp_DocumentItemsDetailGet');
 };
 
-const getDocumentProgressLogsByQuery = async (pool: sql.ConnectionPool, documentNo: string) => {
+const getDocumentProgressLogsByProcedure = async (pool: sql.ConnectionPool, documentNo: string) => {
     const logsReq = new sql.Request(pool);
     logsReq.input('DocumentNo', sql.VarChar(13), documentNo);
-    const logsQuery = `
-        SELECT DISTINCT
-            di.Seqno,
-            di.EmployeeID,
-            di.Fullname,
-            di.AuditStatus,
-            di.AuditDate,
-            di.UserGroupNo,
-            di.UnitSide,
-            ug.UserGroupName
-        FROM MP_DocumentItems di
-        LEFT JOIN MP_UserGroup ug ON di.UserGroupNo = ug.UserGroupNo
-        WHERE di.DocumentNo = @DocumentNo
-        ORDER BY di.Seqno ASC
-    `;
-    return logsReq.query(logsQuery);
+    return logsReq.execute('MP_DocumentProgressLogsQuery');
 };
 
 const getDocumentLogsByProcedure = async (pool: sql.ConnectionPool, documentNo: string) => {
@@ -1517,7 +1441,7 @@ const getAllTransactionStatusLabel = (doc: Record<string, unknown>, logs: Docume
 const buildProgressDocumentRow = async (pool: sql.ConnectionPool, doc: Record<string, any>) => {
     const docNo = doc.DocumentNo;
     const itemsRes = await getDocumentItemsForProgress(pool, docNo);
-    const logsRes = await getDocumentProgressLogsByQuery(pool, docNo);
+    const logsRes = await getDocumentProgressLogsByProcedure(pool, docNo);
     const logs = logsRes.recordset || [];
     const processStage = resolveDocumentProcessStage(logs);
     const firstItem = itemsRes.recordset?.[0];

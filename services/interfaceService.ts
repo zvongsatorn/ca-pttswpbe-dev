@@ -69,7 +69,7 @@ interface ParsedTable {
 }
 
 interface HrpTableColumnsMeta {
-    schema: string;
+    schema: (typeof HRP_TABLE_SCHEMA_CANDIDATES)[number];
     columns: string[];
 }
 
@@ -489,7 +489,7 @@ const getRowBatches = <TRow>(rows: TRow[], batchSize: number): TRow[][] => {
 const insertInfoDataRows = async (rows: InfoDataBulkRow[], replaceExisting: boolean): Promise<void> => {
     const pool = await poolPromise;
     if (replaceExisting) {
-        await pool.request().query('DELETE FROM [dbo].[InfoData]');
+        await pool.request().execute('MP_InterfaceInfoDataClear');
     }
 
     const batches = getRowBatches(rows, BULK_BATCH_SIZE);
@@ -585,19 +585,8 @@ const getDatabaseTableColumns = async (tableName: HrpTargetTable): Promise<HrpTa
     const pool = await poolPromise;
     const request = pool.request()
         .input('tableName', sql.NVarChar(128), tableName);
-    const schemaParams = HRP_TABLE_SCHEMA_CANDIDATES.map((schemaName, index) => {
-        const paramName = `schema${index}`;
-        request.input(paramName, sql.NVarChar(128), schemaName);
-        return `@${paramName}`;
-    }).join(', ');
 
-    const result = await request.query(`
-            SELECT TABLE_SCHEMA, COLUMN_NAME, ORDINAL_POSITION
-            FROM INFORMATION_SCHEMA.COLUMNS
-            WHERE TABLE_NAME = @tableName
-              AND TABLE_SCHEMA IN (${schemaParams})
-            ORDER BY ORDINAL_POSITION
-        `);
+    const result = await request.execute('MP_InterfaceHrpTableColumns');
 
     type RawSchemaColumnRow = {
         TABLE_SCHEMA?: unknown;
@@ -637,7 +626,15 @@ const getDatabaseTableColumns = async (tableName: HrpTargetTable): Promise<HrpTa
         throw new Error(`ไม่พบคอลัมน์ของตาราง ${chosenSchema}.${tableName}`);
     }
 
-    return { schema: chosenSchema, columns };
+    return { schema: chosenSchema as (typeof HRP_TABLE_SCHEMA_CANDIDATES)[number], columns };
+};
+
+const createHrpBulkTable = (schema: (typeof HRP_TABLE_SCHEMA_CANDIDATES)[number], tableName: HrpTargetTable): sql.Table => {
+    if (schema === 'dbo' && tableName === 'HRP1001') return new sql.Table('[dbo].[HRP1001]');
+    if (schema === 'dbo' && tableName === 'HRP1002') return new sql.Table('[dbo].[HRP1002]');
+    if (schema === 'db_owner' && tableName === 'HRP1001') return new sql.Table('[db_owner].[HRP1001]');
+    if (schema === 'db_owner' && tableName === 'HRP1002') return new sql.Table('[db_owner].[HRP1002]');
+    throw new Error('Unsupported HRP target table');
 };
 
 const resolveDatabaseColumnIndex = (
@@ -686,7 +683,7 @@ const buildHrpRowsForInsert = (
 };
 
 const insertHrpRows = async (
-    schema: string,
+    schema: (typeof HRP_TABLE_SCHEMA_CANDIDATES)[number],
     tableName: HrpTargetTable,
     columns: string[],
     rows: Array<Array<string | null>>,
@@ -695,13 +692,13 @@ const insertHrpRows = async (
     const pool = await poolPromise;
     if (replaceExisting) {
         if (schema === 'dbo' && tableName === 'HRP1001') {
-            await pool.request().query('DELETE FROM [dbo].[HRP1001]');
+            await pool.request().execute('MP_InterfaceHrp1001DboClear');
         } else if (schema === 'dbo' && tableName === 'HRP1002') {
-            await pool.request().query('DELETE FROM [dbo].[HRP1002]');
+            await pool.request().execute('MP_InterfaceHrp1002DboClear');
         } else if (schema === 'db_owner' && tableName === 'HRP1001') {
-            await pool.request().query('DELETE FROM [db_owner].[HRP1001]');
+            await pool.request().execute('MP_InterfaceHrp1001DbOwnerClear');
         } else if (schema === 'db_owner' && tableName === 'HRP1002') {
-            await pool.request().query('DELETE FROM [db_owner].[HRP1002]');
+            await pool.request().execute('MP_InterfaceHrp1002DbOwnerClear');
         } else {
             throw new Error('Unsupported HRP target table');
         }
@@ -714,7 +711,7 @@ const insertHrpRows = async (
 
         console.info(`[InterfaceImport][${tableName}] Batch ${batchIndex + 1}/${batches.length} (${batchRows.length.toLocaleString()} rows)`);
 
-        const table = new sql.Table(`${schema}.${tableName}`);
+        const table = createHrpBulkTable(schema, tableName);
         table.create = false;
 
         columns.forEach((columnName) => {

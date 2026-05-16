@@ -1,14 +1,4 @@
 import { poolPromise, sql } from '../config/db.js';
-import {
-    bindSqlInputParams,
-    buildAllowedObjectFullName,
-    buildSqlFragmentList,
-    buildSqlInParams,
-    escapeSqlIdentifier,
-    pickColumnName,
-    queryAllowlistedSql,
-    toAllowlistedSql
-} from './sqlSafetyUtils.js';
 
 export interface CostPayload {
     orgUnitNo: string;
@@ -33,58 +23,7 @@ export interface LevelGroupOption {
     LevelGroupOrder: number | null;
 }
 
-type TableMeta = {
-    schemaName: string;
-    tableName: string;
-    fullName: string;
-    objectName: string;
-    columns: Map<string, string>;
-};
-
-type ResolvedCostTable = TableMeta & {
-    orgCol: string;
-    levelCol: string;
-    amountCol: string;
-    noteCol: string | null;
-    effectiveDateCol: string | null;
-    beginDateCol: string | null;
-    endDateCol: string | null;
-};
-
-const COST_TABLE_CANDIDATES = ['MP_CostEmployee', 'MP_CostEmp', 'CostEmployee'];
-const COST_SCHEMA_CANDIDATES = ['dbo', 'db_owner'];
-const ORG_COL_CANDIDATES = ['OrgUnitID', 'OrgUnitId', 'OrgUnitNo', 'OrgUnitNO', 'OrgUnit', 'UnitNo', 'UnitCode', 'OrgNo'];
-const LEVEL_COL_CANDIDATES = ['LevelGroupNo', 'LevelGroupNO', 'LevelNo', 'GroupNo', 'PositionLevel'];
-const EFFECTIVE_COL_CANDIDATES = ['EffectiveDate', 'CheckDate', 'DataDate', 'MonthDate', 'TranDate'];
-const BEGIN_COL_CANDIDATES = ['BeginDate', 'StartDate', 'FromDate', 'EffectiveStartDate'];
-const END_COL_CANDIDATES = ['EndDate', 'ToDate', 'EffectiveEndDate'];
-const COST_COL_CANDIDATES = ['CostEmployee', 'CostAmount', 'Amount', 'BudgetAmount', 'ExpenseAmount', 'TotalAmount', 'TotalCost', 'Cost', 'Value'];
-const NOTE_COL_CANDIDATES = ['Note', 'Remark', 'Description', 'Memo'];
-
 const BASE_TEMPLATE_HEADERS = ['OrgUnitNo', 'LevelGroupNo', 'EffectiveDate'];
-
-const buildCostOrderBySql = (resolved: ResolvedCostTable, alias = 'src'): string => {
-    const aliasPrefix = alias ? `${alias}.` : '';
-    return buildSqlFragmentList([
-        `${dateExpr(resolved, alias)} DESC`,
-        `${aliasPrefix}${escapeSqlIdentifier(resolved.orgCol)}`,
-        `${aliasPrefix}${escapeSqlIdentifier(resolved.levelCol)}`
-    ]);
-};
-
-const buildCostTableSource = (resolved: ResolvedCostTable): string => {
-    const expected = buildAllowedObjectFullName(
-        resolved.schemaName,
-        resolved.tableName,
-        COST_SCHEMA_CANDIDATES,
-        COST_TABLE_CANDIDATES,
-        'cost table'
-    );
-    if (resolved.fullName !== expected) {
-        throw new Error(`Unsupported resolved cost table source: ${resolved.objectName}`);
-    }
-    return expected;
-};
 
 const toDateString = (value: unknown): string => {
     if (!value) return '';
@@ -145,336 +84,34 @@ const getLevelGroupNameMap = async (
     return resultMap;
 };
 
-const getTableMeta = async (
-    pool: sql.ConnectionPool,
-    tableCandidates: string[]
-): Promise<TableMeta | null> => {
-    if (!tableCandidates.length) return null;
-
-    const { placeholders: tablePlaceholders, params: tableParams } = buildSqlInParams(tableCandidates.map((name) => name.toLowerCase()), 'costTable');
-    const { placeholders: schemaPlaceholders, params: schemaParams } = buildSqlInParams(COST_SCHEMA_CANDIDATES, 'costSchema');
-    const tableRequest = bindSqlInputParams(pool.request(), [...tableParams, ...schemaParams]);
-    const tableRes = await tableRequest.query(`
-        SELECT s.name AS schema_name, t.name AS table_name
-        FROM sys.tables t
-        INNER JOIN sys.schemas s ON s.schema_id = t.schema_id
-        WHERE LOWER(t.name) IN (${tablePlaceholders})
-          AND s.name IN (${schemaPlaceholders})
-    `);
-
-    const rows = Array.isArray(tableRes.recordset)
-        ? (tableRes.recordset as Array<Record<string, unknown>>)
-        : [];
-
-    if (!rows.length) return null;
-
-    let selected: Record<string, unknown> | null = null;
-    for (const candidate of tableCandidates) {
-        selected = rows.find((row) => toText(row.table_name).toLowerCase() === candidate.toLowerCase()) || null;
-        if (selected) break;
-    }
-    if (!selected) selected = rows[0];
-
-    const schemaName = toText(selected.schema_name);
-    const tableName = toText(selected.table_name);
-    if (!schemaName || !tableName) return null;
-
-    const objectName = `${schemaName}.${tableName}`;
-    const columnsRes = await pool.request()
-        .input('objectName', sql.NVarChar(300), objectName)
-        .query(`
-            SELECT c.name
-            FROM sys.columns c
-            WHERE c.object_id = OBJECT_ID(@objectName)
-        `);
-
-    const columnRows = Array.isArray(columnsRes.recordset)
-        ? (columnsRes.recordset as Array<Record<string, unknown>>)
-        : [];
-
-    const columns = new Map<string, string>();
-    columnRows.forEach((row) => {
-        const colName = toText(row.name);
-        if (!colName) return;
-        columns.set(colName.toLowerCase(), colName);
-    });
-
-    const fullName = buildAllowedObjectFullName(
-        schemaName,
-        tableName,
-        COST_SCHEMA_CANDIDATES,
-        COST_TABLE_CANDIDATES,
-        'cost table'
-    );
-
-    return {
-        schemaName,
-        tableName,
-        objectName,
-        fullName,
-        columns
-    };
-};
-
-const resolveCostTable = async (pool: sql.ConnectionPool): Promise<ResolvedCostTable> => {
-    const tableMeta = await getTableMeta(pool, COST_TABLE_CANDIDATES);
-    if (!tableMeta) {
-        throw new Error('ไม่พบตาราง Cost (MP_CostEmployee/MP_CostEmp/CostEmployee)');
-    }
-
-    const orgCol = pickColumnName(tableMeta.columns, ORG_COL_CANDIDATES);
-    const levelCol = pickColumnName(tableMeta.columns, LEVEL_COL_CANDIDATES);
-    const amountCol = pickColumnName(tableMeta.columns, COST_COL_CANDIDATES);
-    const noteCol = pickColumnName(tableMeta.columns, NOTE_COL_CANDIDATES);
-    const effectiveDateCol = pickColumnName(tableMeta.columns, EFFECTIVE_COL_CANDIDATES);
-    const beginDateCol = pickColumnName(tableMeta.columns, BEGIN_COL_CANDIDATES);
-    const endDateCol = pickColumnName(tableMeta.columns, END_COL_CANDIDATES);
-
-    if (!orgCol || !levelCol || !amountCol) {
-        throw new Error('ไม่พบคอลัมน์หลักของ Cost (OrgUnitNo/LevelGroupNo/Cost)');
-    }
-
-    if (!effectiveDateCol && !beginDateCol && !endDateCol) {
-        throw new Error('ไม่พบคอลัมน์วันที่ของ Cost');
-    }
-
-    return {
-        ...tableMeta,
-        orgCol,
-        levelCol,
-        amountCol,
-        noteCol,
-        effectiveDateCol,
-        beginDateCol,
-        endDateCol
-    };
-};
-
-const dateExpr = (resolved: ResolvedCostTable, alias = 'src'): string => {
-    const p = alias ? `${alias}.` : '';
-
-    if (resolved.effectiveDateCol) {
-        return `TRY_CONVERT(date, ${p}${escapeSqlIdentifier(resolved.effectiveDateCol)})`;
-    }
-
-    if (resolved.beginDateCol) {
-        return `TRY_CONVERT(date, ${p}${escapeSqlIdentifier(resolved.beginDateCol)})`;
-    }
-
-    return `TRY_CONVERT(date, ${p}${escapeSqlIdentifier(resolved.endDateCol || '')})`;
-};
-
-const rangeDateCondition = (resolved: ResolvedCostTable, alias = 'src'): string => {
-    const p = alias ? `${alias}.` : '';
-
-    if (resolved.beginDateCol && resolved.endDateCol) {
-        return `
-            AND @ToDate >= COALESCE(TRY_CONVERT(date, ${p}${escapeSqlIdentifier(resolved.beginDateCol)}), @FromDate)
-            AND @FromDate <= COALESCE(TRY_CONVERT(date, ${p}${escapeSqlIdentifier(resolved.endDateCol)}), @ToDate)
-        `;
-    }
-
-    if (resolved.effectiveDateCol) {
-        return `AND TRY_CONVERT(date, ${p}${escapeSqlIdentifier(resolved.effectiveDateCol)}) BETWEEN @FromDate AND @ToDate`;
-    }
-
-    if (resolved.beginDateCol) {
-        return `AND COALESCE(TRY_CONVERT(date, ${p}${escapeSqlIdentifier(resolved.beginDateCol)}), @FromDate) <= @ToDate`;
-    }
-
-    if (resolved.endDateCol) {
-        return `AND COALESCE(TRY_CONVERT(date, ${p}${escapeSqlIdentifier(resolved.endDateCol)}), @ToDate) >= @FromDate`;
-    }
-
-    return '';
-};
-
 const bindCostPayload = (
     request: sql.Request,
     payload: CostPayload,
     keyPrefix = ''
-) => {
-    const prefix = keyPrefix ? `${keyPrefix}` : '';
+): sql.Request => request
+    .input(`${keyPrefix}OrgUnitNo`, sql.NVarChar(32), payload.orgUnitNo)
+    .input(`${keyPrefix}LevelGroupNo`, sql.NVarChar(16), payload.levelGroupNo)
+    .input(`${keyPrefix}EffectiveDate`, sql.Date, payload.effectiveDate)
+    .input(`${keyPrefix}Note`, sql.NVarChar(200), toText(payload.note))
+    .input(`${keyPrefix}Cost`, sql.Decimal(18, 4), payload.cost);
 
-    request.input(`${prefix}OrgUnitNo`, sql.NVarChar(32), payload.orgUnitNo);
-    request.input(`${prefix}LevelGroupNo`, sql.NVarChar(16), payload.levelGroupNo);
-    request.input(`${prefix}EffectiveDate`, sql.Date, payload.effectiveDate);
-    request.input(`${prefix}Note`, sql.NVarChar(200), toText(payload.note));
-    request.input(`${prefix}Cost`, sql.Decimal(18, 4), payload.cost);
-};
-
-const keyMatchCondition = (resolved: ResolvedCostTable, alias = ''): string => {
-    const p = alias ? `${alias}.` : '';
-
-    const orgMatch = `LTRIM(RTRIM(CAST(${p}${escapeSqlIdentifier(resolved.orgCol)} AS nvarchar(64)))) = @OrgUnitNo`;
-    const levelMatch = `LTRIM(RTRIM(CAST(${p}${escapeSqlIdentifier(resolved.levelCol)} AS nvarchar(32)))) = @LevelGroupNo`;
-
-    if (resolved.effectiveDateCol) {
-        return `${orgMatch} AND ${levelMatch} AND TRY_CONVERT(date, ${p}${escapeSqlIdentifier(resolved.effectiveDateCol)}) = @EffectiveDate`;
-    }
-
-    if (resolved.beginDateCol) {
-        return `${orgMatch} AND ${levelMatch} AND TRY_CONVERT(date, ${p}${escapeSqlIdentifier(resolved.beginDateCol)}) = @EffectiveDate`;
-    }
-
-    return `${orgMatch} AND ${levelMatch} AND TRY_CONVERT(date, ${p}${escapeSqlIdentifier(resolved.endDateCol || '')}) = @EffectiveDate`;
-};
-
-const originalMatchCondition = (resolved: ResolvedCostTable, alias = ''): string => {
-    const p = alias ? `${alias}.` : '';
-
-    const orgMatch = `LTRIM(RTRIM(CAST(${p}${escapeSqlIdentifier(resolved.orgCol)} AS nvarchar(64)))) = @OriginalOrgUnitNo`;
-    const levelMatch = `LTRIM(RTRIM(CAST(${p}${escapeSqlIdentifier(resolved.levelCol)} AS nvarchar(32)))) = @OriginalLevelGroupNo`;
-    const costMatch = `COALESCE(TRY_CONVERT(decimal(18,4), ${p}${escapeSqlIdentifier(resolved.amountCol)}), 0) = @OriginalCost`;
-
-    if (resolved.effectiveDateCol) {
-        return `${orgMatch} AND ${levelMatch} AND TRY_CONVERT(date, ${p}${escapeSqlIdentifier(resolved.effectiveDateCol)}) = @OriginalEffectiveDate AND ${costMatch}`;
-    }
-
-    if (resolved.beginDateCol) {
-        return `${orgMatch} AND ${levelMatch} AND TRY_CONVERT(date, ${p}${escapeSqlIdentifier(resolved.beginDateCol)}) = @OriginalEffectiveDate AND ${costMatch}`;
-    }
-
-    return `${orgMatch} AND ${levelMatch} AND TRY_CONVERT(date, ${p}${escapeSqlIdentifier(resolved.endDateCol || '')}) = @OriginalEffectiveDate AND ${costMatch}`;
-};
-
-const insertCostRecord = async (
+const executeCostUpsert = async (
     pool: sql.ConnectionPool,
-    resolved: ResolvedCostTable,
-    payload: CostPayload
-): Promise<void> => {
-    const tableSource = buildCostTableSource(resolved);
-    const columns: string[] = [
-        escapeSqlIdentifier(resolved.orgCol),
-        escapeSqlIdentifier(resolved.levelCol),
-        escapeSqlIdentifier(resolved.amountCol)
-    ];
-
-    const values: string[] = ['@OrgUnitNo', '@LevelGroupNo', '@Cost'];
-
-    if (resolved.noteCol) {
-        columns.push(escapeSqlIdentifier(resolved.noteCol));
-        values.push('@Note');
-    }
-
-    if (resolved.effectiveDateCol) {
-        columns.push(escapeSqlIdentifier(resolved.effectiveDateCol));
-        values.push('@EffectiveDate');
-    }
-    if (resolved.beginDateCol) {
-        columns.push(escapeSqlIdentifier(resolved.beginDateCol));
-        values.push('@EffectiveDate');
-    }
-    if (resolved.endDateCol) {
-        columns.push(escapeSqlIdentifier(resolved.endDateCol));
-        values.push('@EffectiveDate');
-    }
-    const insertColumns = buildSqlFragmentList(columns);
-    const insertValues = buildSqlFragmentList(values);
-
-    const request = pool.request();
-    bindCostPayload(request, payload);
-
-    await queryAllowlistedSql(request, toAllowlistedSql(`
-        INSERT INTO ${tableSource} (${insertColumns})
-        VALUES (${insertValues})
-    `));
-};
-
-const updateCostByKey = async (
-    pool: sql.ConnectionPool,
-    resolved: ResolvedCostTable,
-    payload: CostPayload
-): Promise<number> => {
-    const tableSource = buildCostTableSource(resolved);
-    const setParts: string[] = [
-        `${escapeSqlIdentifier(resolved.amountCol)} = @Cost`
-    ];
-
-    if (resolved.noteCol) {
-        setParts.push(`${escapeSqlIdentifier(resolved.noteCol)} = @Note`);
-    }
-
-    if (resolved.effectiveDateCol) {
-        setParts.push(`${escapeSqlIdentifier(resolved.effectiveDateCol)} = @EffectiveDate`);
-    }
-    if (resolved.beginDateCol) {
-        setParts.push(`${escapeSqlIdentifier(resolved.beginDateCol)} = @EffectiveDate`);
-    }
-    if (resolved.endDateCol) {
-        setParts.push(`${escapeSqlIdentifier(resolved.endDateCol)} = @EffectiveDate`);
-    }
-    const updateSetSql = buildSqlFragmentList(setParts);
-
-    const request = pool.request();
-    bindCostPayload(request, payload);
-
-    const result = await queryAllowlistedSql(request, toAllowlistedSql(`
-        UPDATE ${tableSource}
-        SET ${updateSetSql}
-        WHERE ${keyMatchCondition(resolved)}
-    `));
-
-    return result.rowsAffected?.[0] || 0;
-};
-
-const existsCostByKey = async (
-    pool: sql.ConnectionPool,
-    resolved: ResolvedCostTable,
-    payload: CostPayload
-): Promise<boolean> => {
-    const tableSource = buildCostTableSource(resolved);
-    const request = pool.request();
-    bindCostPayload(request, payload);
-
-    const result = await queryAllowlistedSql(request, toAllowlistedSql(`
-        SELECT TOP (1) 1 AS exists_flag
-        FROM ${tableSource}
-        WHERE ${keyMatchCondition(resolved)}
-    `));
-
-    return Array.isArray(result.recordset) && result.recordset.length > 0;
-};
-
-const upsertWithResolved = async (
-    pool: sql.ConnectionPool,
-    resolved: ResolvedCostTable,
     payload: CostPayload
 ): Promise<'inserted' | 'updated'> => {
-    const exists = await existsCostByKey(pool, resolved, payload);
+    const result = await bindCostPayload(pool.request(), payload)
+        .output('Action', sql.NVarChar(16))
+        .execute('MP_CostRecordUpsert');
 
-    if (exists) {
-        await updateCostByKey(pool, resolved, payload);
-        return 'updated';
-    }
-
-    await insertCostRecord(pool, resolved, payload);
-    return 'inserted';
+    return result.output.Action === 'updated' ? 'updated' : 'inserted';
 };
 
 export const getCostRecordsService = async (fromDate: string, toDate: string): Promise<CostRecord[]> => {
     const pool = await poolPromise;
-    const resolved = await resolveCostTable(pool);
-    const tableSource = buildCostTableSource(resolved);
-    const orderBySql = buildCostOrderBySql(resolved, 'src');
-
-    const result = await queryAllowlistedSql(pool.request()
+    const result = await pool.request()
         .input('FromDate', sql.Date, fromDate)
-        .input('ToDate', sql.Date, toDate), toAllowlistedSql(`
-            SELECT
-                LTRIM(RTRIM(CAST(src.${escapeSqlIdentifier(resolved.orgCol)} AS nvarchar(64)))) AS OrgUnitNo,
-                LTRIM(RTRIM(CAST(src.${escapeSqlIdentifier(resolved.levelCol)} AS nvarchar(32)))) AS LevelGroupNo,
-                CONVERT(varchar(10), ${dateExpr(resolved, 'src')}, 23) AS EffectiveDate,
-                ${resolved.noteCol
-                    ? `COALESCE(CAST(src.${escapeSqlIdentifier(resolved.noteCol)} AS nvarchar(200)), '')`
-                    : `CAST('' AS nvarchar(200))`
-                } AS Note,
-                CAST(COALESCE(TRY_CONVERT(decimal(18,4), src.${escapeSqlIdentifier(resolved.amountCol)}), 0) AS decimal(18,4)) AS Cost
-            FROM ${tableSource} src
-            WHERE 1 = 1
-            ${rangeDateCondition(resolved, 'src')}
-            ORDER BY ${orderBySql}
-        `));
+        .input('ToDate', sql.Date, toDate)
+        .execute('MP_CostRecordList');
 
     const rows = Array.isArray(result.recordset)
         ? (result.recordset as Array<Record<string, unknown>>)
@@ -491,21 +128,19 @@ export const getCostRecordsService = async (fromDate: string, toDate: string): P
 
 export const upsertCostRecordService = async (payload: CostPayload): Promise<'inserted' | 'updated'> => {
     const pool = await poolPromise;
-    const resolved = await resolveCostTable(pool);
-    return upsertWithResolved(pool, resolved, payload);
+    return executeCostUpsert(pool, payload);
 };
 
 export const importCostRowsService = async (
     rows: CostPayload[]
 ): Promise<{ inserted: number; updated: number; total: number }> => {
     const pool = await poolPromise;
-    const resolved = await resolveCostTable(pool);
 
     let inserted = 0;
     let updated = 0;
 
     for (const row of rows) {
-        const action = await upsertWithResolved(pool, resolved, row);
+        const action = await executeCostUpsert(pool, row);
         if (action === 'inserted') inserted += 1;
         if (action === 'updated') updated += 1;
     }
@@ -522,69 +157,24 @@ export const updateCostRecordService = async (
     next: CostPayload
 ): Promise<boolean> => {
     const pool = await poolPromise;
-    const resolved = await resolveCostTable(pool);
-    const tableSource = buildCostTableSource(resolved);
-    const orderBySql = buildCostOrderBySql(resolved, '');
+    const result = await bindCostPayload(
+        bindCostPayload(pool.request(), original, 'Original'),
+        next,
+        'Next'
+    )
+        .output('RowsAffected', sql.Int)
+        .execute('MP_CostRecordUpdateOriginal');
 
-    const setParts: string[] = [
-        `${escapeSqlIdentifier(resolved.orgCol)} = @NextOrgUnitNo`,
-        `${escapeSqlIdentifier(resolved.levelCol)} = @NextLevelGroupNo`,
-        `${escapeSqlIdentifier(resolved.amountCol)} = @NextCost`
-    ];
-
-    if (resolved.noteCol) {
-        setParts.push(`${escapeSqlIdentifier(resolved.noteCol)} = @NextNote`);
-    }
-
-    if (resolved.effectiveDateCol) {
-        setParts.push(`${escapeSqlIdentifier(resolved.effectiveDateCol)} = @NextEffectiveDate`);
-    }
-    if (resolved.beginDateCol) {
-        setParts.push(`${escapeSqlIdentifier(resolved.beginDateCol)} = @NextEffectiveDate`);
-    }
-    if (resolved.endDateCol) {
-        setParts.push(`${escapeSqlIdentifier(resolved.endDateCol)} = @NextEffectiveDate`);
-    }
-    const updateSetSql = buildSqlFragmentList(setParts);
-
-    const request = pool.request();
-    bindCostPayload(request, original, 'Original');
-    bindCostPayload(request, next, 'Next');
-
-    const result = await queryAllowlistedSql(request, toAllowlistedSql(`
-        ;WITH target AS (
-            SELECT TOP (1) *
-            FROM ${tableSource}
-            WHERE ${originalMatchCondition(resolved)}
-            ORDER BY ${orderBySql}
-        )
-        UPDATE target
-        SET ${updateSetSql}
-    `));
-
-    return (result.rowsAffected?.[0] || 0) > 0;
+    return Number(result.output.RowsAffected || 0) > 0;
 };
 
 export const deleteCostRecordService = async (original: CostPayload): Promise<boolean> => {
     const pool = await poolPromise;
-    const resolved = await resolveCostTable(pool);
-    const tableSource = buildCostTableSource(resolved);
-    const orderBySql = buildCostOrderBySql(resolved, '');
+    const result = await bindCostPayload(pool.request(), original, 'Original')
+        .output('RowsAffected', sql.Int)
+        .execute('MP_CostRecordDeleteOriginal');
 
-    const request = pool.request();
-    bindCostPayload(request, original, 'Original');
-
-    const result = await queryAllowlistedSql(request, toAllowlistedSql(`
-        ;WITH target AS (
-            SELECT TOP (1) *
-            FROM ${tableSource}
-            WHERE ${originalMatchCondition(resolved)}
-            ORDER BY ${orderBySql}
-        )
-        DELETE FROM target
-    `));
-
-    return (result.rowsAffected?.[0] || 0) > 0;
+    return Number(result.output.RowsAffected || 0) > 0;
 };
 
 export const getCostTemplateMetaService = async (): Promise<{
@@ -592,23 +182,18 @@ export const getCostTemplateMetaService = async (): Promise<{
     table: string;
     mappings: Record<string, string | null>;
 }> => {
-    const pool = await poolPromise;
-    const resolved = await resolveCostTable(pool);
     const headers = [...BASE_TEMPLATE_HEADERS];
-    if (resolved.noteCol) {
-        headers.push('Note');
-    }
-    headers.push('Cost');
+    headers.push('Note', 'Cost');
 
     return {
         headers,
-        table: `${resolved.schemaName}.${resolved.tableName}`,
+        table: 'dbo.MP_CostEmployee',
         mappings: {
-            OrgUnitNo: resolved.orgCol,
-            LevelGroupNo: resolved.levelCol,
-            EffectiveDate: resolved.effectiveDateCol || resolved.beginDateCol || resolved.endDateCol,
-            Note: resolved.noteCol,
-            Cost: resolved.amountCol
+            OrgUnitNo: 'OrgUnitNo',
+            LevelGroupNo: 'LevelGroupNo',
+            EffectiveDate: 'EffectiveDate',
+            Note: 'Note',
+            Cost: 'TotalCost'
         }
     };
 };
@@ -623,20 +208,7 @@ export const getCostLevelGroupsService = async (effectiveDate: string): Promise<
 
     request.input('EffectiveDate', sql.Date, effectiveDate);
 
-    const result = await request.query(`
-        SELECT
-            LTRIM(RTRIM(CAST(LevelGroupNo AS nvarchar(16)))) AS LevelGroupNo,
-            LTRIM(RTRIM(CAST(LevelGroupName AS nvarchar(255)))) AS LevelGroupName,
-            TRY_CONVERT(int, LevelGroupOrder) AS LevelGroupOrder
-        FROM MP_LevelGroup
-        WHERE
-            @EffectiveDate BETWEEN
-            COALESCE(TRY_CONVERT(date, BeginDate), @EffectiveDate) AND
-            COALESCE(TRY_CONVERT(date, EndDate), @EffectiveDate)
-        ORDER BY
-            COALESCE(TRY_CONVERT(int, LevelGroupOrder), 9999),
-            LTRIM(RTRIM(CAST(LevelGroupNo AS nvarchar(16))))
-    `);
+    const result = await request.execute('MP_CostLevelGroupOptions');
 
     const rows = Array.isArray(result.recordset)
         ? (result.recordset as Array<Record<string, unknown>>)

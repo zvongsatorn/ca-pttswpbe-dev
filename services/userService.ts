@@ -1,5 +1,4 @@
 import { sql, poolPromise } from '../config/db.js';
-import { queryAllowlistedSql, toAllowlistedSql } from './sqlSafetyUtils.js';
 
 export const getUserOtherService = async () => {
     try {
@@ -70,14 +69,7 @@ export const updateUserOtherService = async (employeeId: string, fullName: strin
         request.input('UpdateBy', sql.VarChar(50), updateBy);
         request.input('UpdateDate', sql.DateTime, now);
 
-        await queryAllowlistedSql(request, toAllowlistedSql(`
-            UPDATE MP_UserOther
-            SET FullName = @FullName,
-                Email = @Email,
-                UpdateBy = @UpdateBy,
-                UpdateDate = @UpdateDate
-            WHERE EmployeeID = @EmployeeID
-        `));
+        await request.execute('MP_UserOtherUpdate');
         return { success: true };
     } catch (error) {
         console.error('Error executing MP_UserOther update:', error);
@@ -91,22 +83,11 @@ export const getUserWithPassword = async (employeeId: string) => {
         if (!normalizedEmployeeId) return null;
 
         const pool = await poolPromise;
-        const userRequest = pool.request()
-            .input('EmployeeID', sql.VarChar, normalizedEmployeeId);
-        const result = await queryAllowlistedSql(userRequest, toAllowlistedSql('SELECT * FROM MP_User WHERE EmployeeID = @EmployeeID'));
+        const result = await pool.request()
+            .input('EmployeeID', sql.VarChar(50), normalizedEmployeeId)
+            .execute('MP_UserWithPasswordGet');
 
-        if (result.recordset[0]) return result.recordset[0];
-
-        // Fallback for case-sensitive databases: compare using normalized lowercase.
-        const fallbackRequest = pool.request()
-            .input('EmployeeID', sql.VarChar, normalizedEmployeeId);
-        const fallback = await queryAllowlistedSql(fallbackRequest, toAllowlistedSql(`
-                SELECT TOP 1 *
-                FROM MP_User
-                WHERE LTRIM(RTRIM(LOWER(EmployeeID))) = LTRIM(RTRIM(LOWER(@EmployeeID)))
-            `));
-
-        return fallback.recordset[0] || null;
+        return result.recordset[0] || null;
     } catch (error) {
         console.error('Error in getUserWithPassword:', error);
         return null;
@@ -119,21 +100,11 @@ export const checkUserOther = async (employeeId: string) => {
         if (!normalizedEmployeeId) return null;
 
         const pool = await poolPromise;
-        const otherRequest = pool.request()
-            .input('EmployeeID', sql.VarChar, normalizedEmployeeId);
-        const result = await queryAllowlistedSql(otherRequest, toAllowlistedSql('SELECT * FROM MP_UserOther WHERE EmployeeID = @EmployeeID'));
+        const result = await pool.request()
+            .input('EmployeeID', sql.VarChar(50), normalizedEmployeeId)
+            .execute('MP_UserOtherByEmployeeGet');
 
-        if (result.recordset[0]) return result.recordset[0];
-
-        const fallbackRequest = pool.request()
-            .input('EmployeeID', sql.VarChar, normalizedEmployeeId);
-        const fallback = await queryAllowlistedSql(fallbackRequest, toAllowlistedSql(`
-                SELECT TOP 1 *
-                FROM MP_UserOther
-                WHERE LTRIM(RTRIM(LOWER(EmployeeID))) = LTRIM(RTRIM(LOWER(@EmployeeID)))
-            `));
-
-        return fallback.recordset[0] || null;
+        return result.recordset[0] || null;
     } catch (error) {
         console.error('Error in checkUserOther:', error);
         return null;
@@ -167,7 +138,7 @@ export const updateUserProfilePicture = async (employeeId: string, filename: str
         request.input('EmployeeID', sql.VarChar(50), employeeId);
         request.input('ProfilePicture', sql.VarChar(50), filename);
 
-        await queryAllowlistedSql(request, toAllowlistedSql('UPDATE MP_User SET ProfilePicture = @ProfilePicture WHERE EmployeeID = @EmployeeID'));
+        await request.execute('MP_UserProfilePictureUpdate');
         return { success: true };
     } catch (error) {
         console.error('Error in updateUserProfilePicture:', error);

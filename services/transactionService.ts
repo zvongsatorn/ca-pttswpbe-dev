@@ -157,13 +157,7 @@ const supportsStoredProcedureParameter = async (
         const request = new sql.Request(pool);
         request.input('SpecificName', sql.NVarChar(128), procedureName);
         request.input('ParameterName', sql.NVarChar(128), normalizedParam);
-        const result = await request.query(`
-            SELECT TOP 1 1 AS ExistsFlag
-            FROM INFORMATION_SCHEMA.PARAMETERS
-            WHERE SPECIFIC_SCHEMA = 'dbo'
-              AND SPECIFIC_NAME = @SpecificName
-              AND PARAMETER_NAME = @ParameterName
-        `);
+        const result = await request.execute('MP_ProcedureParameterExists');
         const supported = (result.recordset || []).length > 0;
         storedProcedureParameterSupportCache.set(cacheKey, supported);
         return supported;
@@ -422,15 +416,7 @@ const hasApprovedRemarkForUnitInMonth = async (
     const request = new sql.Request(transaction);
     request.input('EffectiveDate', sql.Date, toSqlDateOnly(effectiveDate));
     request.input('UnitReceive', sql.VarChar(8), unitNo);
-    const result = await request.query(`
-        SELECT TOP 1 t.TransactionNo
-        FROM MP_Transactions t WITH (NOLOCK)
-        WHERE
-            t.TransactionType = 5
-            AND ISNULL(t.Status, 0) = 3
-            AND CONVERT(date, t.EffectiveDate) = @EffectiveDate
-            AND ISNULL(LTRIM(RTRIM(t.UnitReceive)), '') = @UnitReceive
-    `);
+    const result = await request.execute('MP_ApprovedRemarkForUnitInMonthExists');
 
     return (result.recordset || []).length > 0;
 };
@@ -893,27 +879,7 @@ const lookupDirectApproveTransactions = async (
     const txLookupReq = new sql.Request(transaction);
     txLookupReq.input('TransactionNosCsv', sql.VarChar(sql.MAX), toTransactionNoCsv(transactionNos));
 
-    const txLookupRes = await txLookupReq.query(`
-        SELECT
-            t.TransactionNo,
-            t.EffectiveDate,
-            t.TransactionType,
-            t.RefTransactionNo,
-            CASE
-                WHEN EXISTS (
-                    SELECT 1
-                    FROM MP_DocumentItems di WITH (NOLOCK)
-                    WHERE di.ItemID = t.TransactionNo
-                ) THEN 1
-                ELSE 0
-            END AS HasDocument
-        FROM MP_Transactions t WITH (NOLOCK)
-        WHERE t.TransactionNo IN (
-            SELECT LTRIM(RTRIM(value))
-            FROM STRING_SPLIT(@TransactionNosCsv, ',')
-            WHERE LTRIM(RTRIM(value)) <> ''
-        )
-    `);
+    const txLookupRes = await txLookupReq.execute('MP_DirectApproveTransactionsLookup');
 
     return txLookupRes.recordset || [];
 };
@@ -932,21 +898,7 @@ const lookupReturnParentDocuments = async (
         sql.VarChar(sql.MAX),
         toTransactionNoCsv(returnRows.map((row) => normalizeText(row.TransactionNo).substring(0, 10)).filter((txNo) => /^[A-Za-z0-9_-]+$/.test(txNo)))
     );
-    const returnParentRes = await returnParentReq.query(`
-        SELECT
-            t.TransactionNo,
-            dBorrow.DocumentNo AS ParentDocumentNo
-        FROM MP_Transactions t WITH (NOLOCK)
-        LEFT JOIN MP_DocumentItems diBorrow WITH (NOLOCK)
-            ON diBorrow.ItemID = t.RefTransactionNo
-        LEFT JOIN MP_Document dBorrow WITH (NOLOCK)
-            ON dBorrow.DocumentNo = diBorrow.DocumentNo
-        WHERE t.TransactionNo IN (
-            SELECT LTRIM(RTRIM(value))
-            FROM STRING_SPLIT(@ReturnTransactionNosCsv, ',')
-            WHERE LTRIM(RTRIM(value)) <> ''
-        )
-    `);
+    const returnParentRes = await returnParentReq.execute('MP_ReturnParentDocumentsLookup');
     (returnParentRes.recordset || []).forEach((row: any) => {
         const txNo = normalizeText(row?.TransactionNo).substring(0, 10);
         const parentDocumentNo = normalizeText(row?.ParentDocumentNo).substring(0, 13);
@@ -1135,21 +1087,7 @@ const getReturnedAmountByBorrowTx = async (pool: sql.ConnectionPool, borrowTrans
         toTransactionNoCsv(borrowTransactionNos.map((txNo) => normalizeText(txNo).substring(0, 10)).filter((txNo) => /^[A-Za-z0-9_-]+$/.test(txNo)))
     );
 
-    const pendingSql = `
-        SELECT
-            RefTransactionNo,
-            SUM(CAST(ISNULL(Amount, 0) AS INT)) AS ReturnedAmount
-        FROM MP_Transactions WITH (NOLOCK)
-        WHERE TransactionType = 7
-          AND Status IN (1, 2, 3)
-          AND RefTransactionNo IN (
-              SELECT LTRIM(RTRIM(value))
-              FROM STRING_SPLIT(@BorrowTransactionNosCsv, ',')
-              WHERE LTRIM(RTRIM(value)) <> ''
-          )
-        GROUP BY RefTransactionNo
-    `;
-    const pendingRes = await pendingReq.query(pendingSql);
+    const pendingRes = await pendingReq.execute('MP_ReturnedAmountByBorrowTransactions');
     (pendingRes.recordset || []).forEach((row: any) => {
         const refNo = String(row?.RefTransactionNo || '').trim();
         if (refNo) returnedAmountByBorrowTx.set(refNo, toFiniteNumber(row?.ReturnedAmount));
@@ -1393,27 +1331,7 @@ const getTransactionNosFromRows = (rows: any[]) => Array.from(
 const getReturnTransactionDetails = async (pool: sql.ConnectionPool, transactionNos: string[]) => {
     const detailReq = new sql.Request(pool);
     detailReq.input('ReturnTransactionNosCsv', sql.VarChar(sql.MAX), toTransactionNoCsv(transactionNos));
-    const detailSql = `
-        SELECT
-            t.TransactionNo,
-            t.EffectiveDate,
-            t.TransactionDesc,
-            t.UnitReceive,
-            t.UnitTransfer,
-            t.PoolRsFlag,
-            t.StrgFlag,
-            t.BSType,
-            t.SpecFlag,
-            t.LineStaffFlag
-        FROM MP_Transactions t WITH (NOLOCK)
-        WHERE t.TransactionNo IN (
-            SELECT LTRIM(RTRIM(value))
-            FROM STRING_SPLIT(@ReturnTransactionNosCsv, ',')
-            WHERE LTRIM(RTRIM(value)) <> ''
-        )
-    `;
-
-    const detailResult = await detailReq.query(detailSql);
+    const detailResult = await detailReq.execute('MP_ReturnTransactionDetailsByNos');
     const detailMap = new Map<string, any>();
     (detailResult.recordset || []).forEach((row: any) => {
         const txNo = String(row?.TransactionNo || '').trim();

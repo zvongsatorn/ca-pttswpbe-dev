@@ -76,35 +76,7 @@ class UserGroupService {
 
     private async getAllUsersFallback() {
         const pool = await poolPromise;
-        const result = await pool.request().query(`
-            DECLARE @nameCol sysname;
-
-            SELECT TOP (1) @nameCol = COLUMN_NAME
-            FROM INFORMATION_SCHEMA.COLUMNS
-            WHERE TABLE_NAME = 'MP_User'
-              AND COLUMN_NAME IN ('NameAll', 'Name', 'FullName', 'DisplayName')
-            ORDER BY CASE COLUMN_NAME
-                WHEN 'NameAll' THEN 1
-                WHEN 'Name' THEN 2
-                WHEN 'FullName' THEN 3
-                WHEN 'DisplayName' THEN 4
-                ELSE 99
-            END;
-
-            DECLARE @sql nvarchar(max) = N'
-                SELECT
-                    LTRIM(RTRIM(CAST(EmployeeID AS nvarchar(50)))) AS EmployeeID,
-                    COALESCE(
-                        NULLIF(LTRIM(RTRIM(CAST(' + QUOTENAME(ISNULL(@nameCol, 'EmployeeID')) + N' AS nvarchar(255)))), ''''),
-                        LTRIM(RTRIM(CAST(EmployeeID AS nvarchar(50))))
-                    ) AS NameAll
-                FROM MP_User
-                WHERE EmployeeID IS NOT NULL
-                ORDER BY EmployeeID;
-            ';
-
-            EXEC sp_executesql @sql;
-        `);
+        const result = await pool.request().execute('MP_UserListFallback');
 
         return this.normalizeUserRows(result.recordset);
     }
@@ -180,11 +152,11 @@ class UserGroupService {
             const result = await pool.request().execute('mp_UserGet');
             return this.normalizeUserRows(result.recordset);
         } catch (spError) {
-            console.warn('[UserGroupService.getAllUsers] mp_UserGet failed, using MP_User fallback query.', spError);
+            console.warn('[UserGroupService.getAllUsers] mp_UserGet failed, using MP_UserListFallback.', spError);
             try {
                 return await this.getAllUsersFallback();
             } catch (fallbackError) {
-                console.error('[UserGroupService.getAllUsers] Fallback query failed.', fallbackError);
+                console.error('[UserGroupService.getAllUsers] MP_UserListFallback failed.', fallbackError);
                 return [];
             }
         }
